@@ -1,0 +1,17 @@
+{
+  "name": "farever-mods-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static checks and a Lua-VM test harness for the farever-mods plugins",
+  "type": "commonjs",
+  "license": "MIT",
+  "scripts": {
+    "check": "node check-plugins.mjs",
+    "test": "node run-harness.mjs",
+    "all": "node check-plugins.mjs && node run-harness.mjs"
+  },
+  "dependencies": {
+    "fengari": "^0.1.5",
+    "luaparse": "^0.3.1"
+  }
+}
