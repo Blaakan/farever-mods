@@ -261,7 +261,13 @@ DWORD WINAPI worker(LPVOID) {
             for (int i = 0; i < 30 && !g_stop; i++) Sleep(1000);
         } else {
             reported = false;
-            for (int i = 0; i < 10 && !g_stop; i++) Sleep(1000);
+            // Back off on repeated failure. A full scan is ~40s of memory
+            // traffic; retrying it every 10s while the player sits at a
+            // loading screen is pure waste and floods the log.
+            static int misses = 0;
+            if (misses < 30) misses++;
+            int wait = 10 + misses * 10;   // 20s .. 5min
+            for (int i = 0; i < wait && !g_stop; i++) Sleep(1000);
         }
     }
     return 0;

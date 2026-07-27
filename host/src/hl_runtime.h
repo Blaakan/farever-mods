@@ -95,7 +95,13 @@ std::string obj_class_name_of_type(const void* type);
 // Locates objects by class name with a read-only memory scan; deliberately no
 // hooks. See hl_scan.cpp for why.
 void* find_type_by_name(const char* cls);
-std::vector<void*> find_instances_of_type(void* type, size_t max_hits);
+
+// Returns the first object of `type` for which `pred` holds. Validating during
+// the scan matters: most qwords equal to a type pointer are metadata
+// references, not instances, so a plain "collect the first N" never reaches a
+// real object.
+using InstancePred = bool (*)(void* candidate, void* ctx);
+void* find_instance_of_type_where(void* type, InstancePred pred, void* ctx);
 
 // --- Haxe container helpers -------------------------------------------------
 

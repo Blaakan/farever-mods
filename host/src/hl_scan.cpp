@@ -73,10 +73,14 @@ std::vector<Region> heap_regions() {
 
 // Copies a region in bounded chunks so one unmapped page does not lose the
 // whole region, and so peak scratch stays small.
+//
+// The buffer is hoisted out of the loop: a real session has ~10k regions, and
+// allocating a megabyte per region was pure churn. Scan-only, single-threaded,
+// so a function-local static is safe here.
 template <typename Fn>
 void for_each_chunk(const Region& r, Fn&& fn) {
     constexpr size_t kChunk = 1 << 20;
-    std::vector<uint8_t> buf(kChunk + 16);
+    static std::vector<uint8_t> buf(kChunk + 16);
     for (size_t off = 0; off < r.size; off += kChunk) {
         size_t n = (std::min)(kChunk, r.size - off);
         if (!mem_read(r.base + off, buf.data(), n)) continue;
@@ -177,29 +181,44 @@ std::string obj_class_name_of_type(const void* type) {
     return read_utf16(name, 128);
 }
 
-// Phase 3: instances whose first qword is `type`.
-std::vector<void*> find_instances_of_type(void* type, size_t max_hits) {
-    std::vector<void*> out;
-    if (!type) return out;
+// Phase 3: find an instance whose first qword is `type` AND which satisfies
+// `pred`.
+//
+// A qword equal to the type pointer is NOT necessarily an object: the type
+// table, proto arrays and type parameters of other types all reference it too.
+// An earlier version simply collected the first 64 matches and stopped - it
+// filled its cap inside the first region in 47ms, entirely on metadata, and
+// never reached a real instance. So candidates are now validated as they are
+// found, and the scan runs until something passes rather than until an
+// arbitrary count is reached.
+void* find_instance_of_type_where(void* type, InstancePred pred, void* ctx) {
+    if (!type) return nullptr;
     const uintptr_t want = (uintptr_t)type;
     const DWORD t0 = GetTickCount();
 
+    size_t candidates = 0;
+    void* found = nullptr;
+
     for (const auto& r : heap_regions()) {
+        if (found) break;
         for_each_chunk(r, [&](uint8_t* base, uint8_t* buf, size_t n) {
-            if (out.size() >= max_hits) return;
+            if (found) return;
             for (size_t i = 0; i + 8 <= n; i += 8) {
                 uintptr_t v;
                 memcpy(&v, buf + i, 8);
-                if (v == want) {
-                    out.push_back(base + i);
-                    if (out.size() >= max_hits) return;
+                if (v != want) continue;
+                candidates++;
+                void* cand = base + i;
+                if (pred(cand, ctx)) {
+                    found = cand;
+                    return;
                 }
             }
         });
-        if (out.size() >= max_hits) break;
     }
-    host_log("scan: instances=%zu (%lums)", out.size(), GetTickCount() - t0);
-    return out;
+    host_log("scan: instances checked=%zu match=%p (%lums)", candidates, found,
+             GetTickCount() - t0);
+    return found;
 }
 
 }  // namespace fmk

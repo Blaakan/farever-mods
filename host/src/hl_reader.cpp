@@ -89,33 +89,42 @@ bool reader_locate_hero(bool force_rescan) {
     if (!force_rescan && g_hero && obj_is(g_hero, "ent.Hero")) return true;
 
     g_hero = nullptr;
-    // The local Hero is one of possibly several ent.Hero instances (party
-    // members stream in as Heroes too). Prefer one whose `player` chain
-    // actually resolves to an AccountProgress - only the local player has one.
-    auto hits = find_instances_of_type(g_hero_type, 64);
-    host_log("reader: %zu ent.Hero instance(s)", hits.size());
+    // The local Hero is one of several ent.Hero instances (party members
+    // stream in as Heroes too), and most qwords matching the type pointer are
+    // metadata rather than objects. Validate during the scan: accept only a
+    // candidate whose player chain resolves all the way to an
+    // AccountProgress, which only the local player has.
+    g_hero = find_instance_of_type_where(
+        g_hero_type,
+        [](void* cand, void*) -> bool {
+            void* player = read_ptr(cand, off::ent_Hero::player);
+            if (!obj_is(player, "st.Player")) return false;
+            void* ap = read_ptr(player, off::st_Player::accountProgress);
+            return obj_is(ap, "st.player.AccountProgress");
+        },
+        nullptr);
 
-    int with_player = 0;
-    for (void* h : hits) {
-        void* player = read_ptr(h, off::ent_Hero::player);
-        if (!obj_is(player, "st.Player")) continue;
-        with_player++;
-        void* ap = read_ptr(player, off::st_Player::accountProgress);
-        if (!obj_is(ap, "st.player.AccountProgress")) continue;
-        g_hero = h;
-        host_log("reader: local hero %p (player %p)", h, player);
+    if (g_hero) {
+        host_log("reader: local hero %p", g_hero);
         return true;
     }
-    // Report how far the chain got: which link broke is the whole diagnosis.
-    if (!hits.empty()) {
-        host_log("reader: no local hero - %d/%zu had an st.Player, none had "
-                 "accountProgress", with_player, hits.size());
-        // Name whatever the first instance's `player` slot actually holds, so
-        // a wrong offset shows up as a wrong class name rather than silence.
-        void* p0 = read_ptr(hits[0], off::ent_Hero::player);
+
+    // Nothing passed. Fall back to a laxer probe purely for diagnosis: find
+    // anything that at least looks like a live Hero, and report what its
+    // `player` slot actually holds - a wrong offset then surfaces as a wrong
+    // class name instead of another silence.
+    void* any = find_instance_of_type_where(
+        g_hero_type,
+        [](void* cand, void*) -> bool { return obj_is(cand, "ent.Hero"); },
+        nullptr);
+    if (any) {
+        void* p0 = read_ptr(any, off::ent_Hero::player);
         std::string cn = obj_class_name(p0);
-        host_log("reader:   hero[0]+0x%x -> %p (%s)", off::ent_Hero::player, p0,
+        host_log("reader: hero-like %p, +0x%x -> %p (%s)", any,
+                 off::ent_Hero::player, p0,
                  cn.empty() ? "<not an object>" : cn.c_str());
+    } else {
+        host_log("reader: no ent.Hero instance yet (in a loading screen?)");
     }
     return false;
 }
