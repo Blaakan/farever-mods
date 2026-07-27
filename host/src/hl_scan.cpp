@@ -26,8 +26,11 @@
 
 #include <vector>
 #include <algorithm>
+#include <unordered_set>
 
 namespace fmk {
+
+void host_log(const char* fmt, ...);
 
 namespace {
 
@@ -84,6 +87,13 @@ void for_each_chunk(const Region& r, Fn&& fn) {
 }  // namespace
 
 // Phase 1+2: class name -> hl_type*
+//
+// Each phase is one pass over the heap with O(1) set lookups. An earlier
+// version used std::find over a candidate vector inside the inner loop, which
+// turned a ~250M-iteration pass into a ~64x slower one and meant the scan
+// never finished inside a play session - the first in-game run produced no
+// reader output at all. Hence both the hash sets and the timing logs: a scan
+// this size must be able to report on itself.
 void* find_type_by_name(const char* cls) {
     // widen the needle
     std::vector<uint16_t> needle;
@@ -91,66 +101,70 @@ void* find_type_by_name(const char* cls) {
     needle.push_back(0);
     const size_t nbytes = needle.size() * 2;
 
+    const DWORD t0 = GetTickCount();
     auto regions = heap_regions();
+    size_t total = 0;
+    for (const auto& r : regions) total += r.size;
+    host_log("scan: %s - %zu regions, %.1f MB", cls, regions.size(),
+             total / (1024.0 * 1024.0));
 
     // --- phase 1: the name string -------------------------------------------
-    std::vector<uintptr_t> names;
+    std::unordered_set<uintptr_t> names;
     for (const auto& r : regions) {
         for_each_chunk(r, [&](uint8_t* base, uint8_t* buf, size_t n) {
             if (n < nbytes) return;
             for (size_t i = 0; i + nbytes <= n; i += 2) {
-                if (memcmp(buf + i, needle.data(), nbytes) == 0) {
-                    names.push_back((uintptr_t)(base + i));
-                    if (names.size() > 64) return;
+                if (buf[i] == (uint8_t)cls[0] &&
+                    memcmp(buf + i, needle.data(), nbytes) == 0) {
+                    names.insert((uintptr_t)(base + i));
                 }
             }
         });
-        if (names.size() > 64) break;
+        if (names.size() > 256) break;
     }
+    host_log("scan: phase1 names=%zu (%lums)", names.size(), GetTickCount() - t0);
     if (names.empty()) return nullptr;
 
     // --- phase 2a: hl_type_obj whose +0x10 name == one of those -------------
-    std::vector<uintptr_t> tobjs;
+    std::unordered_set<uintptr_t> tobjs;
     for (const auto& r : regions) {
         for_each_chunk(r, [&](uint8_t* base, uint8_t* buf, size_t n) {
             for (size_t i = 0; i + 8 <= n; i += 8) {
                 uintptr_t v;
                 memcpy(&v, buf + i, 8);
-                if (v && std::find(names.begin(), names.end(), v) != names.end()) {
-                    uintptr_t cand = (uintptr_t)(base + i) - hlrt::obj_name;
-                    tobjs.push_back(cand);
-                    if (tobjs.size() > 64) return;
+                if (v && names.count(v)) {
+                    tobjs.insert((uintptr_t)(base + i) - hlrt::obj_name);
                 }
             }
         });
-        if (tobjs.size() > 64) break;
+        if (tobjs.size() > 256) break;
     }
+    host_log("scan: phase2a type_objs=%zu (%lums)", tobjs.size(), GetTickCount() - t0);
     if (tobjs.empty()) return nullptr;
 
     // --- phase 2b: hl_type whose +0x08 obj == one of those, kind == HOBJ ----
+    void* found = nullptr;
     for (const auto& r : regions) {
-        void* found = nullptr;
+        if (found) break;
         for_each_chunk(r, [&](uint8_t* base, uint8_t* buf, size_t n) {
             if (found) return;
             for (size_t i = 0; i + 8 <= n; i += 8) {
                 uintptr_t v;
                 memcpy(&v, buf + i, 8);
-                if (!v) continue;
-                if (std::find(tobjs.begin(), tobjs.end(), v) == tobjs.end()) continue;
+                if (!v || !tobjs.count(v)) continue;
                 uintptr_t cand = (uintptr_t)(base + i) - hlrt::type_obj;
                 int32_t kind = read_i32((void*)cand, hlrt::type_kind);
-                if (kind == hlrt::HOBJ || kind == hlrt::HSTRUCT) {
-                    // confirm the round trip resolves back to the same name
-                    if (obj_class_name_of_type((void*)cand) == cls) {
-                        found = (void*)cand;
-                        return;
-                    }
+                if (kind != hlrt::HOBJ && kind != hlrt::HSTRUCT) continue;
+                // confirm the round trip resolves back to the same name
+                if (obj_class_name_of_type((void*)cand) == cls) {
+                    found = (void*)cand;
+                    return;
                 }
             }
         });
-        if (found) return found;
     }
-    return nullptr;
+    host_log("scan: phase2b type=%p (%lums)", found, GetTickCount() - t0);
+    return found;
 }
 
 // Resolves a class name straight from an hl_type* (as opposed to an instance).
@@ -168,6 +182,7 @@ std::vector<void*> find_instances_of_type(void* type, size_t max_hits) {
     std::vector<void*> out;
     if (!type) return out;
     const uintptr_t want = (uintptr_t)type;
+    const DWORD t0 = GetTickCount();
 
     for (const auto& r : heap_regions()) {
         for_each_chunk(r, [&](uint8_t* base, uint8_t* buf, size_t n) {
@@ -183,6 +198,7 @@ std::vector<void*> find_instances_of_type(void* type, size_t max_hits) {
         });
         if (out.size() >= max_hits) break;
     }
+    host_log("scan: instances=%zu (%lums)", out.size(), GetTickCount() - t0);
     return out;
 }
 

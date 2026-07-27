@@ -23,6 +23,8 @@
 
 namespace fmk {
 
+void host_log(const char* fmt, ...);
+
 namespace {
 
 void* g_hero_type = nullptr;
@@ -78,7 +80,11 @@ std::vector<std::string> decode_proxy_list(void* collection, uint32_t field) {
 bool reader_locate_hero(bool force_rescan) {
     if (!g_hero_type) {
         g_hero_type = find_type_by_name("ent.Hero");
-        if (!g_hero_type) return false;
+        if (!g_hero_type) {
+            host_log("reader: ent.Hero type not found (character loaded yet?)");
+            return false;
+        }
+        host_log("reader: ent.Hero type at %p", g_hero_type);
     }
     if (!force_rescan && g_hero && obj_is(g_hero, "ent.Hero")) return true;
 
@@ -87,13 +93,29 @@ bool reader_locate_hero(bool force_rescan) {
     // members stream in as Heroes too). Prefer one whose `player` chain
     // actually resolves to an AccountProgress - only the local player has one.
     auto hits = find_instances_of_type(g_hero_type, 64);
+    host_log("reader: %zu ent.Hero instance(s)", hits.size());
+
+    int with_player = 0;
     for (void* h : hits) {
         void* player = read_ptr(h, off::ent_Hero::player);
         if (!obj_is(player, "st.Player")) continue;
+        with_player++;
         void* ap = read_ptr(player, off::st_Player::accountProgress);
         if (!obj_is(ap, "st.player.AccountProgress")) continue;
         g_hero = h;
+        host_log("reader: local hero %p (player %p)", h, player);
         return true;
+    }
+    // Report how far the chain got: which link broke is the whole diagnosis.
+    if (!hits.empty()) {
+        host_log("reader: no local hero - %d/%zu had an st.Player, none had "
+                 "accountProgress", with_player, hits.size());
+        // Name whatever the first instance's `player` slot actually holds, so
+        // a wrong offset shows up as a wrong class name rather than silence.
+        void* p0 = read_ptr(hits[0], off::ent_Hero::player);
+        std::string cn = obj_class_name(p0);
+        host_log("reader:   hero[0]+0x%x -> %p (%s)", off::ent_Hero::player, p0,
+                 cn.empty() ? "<not an object>" : cn.c_str());
     }
     return false;
 }
