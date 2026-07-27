@@ -274,7 +274,10 @@ DWORD WINAPI worker(LPVOID) {
     while (!g_stop) {
         // Install the render hook once the game has actually made a swap
         // chain. Doing it from here keeps DllMain and the render thread clean.
-        if (!overlay_tried && fmk::dxgi_swapchain()) {
+        // Install unconditionally: the hook is now placed on the shared
+        // vtables via throwaway objects, so it does not depend on having
+        // observed the game's swap chain first.
+        if (!overlay_tried) {
             overlay_tried = true;
             fmk::overlay_set_draw(&draw_overlay);
             fmk::overlay_install();

@@ -529,6 +529,17 @@ HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT interval,
         // Wait until the queue has been seen; without it nothing can be
         // submitted, and guessing is how overlays corrupt a device.
         if (!g_queue) return g_present_orig(sc, interval, flags);
+
+        // The device comes from the GAME's swap chain, not our probe: the
+        // probe existed only to reach the shared vtable and is long gone.
+        if (!g_dev) {
+            if (FAILED(sc->GetDevice(IID_PPV_ARGS(&g_dev))) || !g_dev) {
+                g_failed = true;
+                host_log("overlay: swap chain is not D3D12 - disabled");
+                return g_present_orig(sc, interval, flags);
+            }
+            host_log("overlay: game device %p", (void*)g_dev);
+        }
         IDXGISwapChain3* sc3 = nullptr;
         if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) {
             g_failed = true;
@@ -610,38 +621,89 @@ HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT interval,
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Install by patching the shared vtables, reached through throwaway objects.
+//
+// The first attempt tried to observe the game's swap chain by wrapping the
+// DXGI factory. The proxy did see every CreateDXGIFactory* call - including
+// dx12.hdll's - but never a swap chain, because D3D12 callers request
+// IDXGIFactory4/6 and the wrapper could only stand in for Factory/1/2, so the
+// real object passed straight through. Implementing the newer interfaces
+// would be a lot of surface to keep correct for no benefit.
+//
+// Vtables are per-class and shared by every instance, so creating our own
+// throwaway device, queue and swap chain lets us patch IDXGISwapChain::Present
+// and ID3D12CommandQueue::ExecuteCommandLists once, for everyone - including
+// the game's objects, however it chose to create them. The throwaway objects
+// are released immediately; the patch lives in dxgi/d3d12's own vtable.
 bool overlay_install() {
     if (g_ready || g_failed) return g_ready;
 
-    IDXGISwapChain* sc = dxgi_swapchain();
-    if (!sc) return false;
+    // A message-only window is enough to create a swap chain against.
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"fmk_probe";
+    RegisterClassExW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_OVERLAPPEDWINDOW,
+                                0, 0, 8, 8, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hwnd) {
+        host_log("overlay: probe window failed");
+        g_failed = true;
+        return false;
+    }
 
     ID3D12Device* dev = nullptr;
-    if (FAILED(sc->GetDevice(IID_PPV_ARGS(&dev))) || !dev) {
-        host_log("overlay: swap chain is not D3D12 - overlay disabled");
-        g_failed = true;
-        return false;
-    }
-    g_dev = dev;
+    ID3D12CommandQueue* queue = nullptr;
+    IDXGIFactory2* factory = nullptr;
+    IDXGISwapChain1* sc = nullptr;
+    bool ok = false;
 
-    // ExecuteCommandLists is slot 10 on ID3D12CommandQueue. Hooked through a
-    // throwaway queue so we can reach the vtable; every queue shares it.
-    ID3D12CommandQueue* probe = nullptr;
-    D3D12_COMMAND_QUEUE_DESC qd{};
-    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (SUCCEEDED(g_dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&probe))) && probe) {
-        if (patch_vtable(probe, 10, (void*)&hooked_exec, (void**)&g_exec_orig))
-            host_log("overlay: ExecuteCommandLists hooked");
-        probe->Release();
+    if (SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                    IID_PPV_ARGS(&dev))) && dev) {
+        D3D12_COMMAND_QUEUE_DESC qd{};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        if (SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))) && queue) {
+            // Patch ExecuteCommandLists (slot 10) - every queue shares this.
+            if (patch_vtable(queue, 10, (void*)&hooked_exec, (void**)&g_exec_orig))
+                host_log("overlay: ExecuteCommandLists hooked");
+
+            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory) {
+                DXGI_SWAP_CHAIN_DESC1 sd{};
+                sd.Width = 8;
+                sd.Height = 8;
+                sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                sd.SampleDesc.Count = 1;
+                sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                sd.BufferCount = 2;
+                sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+                if (SUCCEEDED(factory->CreateSwapChainForHwnd(queue, hwnd, &sd,
+                                                              nullptr, nullptr, &sc)) &&
+                    sc) {
+                    // Patch Present (slot 8) - shared by the game's swap chain.
+                    if (patch_vtable(sc, 8, (void*)&hooked_present,
+                                     (void**)&g_present_orig)) {
+                        host_log("overlay: Present hooked via probe swap chain");
+                        ok = true;
+                    }
+                }
+            }
+        }
     }
 
-    if (!patch_vtable(sc, 8, (void*)&hooked_present, (void**)&g_present_orig)) {
-        host_log("overlay: failed to hook Present");
+    if (sc) sc->Release();
+    if (factory) factory->Release();
+    if (queue) queue->Release();
+    if (dev) dev->Release();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+    if (!ok) {
+        host_log("overlay: install failed - staying passive");
         g_failed = true;
-        return false;
     }
-    host_log("overlay: Present hooked on swap chain %p", (void*)sc);
-    return true;
+    return ok;
 }
 
 void overlay_shutdown() { g_ready = false; }
