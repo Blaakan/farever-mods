@@ -57,22 +57,36 @@ local LANDMARK = {
     obelisk = true, respawn = true, town = true, camp = true,
 }
 
--- Heuristic classifier for the discovery log. Farever's internal item ids are
--- not publicly documented, so these are PATTERNS, not a verified list: anything
--- that does not match lands in "Unclassified" where you can see the raw id.
--- Add your own rows here as you learn the naming - that is the intended use.
+-- Classifier for the discovery log.
+--
+-- `prefixes` are anchored and come from Farever's real naming scheme, read out
+-- of the game's own HashLink bytecode by tools/scan-hlboot.mjs (Mount_Boar_05,
+-- Glider_Falcon_Blue, Feet_RKobold_FigCle_Craft, Recipe_InvisibilityPotion...).
+-- `pats` are unanchored fallbacks for families with no clean prefix.
+--
+-- Prefixes are tried before substrings, so Chest_ armor is not mistaken for a
+-- container. Anything unmatched lands in "Unclassified", where you can read
+-- the raw id and add a rule - the file hot-reloads on save.
+--
+-- Regenerate the id lists after a game patch:
+--     node tools/scan-hlboot.mjs --lua
 local ITEM_CATEGORIES = {
-    { cat = "Mounts",     pats = { "mount", "steed", "saddle", "horse", "raptor" } },
-    { cat = "Gliders",    pats = { "glider", "glide", "wing", "kite", "sail" } },
-    { cat = "Weapons",    pats = { "sword", "staff", "bow", "dagger", "axe", "mace",
-                                   "shield", "hammer", "spear", "wand" } },
-    { cat = "Armor",      pats = { "helm", "chest", "boots", "gloves", "legs",
-                                   "shoulder", "belt", "waist", "cloak", "back" } },
-    { cat = "Jewelry",    pats = { "ring", "amulet", "neck", "trinket" } },
-    { cat = "Tools",      pats = { "pickaxe", "sickle" } },
-    { cat = "Materials",  pats = { "ore", "ingot", "petal", "herb", "leather",
-                                   "hide", "cloth", "wood", "plank", "essence" } },
+    { cat = "Mounts",     prefixes = { "mount_" } },
+    { cat = "Gliders",    prefixes = { "glider_" } },
+    { cat = "Recipes",    prefixes = { "recipe_" } },
+    { cat = "Weapons",    prefixes = { "sword_", "staff_", "bow_", "daggers_",
+                                       "dagger_", "axe_", "mace_", "hammer_",
+                                       "spear_", "wand_", "book_", "shield_" } },
+    { cat = "Armor",      prefixes = { "head_", "hair_", "shoulders_", "back_",
+                                       "hands_", "waist_", "legs_", "feet_",
+                                       "chest_", "torso_" } },
+    { cat = "Jewelry",    prefixes = { "neck_", "ring_", "amulet_", "trinket_" },
+                          pats     = { "trinket" } },
+    { cat = "Tools",      prefixes = { "pickaxe", "sickle" } },
     { cat = "Consumable", pats = { "potion", "elixir", "food", "tonic", "scroll" } },
+    { cat = "Materials",  pats = { "ore", "ingot", "petal", "herb", "leather",
+                                   "hide", "cloth", "wood", "plank", "essence",
+                                   "beryl", "embroidery", "plate" } },
 }
 
 local TABS = { "Dashboard", "Nearby", "Areas", "Route", "Discoveries", "Codex", "Settings" }
@@ -504,10 +518,17 @@ end
 -- bag or on your character is recorded with the time it first appeared.
 -- ---------------------------------------------------------------------------
 
+-- Anchored prefixes win over loose substrings, so "Chest_Z1U2_Cle" is armor
+-- rather than being dragged into Materials by an unrelated substring hit.
 local function classify(kind)
     local k = lower(kind)
     for _, row in ipairs(ITEM_CATEGORIES) do
-        for _, pat in ipairs(row.pats) do
+        for _, p in ipairs(row.prefixes or {}) do
+            if string.sub(k, 1, #p) == p then return row.cat end
+        end
+    end
+    for _, row in ipairs(ITEM_CATEGORIES) do
+        for _, pat in ipairs(row.pats or {}) do
             if string.find(k, pat, 1, true) then return row.cat end
         end
     end

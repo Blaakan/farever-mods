@@ -8,6 +8,7 @@ runtime.
 |---|---|
 | **[Collection Atlas](docs/collection-atlas.md)** | Completion tracker: what collectibles exist, which you still need, and where to find them — by category, by area, with routing |
 | **[AuraForge](docs/aura-forge.md)** | A WeakAuras-style HUD: movable buff bars, cooldown bars, and rule-driven alerts |
+| **[id_scanner](docs/scanning.md)** | Discovery tool: probes the live plugin API, records every event and internal id your build exposes |
 
 Both are read-only and informational. Neither writes to the game, automates
 play, or touches the network.
@@ -96,18 +97,36 @@ That harness earned its keep: it caught a guard that tested
 `farever.waypoints` (a table) with a function check, which would have silently
 disabled every waypoint feature in game.
 
+```bash
+node tools/scan-hlboot.mjs --lua
+```
+
+Extracts the internal id vocabulary straight out of the game's HashLink
+bytecode — Farever ships interpreted, so `hlboot.dat` carries a full string
+table. On the July 2026 build that yields **63 mounts, 70 gliders, 75 chest
+types, 74 recipes, 142 statuses, 87 talents, 130 monsters** and more. This is
+where `collection_atlas.lua`'s classification prefixes come from, rather than
+guesswork.
+
+Output lands in `tools/out/`, which is gitignored — it is bulk game data.
+Commit the tool, not the haul. Details and naming conventions:
+**[docs/scanning.md](docs/scanning.md)**.
+
 ## Layout
 
 ```
 plugins/
   collection_atlas.lua     the tracker
   aura_forge.lua           the HUD
+  id_scanner.lua           API / event / id discovery
 docs/
   collection-atlas.md      usage + design notes + limitations
   aura-forge.md            usage + design notes + limitations
+  scanning.md              static + runtime discovery, naming conventions
 tools/
   check-plugins.mjs        static/sandbox checks
   run-harness.mjs          runtime tests
+  scan-hlboot.mjs          HashLink bytecode string-table extractor
   harness/mock_host.lua    mock of the plugin API
 RESEARCH.md                how Farever can be modded, with sources
 ```

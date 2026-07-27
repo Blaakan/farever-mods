@@ -2,3 +2,7 @@ node_modules/
 package-lock.json
 *.log
 *.store.lua
+
+# Extracted game data. Generated locally by tools/scan-hlboot.mjs from your own
+# install; it belongs to Shiro Games and is not ours to redistribute.
+tools/out/

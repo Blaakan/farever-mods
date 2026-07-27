@@ -105,6 +105,7 @@ subtract any either.
 | Host mod itself (`dinput8.dll`) | D3D12 overlay, read-only memory | Already solved; no reason to rebuild it |
 | Unpacking `res.pak` (QuickBMS + [Shiro_Games_PAK_script.bms](https://github.com/Sviat/qbms_shirogames)) | Assets, `data.cdb` game data | Fine for *offline inspection*. Editing game files for an online game is a bad idea |
 | Editing CastleDB `data.cdb` | Balance/content changes | Server-authoritative game — changes are cosmetic at best, ban-shaped at worst |
+| **Reading** `hlboot.dat`'s string table | The complete internal id vocabulary | **Used here.** Read-only static analysis of a file you own; changes nothing. See [docs/scanning.md](docs/scanning.md) |
 | Patching HashLink bytecode (`hlboot.dat`) | Arbitrary client changes | Deep water. Breaks on every patch, defeats the build-hash check, and is squarely "modifying the client" |
 | Memory writes / automation | — | Cheating. Not covered by the dev quote above, and not what this repo does |
 
@@ -173,10 +174,18 @@ files rather than from a wiki:
   `activity`, `dungeon`, `merchant`, and others.
 - **Four Early Access classes**: Rogue, Mage, Priest, Warrior (from
   `farever.player.class()`).
-- Gliding exists as a mechanic — `farever.player.glide_speed()` is a real
-  getter. I could **not** confirm a public list of individual gliders or mounts,
-  which is why the tracker discovers them from your inventory instead of
-  shipping a checklist.
+- **Mounts and gliders are enumerable after all.** An earlier draft of this
+  document said no public list existed. That was true of the web; it is not true
+  of the game files. Extracting the HashLink string table
+  ([`tools/scan-hlboot.mjs`](tools/scan-hlboot.mjs), see
+  [docs/scanning.md](docs/scanning.md)) yields **63 mounts** (`Mount_Boar_05`,
+  `Mount_Croco_02`, `Mount_Ladybug_Yellow`…) and **70 gliders**
+  (`Glider_Falcon_Blue`, `Glider_Butterfly_Pink`…), alongside 75 chest types,
+  74 recipes, 142 statuses, 87 talents and 130 monsters.
+- Gliding is confirmed as a mechanic independently — `farever.player.glide_speed()`
+  is a real getter.
+- Zone naming is `Z1`/`Z2`/`Z3`, with real place names in the strings:
+  `Z1_Meridion_Shore`, `Z2_Azuram_Road`, `Z2_Nescent_Hive`.
 - Roadmap for 2026 (from press coverage): two more regions, more dungeons,
   factions and reputation, world events, level cap to 50, talent trees, Druid
   and Monk classes, fishing, archaeology, guilds, an auction hall, PvP.

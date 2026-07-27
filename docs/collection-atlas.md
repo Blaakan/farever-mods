@@ -54,18 +54,29 @@ never your own.
 Every distinct item kind seen in your bag or on your character, bucketed into
 categories.
 
-There is no public master list of Farever's mounts and gliders, so this is a
-**discovery log, not a checklist**: it records what you have found rather than
-what remains. New items fire a toast when they first appear.
+It is a **discovery log, not a checklist**: it records what you have found as
+you find it. New items fire a toast when they first appear.
 
-Categories are matched by substring patterns in `ITEM_CATEGORIES` at the top of
-the plugin. Those patterns are **guesses** — Farever's internal item ids are not
-documented. Anything unmatched lands in **Unclassified**, where you can read the
-raw ids and add patterns. Editing that table and saving hot-reloads instantly:
+Categories are matched by anchored prefixes in `ITEM_CATEGORIES` at the top of
+the plugin. Those prefixes are **not guesses** — they were read out of the
+game's own HashLink bytecode by
+[`tools/scan-hlboot.mjs`](../tools/scan-hlboot.mjs), which finds 63 `Mount_*`
+ids, 70 `Glider_*`, 74 `Recipe_*` and the full armour slot set. See
+[docs/scanning.md](scanning.md).
+
+Prefixes are tried before loose substrings, so `Chest_Z1U2_Cle` is correctly
+armour rather than being pulled into another bucket. Anything unmatched lands
+in **Unclassified**, where you can read the raw ids and add a rule — editing
+the table and saving hot-reloads instantly:
 
 ```lua
-{ cat = "Mounts", pats = { "mount", "steed", "saddle", "horse", "raptor" } },
+{ cat = "Mounts", prefixes = { "mount_" } },
 ```
+
+If you want a true *checklist* — "you own 12 of 63 mounts" — run
+`node tools/scan-hlboot.mjs --lua` to generate the full id list from your own
+install and paste it in. It is left out of the shipped plugin deliberately:
+those lists are game data, not ours to redistribute.
 
 ### Codex
 Bestiary completion, recorded whenever you change target. Shows progress per
@@ -103,9 +114,9 @@ so a crash never costs you a pickup.
 
 - **Separate collected-set** from the host mod's, as above.
 - **Auto-mark is proximity-based** and can produce false positives.
-- **Item categories are pattern guesses.** Unclassified is the honest bucket.
-- **Discovery, not completion**, for mounts/gliders/gear — no master list exists
-  to measure against.
+- **Discovery, not completion**, for mounts/gliders/gear by default. The full id
+  lists *can* be extracted (see above) but are not shipped, so out of the box
+  the plugin counts what you have rather than what you lack.
 - **`farever.store` holds scalars only**, so the collected set is packed into a
   comma-joined string. A POI id containing a comma cannot round-trip; those are
   skipped with a warning in `farever-mod.log` rather than corrupting the set.

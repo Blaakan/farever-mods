@@ -377,5 +377,78 @@ try {
   console.log(`    FAIL  threw: ${e.message}`);
 }
 
+// ===========================================================================
+console.log('\nid_scanner.lua');
+// ===========================================================================
+try {
+  const { L } = boot('id_scanner.lua');
+  run(L, `MOCK.pois = MOCK.make_pois(80)`, 'pois');
+  run(
+    L,
+    `MOCK.statuses = { { kind = "Mage_ShieldOfSpark_Status", duration = 8, stacks = 1, shield_amount = 100 } }
+     MOCK.skills = { { kind = "Mage_RayOfSpark", cooldown = 8, base_cooldown = 10, charges = 1 } }
+     MOCK.inventory = { { kind = "Mount_Boar_05", stack = 1 }, { kind = "Glider_Falcon_Blue", stack = 1 } }
+     MOCK.equipment = { { kind = "Staff_Craft_C", level = 27, upgrade = 3, slot = 1, slot_name = "Weapon1" } }
+     MOCK.currencies = { { kind = "Gold", amount = 10433 } }
+     MOCK.target.exists = true
+     MOCK.target.name = "Boar_Z1W_E"`,
+    'world'
+  );
+
+  run(L, `on_init()`, 'on_init');
+
+  // The probe must find real API surface and must not fire mutators.
+  const wpBefore = num(L, '#MOCK.waypoints');
+  const toastsBefore = num(L, '#MOCK.toasts');
+  ok(num(L, '#MOCK.logs') > 0, 'probe logs a result');
+  ok(wpBefore === 0, 'probe never called waypoints.add');
+  ok(toastsBefore === 0, 'probe never fired a toast');
+
+  frames(L, 4, 0.6);
+
+  // Events, including one the plugin has no prior knowledge of.
+  run(L, `on_event("damage_dealt", { skill = "Mage_RayOfSpark", amount = 120, is_crit = true, target = "Boar_Z1W_E" })`, 'dmg');
+  run(L, `on_event("target_changed", { kind = "Skunk_Z1W" })`, 'tgt');
+  run(L, `on_event("undocumented_future_event", { mystery = 42 })`, 'unknown evt');
+  frames(L, 2, 0.6);
+
+  for (let t = 1; t <= 4; t++) {
+    run(L, `MOCK.combo["##tab"] = ${t}`, 'tab');
+    frames(L, 2, 0.6);
+  }
+  ok(true, 'all 4 tabs render without error');
+
+  const texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
+  ok(/farever\.player\.health_pct/.test(texts), 'API probe enumerates player getters', texts.slice(0, 200));
+  ok(/undocumented_future_event/.test(texts), 'captures an event it was never told about');
+  ok(/Mount_Boar_05/.test(texts), 'records item ids from inventory');
+  ok(/Boar_Z1W_E/.test(texts), 'records monster ids');
+
+  run(L, `MOCK.combo["##tab"] = 4; MOCK.clicks["Export JSON"] = true`, 'export');
+  frames(L, 1, 0.2);
+  const dump = evalLua(L, `tostring(MOCK.files["farever-api-scan.json"])`);
+  ok(dump !== 'nil', 'exports a scan file');
+  let scan = null;
+  try {
+    scan = JSON.parse(dump);
+  } catch (e) {
+    /* handled */
+  }
+  ok(scan !== null, 'scan export is valid JSON');
+  if (scan) {
+    ok(scan.api.length > 40, `api probe found ${scan.api?.length} entries`);
+    ok(!!scan.events.undocumented_future_event, 'unknown event survives into the export');
+    ok(
+      scan.vocabulary.item?.some((i) => i.id === 'Glider_Falcon_Blue'),
+      'glider id lands in the vocabulary'
+    );
+  }
+
+  ok(num(L, '#MOCK.store_bad') === 0, 'never persists a non-scalar to the store');
+} catch (e) {
+  failures++;
+  console.log(`    FAIL  threw: ${e.message}`);
+}
+
 console.log(`\n${checks} check(s), ${failures} failure(s)`);
 process.exit(failures > 0 ? 1 : 0);
