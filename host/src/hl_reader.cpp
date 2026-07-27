@@ -241,6 +241,32 @@ void read_item_array(void* array_obj, const char* source,
     for (int32_t i = 0; i < len; i++) {
         void* e = read_ptr(elems, (uint32_t)(i * 8));
         Item it;
+
+        // Slots are structural values, not items. The item hangs off a field
+        // that the bank calls "it" and inventories call "item" - same shape
+        // otherwise, so both names are accepted. `count` carries the stack.
+        std::vector<VirtualField> vf;
+        if (e && read_virtual_fields(e, &vf)) {
+            void* inner = nullptr;
+            int32_t count = 1;
+            for (const auto& f : vf) {
+                if (!f.value_ptr) continue;
+                if ((f.name == "item" || f.name == "it") && f.kind == hlrt::HOBJ) {
+                    inner = read_ptr(f.value_ptr, 0);
+                } else if (f.name == "count" && f.kind == 3 /* HI32 */) {
+                    int32_t c = read_i32(f.value_ptr, 0);
+                    if (c > 0 && c < 100000) count = c;
+                }
+            }
+            if (inner && read_item(inner, source, &it)) {
+                it.count = count;
+                out->push_back(std::move(it));
+                continue;
+            }
+            // An empty slot is normal - equipped had 30 slots for 17 items.
+            if (!inner) continue;
+        }
+
         if (read_item(e, source, &it)) {
             out->push_back(std::move(it));
         } else if (e) {

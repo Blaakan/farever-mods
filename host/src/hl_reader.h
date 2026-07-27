@@ -37,6 +37,7 @@ struct Item {
     int32_t level = 0;
     int32_t upgrade = 0;
     int32_t rarity = -1;      // -1 when the item carries no rarity field
+    int32_t count = 1;        // stack size, from the slot's `count` field
     std::string cls;          // runtime class, e.g. st.item.Weapon
     std::string source;       // bank / bankEquipment / equipped / bags
 };
