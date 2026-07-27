@@ -22,7 +22,8 @@ hlboot.dat     13.9 MB    HashLink bytecode  <- the string table lives here
 Farever.exe    290 KB     thin launcher, not the game
 libhl.dll                 HashLink VM
 fmt/sdl/ui/openal/steam/directx.hdll
-res.pak        5.15 GB    Shiro asset pack (contains res/data.cdb)
+res.pak        5.15 GB    Shiro asset pack (art, audio, prefabs, lang XML)
+res.light.pak  0.01 GB    small data pack - data.cdb (CastleDB) lives HERE
 ```
 
 A 290 KB executable next to a 14 MB `.dat` is the giveaway. Because the
@@ -148,18 +149,20 @@ across sessions, so it accumulates as you play.
 Writes the whole thing to
 `%LOCALAPPDATA%\farever-minimap\combatlogs\farever-api-scan.json`.
 
-## Not attempted: unpacking `res.pak`
+## Unpacking the `.pak` archives
 
-`res.pak` is 5.15 GB and contains `res/data.cdb` — the CastleDB file holding
-Farever's structured game data. That is the *authoritative* source: real
-display names, stats, drop tables, and the mapping from internal id to the
-name you see in game.
+Done, in-house: `tools/pak-extract.mjs` (CLI) and `tools/lib/pak.mjs`
+(library) read the Heaps pak format directly — no QuickBMS needed. One
+format subtlety cost a day: entry positions are stored as an **IEEE double**
+once the archive passes 2^31 bytes (`hxd.fmt.pak.Data.dataPosition` is a
+Float), and the data section starts at `headerSize`, after a `DATA` marker.
+Decoding those 8 bytes as two u32s extracts float soup from every large
+archive.
 
-Extracting it needs QuickBMS with
-[Shiro_Games_PAK_script.bms](https://github.com/Sviat/qbms_shirogames), the
-same route used for Northgard and Wartales. I did not do it here — it needs a
-third-party binary and a 5 GB extraction, and the bytecode string table already
-answers "what ids exist", which is what the plugins needed.
-
-It is the obvious next step if you want localized display names rather than
-internal ids.
+The prize is not in `res.pak` at all: **`data.cdb` — the full CastleDB —
+ships in `res.light.pak`** (4.9 MB of JSON). It is the authoritative source:
+every item that exists, English names and descriptions, per-kind rarity,
+loot tables, crafts, units. `res.pak` carries the per-item 256px BC7 portrait
+DDS files under `UI/Portraits/**` and the translated-language exports under
+`lang/`. `tools/gen-atlas.mjs` turns all of that into the data files the
+host's Collection Atlas UI consumes.

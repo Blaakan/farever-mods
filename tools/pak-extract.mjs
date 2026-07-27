@@ -8,14 +8,21 @@
 // Format, reversed from the bytes of res.pak:
 //
 //   "PAK" u8:version
-//   u32   headerSize          (size of the entry tree that follows)
-//   u32   unknown             (not needed to locate files)
+//   u32   headerSize          (prologue + entry tree + "DATA" marker)
+//   u32   dataSize            (low 32 bits of the data section size)
 //   entry root                (tree; the root has an empty name)
-//   ...file data...           (at dataStart + entry.dataPos)
+//   "DATA"                    (at headerSize-4)
+//   ...file data...           (at headerSize + entry.dataPos)
 //
-//   entry := u8 nameLen, char name[nameLen], u8 isDir,
-//            isDir ? u32 childCount, entry children[childCount]
-//                  : u32 dataPos, u32 size, u32 checksum
+//   entry := u8 nameLen, char name[nameLen], u8 flags
+//     flags & 1 : directory -> u32 childCount, entry children[childCount]
+//     else      : dataPos (f64 LE if flags & 2, else u32), u32 size,
+//                 u32 checksum
+//
+// The f64 position is not a guess: hxd.fmt.pak.Data stores dataPosition as
+// Float, and the writer emits it as a double once the archive passes 2^31.
+// Decoding those 8 bytes as two u32s is how the first version of this tool
+// extracted float soup from every large archive.
 //
 // Only the header is read to list or locate; file bodies are pulled with a
 // targeted seek, so a 4.8 GB archive costs a ~680 KB read to browse.
@@ -76,48 +83,51 @@ if (head8.toString('ascii', 0, 3) !== 'PAK') {
 const version = head8[3];
 const headerSize = head8.readUInt32LE(4);
 
-const header = Buffer.alloc(headerSize);
-readSync(fd, header, 0, headerSize, 12);
-
-// Data begins immediately after the 12-byte prologue plus the entry tree.
-const dataStart = 12 + headerSize;
+// headerSize spans prologue, tree and the trailing "DATA" marker; the tree
+// itself is the middle headerSize-16 bytes.
+const header = Buffer.alloc(headerSize - 16);
+readSync(fd, header, 0, headerSize - 16, 12);
+const dataStart = headerSize;
 
 const files = [];   // { path, pos, size }
 let p = 0;
 
-// The third byte is a FLAG, not a boolean:
-//   0 = file, 12 bytes follow (pos, size, checksum)
-//   1 = directory, u32 child count then that many entries
-//   2 = file, 16 bytes follow - appears once the archive grows past 2^31,
-//       so it carries a wider position. The exact field order is still
-//       being pinned down; sizes decode correctly, positions do not yet.
 function readEntry(prefix) {
   const nameLen = header[p++];
   const name = header.toString('utf8', p, p + nameLen);
   p += nameLen;
-  const flag = header[p++];
+  const flags = header[p++];
   const full = prefix ? `${prefix}/${name}` : name;
 
-  if (flag === 1) {
+  if (flags & 1) {
     const n = header.readUInt32LE(p);
     p += 4;
     for (let i = 0; i < n; i++) readEntry(full);
-  } else if (flag === 0) {
-    const pos = header.readUInt32LE(p);
-    const size = header.readUInt32LE(p + 4);
-    p += 12;
-    files.push({ path: full, pos, size, wide: false });
-  } else if (flag === 2) {
-    const w = [header.readUInt32LE(p), header.readUInt32LE(p + 4),
-               header.readUInt32LE(p + 8), header.readUInt32LE(p + 12)];
-    p += 16;
-    files.push({ path: full, pos: w[1], size: w[2], wide: true, words: w });
   } else {
-    throw new Error(`unknown entry flag ${flag} at ${p - 1} (${full})`);
+    let pos;
+    if (flags & 2) {
+      pos = header.readDoubleLE(p);   // 64-bit position, stored as f64
+      p += 8;
+    } else {
+      pos = header.readUInt32LE(p);
+      p += 4;
+    }
+    const size = header.readUInt32LE(p);
+    p += 8;   // size + checksum
+    files.push({ path: full, pos, size, wide: (flags & 2) !== 0 });
   }
 }
 
 readEntry('');
+
+{
+  const marker = Buffer.alloc(4);
+  readSync(fd, marker, 0, 4, headerSize - 4);
+  if (marker.toString('ascii') !== 'DATA') {
+    console.error(`  WARNING: no DATA marker at ${headerSize - 4} - ` +
+                  `positions may be wrong`);
+  }
+}
 
 const pakSize = statSync(pakPath).size;
 console.log(`${basename(pakPath)}  v${version}  ${(pakSize / 1e9).toFixed(2)} GB`);
@@ -148,7 +158,10 @@ function extract(entry) {
 }
 
 if (args.includes('--list')) {
-  const filter = (argOf('--list') || '').toLowerCase();
+  // `--list --get x` means "list everything", not "filter by --get".
+  const rawFilter = argOf('--list');
+  const filter = (rawFilter && !rawFilter.startsWith('--') ? rawFilter : '')
+      .toLowerCase();
   const hits = filter
     ? files.filter((f) => f.path.toLowerCase().includes(filter))
     : files;
