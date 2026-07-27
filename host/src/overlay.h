@@ -8,10 +8,9 @@
 // point than scanning for a vtable in memory.
 //
 // The drawing API is deliberately small: filled/outlined rectangles, text, and
-// textured quads (for the game's own skill icons). That is everything the two
-// mods actually need - an icon strip with countdowns, bars and stack counts.
-// There is no widget toolkit, and no plan for one: configuration lives in a
-// hot-reloaded file rather than in-game panels.
+// textured quads from loaded atlases. The Collection Atlas UI (atlas_ui.cpp)
+// builds its widgets out of these primitives; there is still no general
+// widget toolkit.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -46,7 +45,13 @@ float measure_text(float size, const char* text);
 void draw_image(int atlas, float x, float y, float w, float h,
                 float u0, float v0, float u1, float v1, Color tint);
 
-// Loads a PNG atlas from disk once and returns its handle, or -1.
+// Loads a BC7 DDS atlas (the shape tools/gen-atlas.mjs writes) and returns
+// its handle, or -1. Call only after overlay_ready(); safe from the worker
+// thread - the upload is fenced before this returns.
 int overlay_load_atlas(const char* path);
+
+// The window the game's swap chain presents to (an HWND), or null before the
+// first frame. This is where the input hook attaches.
+void* overlay_game_hwnd();
 
 }  // namespace fmk
