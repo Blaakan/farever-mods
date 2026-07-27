@@ -169,19 +169,29 @@ void host_draw(float w, float h) {
 }
 
 // One-second sleep slice shared by every wait in the worker: keeps shutdown
-// responsive, gives the UI its once-a-second persistence tick, and feeds the
-// navigator a fresh hero position (three validated qword reads - cheap).
+// responsive and gives the UI its once-a-second persistence tick.
 void worker_sleep(int seconds) {
     for (int i = 0; i < seconds && !g_stop; i++) {
         Sleep(1000);
         fmk::atlas_ui_tick();
         fmk::nav_tick();
-        double x = 0, y = 0, z = 0;
-        if (fmk::reader_read_hero_pos(&x, &y, &z))
-            fmk::nav_set_hero_pos(true, x, y, z);
-        else
-            fmk::nav_set_hero_pos(false, 0, 0, 0);
     }
+}
+
+// The navigator's arrow rotates with the hero; at the worker's cadence it
+// would visibly lag every camera turn. This thread does nothing but four
+// validated qword reads every 50ms - it never scans, never walks arrays,
+// and reuses whatever hero pointer the worker last validated.
+DWORD WINAPI pose_worker(LPVOID) {
+    while (!g_stop) {
+        double x = 0, y = 0, z = 0, rz = 0;
+        if (fmk::reader_read_hero_pose(&x, &y, &z, &rz))
+            fmk::nav_set_hero_pose(true, x, y, z, rz);
+        else
+            fmk::nav_set_hero_pose(false, 0, 0, 0, 0);
+        Sleep(50);
+    }
+    return 0;
 }
 
 // Refuse to walk pointers unless the running game is the build the offsets
@@ -253,6 +263,15 @@ DWORD WINAPI worker(LPVOID) {
         return 0;
     }
 
+    // The navigator must exist before the pose thread's first tick - its
+    // critical section is created here, and nav_set_hero_pose's g_cs_init
+    // guard is not a substitute for ordering. Pose updates only make sense
+    // once the build is verified; the thread stays a no-op until the worker
+    // has located a hero.
+    fmk::nav_init();
+    HANDLE pose = CreateThread(nullptr, 0, pose_worker, nullptr, 0, nullptr);
+    if (pose) CloseHandle(pose);   // fire-and-forget; g_stop ends it
+
     bool reported = false;
     bool overlay_tried = false;
     bool ui_ready = false;
@@ -265,7 +284,6 @@ DWORD WINAPI worker(LPVOID) {
         // observed the game's swap chain first.
         if (!overlay_tried) {
             overlay_tried = true;
-            fmk::nav_init();
             fmk::overlay_set_draw(&host_draw);
             fmk::overlay_install();
         }

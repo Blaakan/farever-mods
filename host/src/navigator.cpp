@@ -32,9 +32,10 @@ std::string g_key;                    // "" = nothing tracked
 std::string g_name;
 std::vector<NavTarget> g_targets;
 
-// Hero position, stamped by the worker about once a second.
+// Hero pose, stamped by the pose thread at ~20Hz.
 bool   g_pos_valid = false;
 double g_hx = 0, g_hy = 0, g_hz = 0;
+double g_rz = 0;                      // facing, radians
 DWORD  g_pos_tick = 0;
 constexpr DWORD kPosFreshMs = 5000;
 
@@ -160,7 +161,7 @@ void nav_tick() {
     put(L"targets", ser);
 }
 
-void nav_set_hero_pos(bool valid, double x, double y, double z) {
+void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z) {
     if (!g_cs_init) return;
     Lock lk;
     g_pos_valid = valid;
@@ -168,6 +169,7 @@ void nav_set_hero_pos(bool valid, double x, double y, double z) {
         g_hx = x;
         g_hy = y;
         g_hz = z;
+        g_rz = rot_z;
         g_pos_tick = GetTickCount();
     }
 }
@@ -222,6 +224,7 @@ void nav_draw(float screen_w, float screen_h) {
 
     char name[96], where[64], label[96];
     bool have = false, fresh = false;
+    double rel = 0;                   // radians clockwise from "dead ahead"
     {
         Lock lk;
         if (g_key.empty() || g_targets.empty()) return;
@@ -231,8 +234,19 @@ void nav_draw(float screen_w, float screen_h) {
             ? nearest_locked(g_targets.data(), (int)g_targets.size())
             : &g_targets[0];
         _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
-        if (fresh) format_to_locked(*t, where, sizeof(where));
-        else _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
+        if (fresh) {
+            format_to_locked(*t, where, sizeof(where));
+            // Bearings measured like the compass, atan2(east, north). The
+            // facing vector for rotationZ is (cos rz, sin rz) in world axes
+            // - the Heaps convention of an angle from +x. If the arrow
+            // reads mirrored or offset in game, this pair of lines is the
+            // whole calibration surface.
+            const double target_b = atan2(t->x - g_hx, t->y - g_hy);
+            const double facing_b = atan2(cos(g_rz), sin(g_rz));
+            rel = target_b - facing_b;
+        } else {
+            _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
+        }
         have = true;
     }
     if (!have) return;
@@ -243,14 +257,29 @@ void nav_draw(float screen_w, float screen_h) {
     const float size = 14;
     const float tw = measure_text(size, line);
     const float pad = 10;
-    const float w = tw + 2 * pad;
+    const float arrow_w = fresh ? 24.0f : 0.0f;
+    const float w = tw + 2 * pad + arrow_w;
     const float h = 26;
     const float x = (screen_w - w) * 0.5f;
     const float y = 14;
 
     draw_rect(x, y, w, h, {0.05f, 0.06f, 0.09f, 0.85f});
     draw_rect_outline(x, y, w, h, 1.0f, {0.35f, 0.75f, 1.0f, 0.7f});
-    draw_text(x + pad, y + 4, size, {0.92f, 0.93f, 0.96f, 1.0f}, line);
+
+    if (fresh) {
+        // Arrow rotated by `rel`: 0 = straight up = dead ahead. Screen y
+        // grows downward, so "up" is (sin, -cos).
+        const float cx = x + pad + 7, cy = y + h * 0.5f;
+        const float s = (float)sin(rel), c = (float)cos(rel);
+        const float dx = s, dy = -c;          // forward
+        const float px = c, py = s;           // right-hand perpendicular
+        draw_triangle(cx + dx * 10, cy + dy * 10,
+                      cx - dx * 5 + px * 6, cy - dy * 5 + py * 6,
+                      cx - dx * 5 - px * 6, cy - dy * 5 - py * 6,
+                      {1.0f, 0.78f, 0.30f, 1.0f});
+    }
+    draw_text(x + pad + arrow_w, y + 4, size, {0.92f, 0.93f, 0.96f, 1.0f},
+              line);
 }
 
 }  // namespace fmk

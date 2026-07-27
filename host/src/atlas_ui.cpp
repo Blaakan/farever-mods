@@ -499,7 +499,9 @@ struct Hover {
     float cell_x = 0, cell_y = 0;
 };
 
-// One "Bank x3 - Lv 25 - Rare" line per stored stack.
+// One "Bank x3 - Lv 25 - Rare" line per stored stack, colored by that
+// stack's own rarity - the aggregate header stays rarity-free because the
+// stacks can differ.
 std::string copy_line(const OwnedCopy& c) {
     char buf[160];
     std::string s = kWhereName[c.where];
@@ -519,6 +521,11 @@ std::string copy_line(const OwnedCopy& c) {
     return s;
 }
 
+Color copy_color(const OwnedCopy& c, const Entry& e) {
+    const int r = (c.rarity >= 0 && c.rarity <= 4) ? c.rarity : e.rarity;
+    return kRarity[r];
+}
+
 void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
                   float mx, float my, float screen_w, float screen_h) {
     const float tw = 340;
@@ -527,7 +534,8 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     constexpr size_t kMaxCopyLines = 5;
 
     // Measure first, draw second - the box height needs every line known.
-    std::vector<std::string> desc_lines, acq_lines, copy_lines;
+    std::vector<std::string> desc_lines, acq_lines;
+    std::vector<std::pair<std::string, Color>> copy_lines;
     if (!e.desc.empty()) wrap_text(e.desc, body_sz, tw - 2 * pad, &desc_lines);
     for (const auto& a : e.acquire) {
         std::vector<std::string> lines;
@@ -541,10 +549,10 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
                 _snprintf_s(more, sizeof(more), _TRUNCATE, "+%zu more stacks",
                             owned->copies.size() - kMaxCopyLines +
                                 (size_t)owned->dropped);
-                copy_lines.push_back(more);
+                copy_lines.push_back({more, kTextDim});
                 break;
             }
-            copy_lines.push_back(copy_line(c));
+            copy_lines.push_back({copy_line(c), copy_color(c, e)});
         }
     }
 
@@ -578,12 +586,18 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     draw_text(tx + pad, yy, name_sz, kRarity[rar], e.name.c_str());
     yy += 20;
 
+    // When stacks exist they can differ in rarity, so the aggregate line
+    // stays rarity-free and each stack line carries its own. Collection
+    // unlocks have no stack lines - for them the header keeps the rarity,
+    // or hovering an owned mount would never name it.
     char status[96];
     if (owned) {
-        if (owned->total > 1)
-            sprintf_s(status, "Owned x%d - %s", owned->total, kRarityName[rar]);
-        else
+        if (owned->copies.empty())
             sprintf_s(status, "Owned - %s", kRarityName[rar]);
+        else if (owned->total > 1)
+            sprintf_s(status, "Owned x%d", owned->total);
+        else
+            sprintf_s(status, "Owned");
         draw_text(tx + pad, yy, small_sz, {0.45f, 0.85f, 0.45f, 1.0f}, status);
     } else {
         sprintf_s(status, "Not collected - %s", kRarityName[rar]);
@@ -592,7 +606,7 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     yy += 17;
 
     for (const auto& l : copy_lines) {
-        draw_text(tx + pad + 10, yy, body_sz, kTextDim, l.c_str());
+        draw_text(tx + pad + 10, yy, body_sz, l.second, l.first.c_str());
         yy += 16;
     }
 

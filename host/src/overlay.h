@@ -37,6 +37,8 @@ void overlay_set_draw(DrawFn fn);
 // --- draw API (valid only inside the draw callback) ------------------------
 void draw_rect(float x, float y, float w, float h, Color c);
 void draw_rect_outline(float x, float y, float w, float h, float thickness, Color c);
+void draw_triangle(float x0, float y0, float x1, float y1, float x2, float y2,
+                   Color c);
 void draw_text(float x, float y, float size, Color c, const char* text);
 float measure_text(float size, const char* text);
 

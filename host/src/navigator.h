@@ -21,10 +21,12 @@ struct NavTarget {
     double x, y, z;
 };
 
-// Worker thread.
+// Worker / pose thread.
 void nav_init();                                  // load persisted target
 void nav_tick();                                  // persist when dirty
-void nav_set_hero_pos(bool valid, double x, double y, double z);
+// rot_z is the hero's facing (ent.GameObject.rotationZ); the pill's arrow
+// rotates relative to it. Stamped at ~20Hz by the pose thread.
+void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z);
 
 // Any thread with a UI (render thread in practice).
 // `key` identifies the tracked thing (e.g. "mounts/Mount_Wolf_05") so a

@@ -143,7 +143,11 @@ bool reader_locate_hero(bool force_rescan) {
 }
 
 void* reader_hero() {
-    return (g_hero && obj_is(g_hero, "ent.Hero")) ? g_hero : nullptr;
+    // One local load: the pose thread calls this at 20Hz while the worker
+    // may rewrite g_hero during a rescan, and three separate loads of a
+    // racing pointer could validate one value and return another.
+    void* h = g_hero;
+    return (h && obj_is(h, "ent.Hero")) ? h : nullptr;
 }
 
 bool reader_read_collection(Collection* out) {
@@ -444,12 +448,13 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
              inv.equipped.size(), inv.bags.size());
 }
 
-bool reader_read_hero_pos(double* x, double* y, double* z) {
+bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z) {
     void* hero = reader_hero();
     if (!hero) return false;
     return read(hero, off::ent_GameObject::posx, x) &&
            read(hero, off::ent_GameObject::posy, y) &&
-           read(hero, off::ent_GameObject::posz, z);
+           read(hero, off::ent_GameObject::posz, z) &&
+           read(hero, off::ent_GameObject::rotationZ, rot_z);
 }
 
 bool reader_read_unit_state(UnitState* out) {

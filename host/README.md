@@ -220,9 +220,10 @@ Sources with a fixed place - vault chests, dungeon bosses, merchants - carry
 world coordinates (from the POI table farever-minimap ships). The tooltip
 shows the distance and compass direction to the nearest one, and **clicking
 the item** toggles tracking: a small pill at the top of the screen keeps
-showing *name, distance, direction* while you travel, atlas open or not.
-Click again (or track something else) to stop. The tracked target survives
-restarts.
+showing *name, distance, direction* - plus an arrow that rotates with your
+facing (`ent.GameObject.rotationZ`, sampled at 20Hz) - while you travel,
+atlas open or not. Click again (or track something else) to stop. The
+tracked target survives restarts.
 
 The navigator is its own module (`navigator.cpp`) with a tiny interface, so
 any future mod on this host can request tracking the same way the atlas

@@ -608,6 +608,18 @@ void draw_rect_outline(float x, float y, float w, float h, float t, Color c) {
     draw_rect(x + w - t, y + t, t, h - 2 * t, c);
 }
 
+// A single solid triangle - the navigator's rotating arrow needs geometry
+// the axis-aligned quads cannot express.
+void draw_triangle(float x0, float y0, float x1, float y1, float x2, float y2,
+                   Color c) {
+    if (g_verts.size() + 3 > kMaxVerts) return;
+    if (g_segs.empty()) g_segs.push_back({-1, (UINT)g_verts.size(), 0});
+    g_verts.push_back({x0, y0, -1, -1, c.r, c.g, c.b, c.a});
+    g_verts.push_back({x1, y1, -1, -1, c.r, c.g, c.b, c.a});
+    g_verts.push_back({x2, y2, -1, -1, c.r, c.g, c.b, c.a});
+    g_segs.back().count += 3;
+}
+
 void draw_text(float x, float y, float size, Color c, const char* text) {
     if (!text) return;
     const float scale = size / kFontPx;

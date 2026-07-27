@@ -232,9 +232,15 @@ function acquisitionOf(itemId) {
 // overrides file can supply hand-curated coordinates for those.
 
 const pois = (() => {
-  const p = join(game, 'data', 'pois_W1_Siagarta.json');
-  if (!existsSync(p)) {
-    console.warn('POI table not found (data/pois_W1_Siagarta.json) - no tracker targets');
+  // The POI table originally ships with farever-minimap; a preserved copy in
+  // tools/out keeps the tracker working on installs without that mod.
+  const candidates = [
+    join(game, 'data', 'pois_W1_Siagarta.json'),
+    join(HERE, 'out', 'pois_W1_Siagarta.json'),
+  ];
+  const p = candidates.find(existsSync);
+  if (!p) {
+    console.warn('POI table not found - no tracker targets');
     return [];
   }
   try {

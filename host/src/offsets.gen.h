@@ -38,6 +38,7 @@ namespace ent_GameObject {
     constexpr uint32_t posx = 0xb0;  // F64
     constexpr uint32_t posy = 0xb8;  // F64
     constexpr uint32_t posz = 0xc0;  // F64
+    constexpr uint32_t rotationZ = 0xc8;  // F64
 }  // namespace ent_GameObject
 
 // st.Player  (sizeof=385, extends st.State)

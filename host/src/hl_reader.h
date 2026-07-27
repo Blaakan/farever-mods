@@ -65,9 +65,10 @@ bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);
 bool reader_read_inventories(Inventories* out);
 
-// World position of the local hero, for the navigator's distance readout.
-// Cheap (three validated qword reads), safe to call every second.
-bool reader_read_hero_pos(double* x, double* y, double* z);
+// World position and facing of the local hero, for the navigator's distance
+// and arrow readout. Cheap (four validated qword reads), safe to call at
+// 20Hz from the pose thread.
+bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z);
 
 // Writes the collection next to the game as farever-collection.json. Until
 // the mods are ported onto this host, that file is the deliverable: it is the
