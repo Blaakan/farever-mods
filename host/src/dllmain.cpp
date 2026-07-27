@@ -45,6 +45,7 @@
 #include "hl_reader.h"
 #include "hl_runtime.h"
 #include "dxgi_wrap.h"
+#include "overlay.h"
 #include "offsets.gen.h"
 
 #pragma intrinsic(_ReturnAddress)
@@ -55,6 +56,24 @@ CRITICAL_SECTION g_lock;
 HMODULE          g_real = nullptr;
 FILE*            g_log  = nullptr;
 bool             g_init = false;
+
+void log_line(const char* fmt, ...);
+
+}  // namespace
+
+// Exposed so the overlay can log without a header for one function.
+namespace fmk {
+void host_log(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    log_line("%s", buf);
+}
+}  // namespace fmk
+
+namespace {
 
 void log_line(const char* fmt, ...) {
     if (!g_log) return;
@@ -205,7 +224,14 @@ DWORD WINAPI worker(LPVOID) {
     }
 
     bool reported = false;
+    bool overlay_tried = false;
     while (!g_stop) {
+        // Install the render hook once the game has actually made a swap
+        // chain. Doing it from here keeps DllMain and the render thread clean.
+        if (!overlay_tried && fmk::dxgi_swapchain()) {
+            overlay_tried = true;
+            fmk::overlay_install();
+        }
         if (fmk::reader_locate_hero(false)) {
             if (!reported) {
                 log_line("reader: hero located at %p", fmk::reader_hero());
