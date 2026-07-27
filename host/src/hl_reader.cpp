@@ -177,11 +177,19 @@ bool reader_read_collection(Collection* out) {
 
 namespace {
 
-// A HashLink enum value is { hl_type* t; int index; ... }, so the constructor
-// index sits right after the type pointer. Rarity is stored as such an enum.
-int32_t read_enum_index(void* enum_obj) {
-    if (!enum_obj) return -1;
-    return read_i32(enum_obj, 8);
+// Rarity lives only on st.item.Weapon, and the bytecode declares it a String
+// ("Common".."Legendary" - the CastleDB rarity sheet ids), not an enum. The
+// first version read it as a boxed enum index, which is why every item
+// reported -1. Non-weapons have no such field at all: their rarity is a
+// static property of the kind, which the atlas data supplies offline.
+int32_t rarity_index(void* str_obj) {
+    if (!str_obj || obj_class_name(str_obj) != "String") return -1;
+    const std::string s = read_hx_string(str_obj);
+    static const char* kNames[] = {"Common", "Uncommon", "Rare", "Epic",
+                                   "Legendary"};
+    for (int i = 0; i < 5; i++)
+        if (s == kNames[i]) return i;
+    return -1;
 }
 
 bool read_item(void* obj, const char* source, Item* out) {
@@ -199,18 +207,13 @@ bool read_item(void* obj, const char* source, Item* out) {
     out->level = read_i32(obj, off::st_item_Gear::level);
     out->upgrade = read_i32(obj, off::st_item_Gear::upgradeLevel);
 
-    // Only gear carries rarity; consumables and materials share the Item base
-    // but not that field, so reading it off them would be garbage.
     out->rarity = -1;
-    if (cls.rfind("st.item.", 0) == 0) {
-        void* r = read_ptr(obj, off::st_item_Weapon::rarity);
-        if (r) out->rarity = read_enum_index(r);
-    }
+    if (cls == "st.item.Weapon")
+        out->rarity = rarity_index(read_ptr(obj, off::st_item_Weapon::rarity));
 
     // Uninitialised slots report absurd values; clamp rather than propagate.
     if (out->level < 0 || out->level > 999) out->level = 0;
     if (out->upgrade < 0 || out->upgrade > 99) out->upgrade = 0;
-    if (out->rarity < 0 || out->rarity > 16) out->rarity = -1;
     return true;
 }
 
@@ -419,9 +422,9 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
             const Item& it = v[i];
             fprintf(f,
                     "%s\n    {\"kind\":\"%s\",\"level\":%d,\"upgrade\":%d,"
-                    "\"rarity\":%d,\"class\":\"%s\"}",
+                    "\"rarity\":%d,\"count\":%d,\"class\":\"%s\"}",
                     i ? "," : "", it.kind.c_str(), it.level, it.upgrade,
-                    it.rarity, it.cls.c_str());
+                    it.rarity, it.count, it.cls.c_str());
         }
         fprintf(f, "%s]%s\n", v.empty() ? "" : "\n  ", last ? "" : ",");
     };

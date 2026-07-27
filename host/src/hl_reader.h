@@ -28,10 +28,10 @@ struct UnitState {
     bool in_combat = false;
 };
 
-// A single owned item. `rarity` is the enum constructor index read straight
-// off the object; the game's ordering is expected to run
-// common/uncommon/rare/epic/legendary, but that mapping is unverified until
-// it is checked against real inventories, so the raw index is reported.
+// A single owned item. `rarity` is 0..4 = common/uncommon/rare/epic/legendary
+// decoded from the String field on st.item.Weapon (the CastleDB rarity ids).
+// Everything that is not a weapon has no per-instance rarity: it is a static
+// property of the kind, which the atlas data (tools/gen-atlas.mjs) supplies.
 struct Item {
     std::string kind;
     int32_t level = 0;

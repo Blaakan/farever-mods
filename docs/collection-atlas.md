@@ -6,6 +6,13 @@ need, and where to find them.
 Install: copy [`plugins/collection_atlas.lua`](../plugins/collection_atlas.lua)
 into `<Farever>\data\plugins\`.
 
+> There is now also a **native Collection Atlas UI** in the standalone host
+> ([`host/`](../host/README.md#the-collection-atlas-ui)): every item that
+> exists per category with icons, owned/missing state, rarity, and
+> how-to-acquire tooltips, read from the account collection in memory. This
+> plugin remains the farever-minimap flavour, limited to what the sandbox
+> can observe.
+
 ## What it adds over the built-in minimap
 
 The host mod already draws collectible markers and lets you right-click one to

@@ -121,17 +121,17 @@ equipped / bags        { count:Int, item:st.item.Weapon | st.item.Gear }
 The item field is `it` in the bank and `item` in inventories. Item classes
 seen live: `st.Item`, `st.item.Gear`, `st.item.Armor`, `st.item.Weapon`.
 
-**Open: rarity.** Reports `-1` for almost everything, and it is not a bad
-offset - `rarity` is declared *only* on `st.item.Weapon`. `st.item.Armor`
-extends `Gear` with no such field. The bytecode has `$HItem.getRarity` as a
-FUNCTION plus a `$Data.rarity` static, so rarity for non-weapons is computed
-from the item definition by kind.
-
-That converges with the other open item: rarity **and** the master "every
-item that exists" lists both come from the compiled CastleDB statics, so
-there is one remaining data problem, not two. See the CastleDB note under
-`tools/pak-extract.mjs` - it is compiled into `hlboot.dat`, not shipped in
-`res.pak`.
+**Rarity: solved twice over.** The live read first reported `-1` for
+everything because `st.item.Weapon.rarity` is a **String**
+(`"Common"`..`"Legendary"`, the CastleDB rarity ids), not a boxed enum - the
+bytecode said so all along (`offsets.gen.h`: `OBJ : String`). Weapons now
+decode their per-instance rarity live. Everything else has no such field
+because rarity is a static property of the kind, and that comes from the
+CastleDB itself: **`data.cdb` ships in `res.light.pak`** (the earlier "it is
+compiled into hlboot.dat" conclusion was wrong - it just was not in
+`res.pak`). `tools/gen-atlas.mjs` extracts it, which also yields the master
+"every item that exists" lists, English names and descriptions, loot tables,
+crafts and icon references in one pass.
 
 ### Two ways to reach it
 
@@ -188,17 +188,41 @@ Two lessons worth keeping:
 | 2 | HashLink state reader (`hl_runtime`, `hl_scan`, `hl_reader`) + build-hash gate | **working in-game** — reads the real account collection |
 | 2b | Post-patch update flow (`tools/update.mjs`) | **built, verified** |
 | 3a | Swap-chain observation via the factory wrapper | **built** |
-| 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | not started |
-| 3c | Port the two mods onto the host's draw + state API | not started |
+| 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | **built, text verified in-game** |
+| 3c | Native Collection Atlas UI (`atlas_ui.cpp` + `input.cpp`) | **built** — awaiting in-game verification |
 
-Stage 3b is the remaining bulk. Everything before it is either verified or
-waiting only on a game restart.
+Stage 3c replaced the original plan of porting the Lua plugins wholesale: the
+tracker UI is now native to the host, driven by the host's own reader and the
+generated game database, which the Lua sandbox could never reach anyway.
+AuraForge remains a farever-minimap plugin.
 
-Stage 3 matters for packaging: because the host reimplements the *same* API
-surface (53 entry points, see `docs/`), `collection_atlas.lua` and
-`aura_forge.lua` need no changes. Each mod then ships as its own zip bundling
-the host plus that one plugin, and the host loads several modules if you
-install more than one — so there is never a second D3D12 hook racing the first.
+## The Collection Atlas UI
+
+One page per category — Appearances, Mounts, Pets, Gliders, Trinkets,
+Weapons — every item that exists in the game on the page, owned ones in full
+colour with a rarity border (white/green/blue/purple/gold), missing ones
+dimmed. Hovering shows name, rarity, level (for levelled gear), the item's
+description and how to acquire it (crafts, loot tables, world bosses,
+vaults, merchants — inverted from the game's own CastleDB).
+
+- **F8** toggles the window, **Escape** closes it
+- drag the title bar to move it; position, and the active tab, persist in
+  `farever-modkit.ini` next to the game
+- mouse wheel scrolls; clicks over the window never reach the game
+- ownership for trinkets/weapons = bank + bank equipment + equipped + bags,
+  across characters (offline ones via their `farever-inventory-*.json`)
+
+Data files, generated from your own game install:
+
+```bash
+node tools/gen-atlas.mjs
+```
+
+writes `farever-atlas.tsv` (713 items across the six categories) and
+`farever-atlas-icons.dds` (a 2048px BC7 atlas repacked block-for-block from
+the game's 256px portrait mips — no image decoding anywhere) and copies both
+next to `Farever.exe`. Re-run it after a patch, along with
+`tools/update.mjs`.
 
 ## Build
 

@@ -127,7 +127,12 @@ tools/
   check-plugins.mjs        static/sandbox checks
   run-harness.mjs          runtime tests
   scan-hlboot.mjs          HashLink bytecode string-table extractor
+  scan-hltypes.mjs         HashLink type/field-offset extractor
+  pak-extract.mjs          Shiro/Heaps .pak reader (list + extract)
+  gen-atlas.mjs            Collection Atlas data: item TSV + BC7 icon atlas
+  lib/pak.mjs              the pak format, as a library
   harness/mock_host.lua    mock of the plugin API
+host/                      standalone mod host (dxgi proxy + reader + overlay UI)
 RESEARCH.md                how Farever can be modded, with sources
 ```
 

@@ -42,9 +42,11 @@
 #include <stdio.h>
 #include <share.h>   // _SH_DENYNO
 
+#include "atlas_ui.h"
 #include "hl_reader.h"
 #include "hl_runtime.h"
 #include "dxgi_wrap.h"
+#include "input.h"
 #include "overlay.h"
 #include "offsets.gen.h"
 
@@ -157,49 +159,12 @@ void log_caller(const char* api, void* ret_addr) {
 
 volatile LONG g_stop = 0;
 
-// Snapshot published by the worker for the render thread to read. The draw
-// callback runs inside Present on the game's render thread and must never walk
-// the game heap - it only ever reads these plain values.
-struct Snapshot {
-    volatile LONG ready = 0;
-    int mounts = 0, gliders = 0, pets = 0, gears = 0, toys = 0, emotes = 0;
-    int bank_slots = 0;
-};
-Snapshot g_snap;
-
-// First light: proves the whole chain - memory read on the worker, published
-// to the render thread, drawn into the game's swap chain. Replaced by the
-// ported mods once this is confirmed on screen.
-void draw_overlay(float w, float h) {
-    if (!InterlockedCompareExchange(&g_snap.ready, 0, 0)) return;
-
-    const fmk::Color bg{0.05f, 0.06f, 0.09f, 0.82f};
-    const fmk::Color edge{0.35f, 0.75f, 1.0f, 0.9f};
-    const fmk::Color label{0.75f, 0.78f, 0.85f, 1.0f};
-    const fmk::Color value{1.0f, 1.0f, 1.0f, 1.0f};
-
-    const float pad = 10.0f;
-    const float bw = 230.0f, bh = 132.0f;
-    const float x = 24.0f, y = h - bh - 24.0f;
-
-    fmk::draw_rect(x, y, bw, bh, bg);
-    fmk::draw_rect_outline(x, y, bw, bh, 1.5f, edge);
-
-    fmk::draw_text(x + pad, y + pad, 15.0f, edge, "Collection");
-
-    struct Row { const char* name; int n; };
-    const Row rows[] = {
-        {"Mounts", g_snap.mounts},   {"Gliders", g_snap.gliders},
-        {"Pets", g_snap.pets},       {"Appearances", g_snap.gears},
-    };
-    float ry = y + pad + 24.0f;
-    for (const auto& r : rows) {
-        char buf[32];
-        sprintf_s(buf, "%d", r.n);
-        fmk::draw_text(x + pad, ry, 14.0f, label, r.name);
-        fmk::draw_text(x + bw - pad - fmk::measure_text(14.0f, buf), ry, 14.0f,
-                       value, buf);
-        ry += 20.0f;
+// One-second sleep slice shared by every wait in the worker: keeps shutdown
+// responsive and gives the UI its once-a-second persistence tick.
+void worker_sleep(int seconds) {
+    for (int i = 0; i < seconds && !g_stop; i++) {
+        Sleep(1000);
+        fmk::atlas_ui_tick();
     }
 }
 
@@ -274,6 +239,8 @@ DWORD WINAPI worker(LPVOID) {
 
     bool reported = false;
     bool overlay_tried = false;
+    bool ui_ready = false;
+    bool input_ready = false;
     while (!g_stop) {
         // Install the render hook once the game has actually made a swap
         // chain. Doing it from here keeps DllMain and the render thread clean.
@@ -282,8 +249,19 @@ DWORD WINAPI worker(LPVOID) {
         // observed the game's swap chain first.
         if (!overlay_tried) {
             overlay_tried = true;
-            fmk::overlay_set_draw(&draw_overlay);
+            fmk::overlay_set_draw(&fmk::atlas_ui_draw);
             fmk::overlay_install();
+        }
+        // The UI needs the device (atlas upload) and the window (input), both
+        // of which exist only after the first frame went through the hook.
+        // Each half retries independently: the HWND can publish a beat after
+        // overlay_ready() flips, and a one-shot attempt would leave the UI
+        // permanently deaf.
+        if (!ui_ready && fmk::overlay_ready()) {
+            ui_ready = fmk::atlas_ui_init();
+        }
+        if (ui_ready && !input_ready) {
+            input_ready = fmk::input_install(fmk::overlay_game_hwnd());
         }
         if (fmk::reader_locate_hero(false)) {
             if (!reported) {
@@ -291,6 +269,7 @@ DWORD WINAPI worker(LPVOID) {
                 reported = true;
             }
             fmk::Collection c;
+            fmk::Inventories inv;
             if (fmk::reader_read_collection(&c) && c.valid) {
                 // Only speak when something actually changed. The collection
                 // is near-static, so re-dumping it every cycle is noise that
@@ -308,22 +287,10 @@ DWORD WINAPI worker(LPVOID) {
                              c.bank_slots);
                     fmk::write_collection_json(c);
                 }
-                // Publish counts for the render thread. Scalars only, written
-                // before the ready flag, so the draw callback never touches
-                // game memory or a container being mutated underneath it.
-                g_snap.mounts  = (int)c.mounts.size();
-                g_snap.gliders = (int)c.gliders.size();
-                g_snap.pets    = (int)c.pets.size();
-                g_snap.gears   = (int)c.gears.size();
-                g_snap.toys    = (int)c.toys.size();
-                g_snap.emotes  = (int)c.emotes.size();
-                g_snap.bank_slots = c.bank_slots;
-                InterlockedExchange(&g_snap.ready, 1);
 
                 // Bank, bags and equipped gear: what "owned" means for
                 // weapons and trinkets. Written per character, since only the
                 // logged-in one is in this process.
-                fmk::Inventories inv;
                 if (fmk::reader_read_inventories(&inv) && inv.valid) {
                     static std::string prev_who;
                     static size_t prev_isig = 0;
@@ -336,11 +303,15 @@ DWORD WINAPI worker(LPVOID) {
                         fmk::write_inventory_json(inv, inv.character);
                     }
                 }
+
+                // Hand both reads to the UI; it swaps in a fresh ownership
+                // snapshot for the render thread.
+                fmk::atlas_ui_update(c, inv);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }
             // Steady state: this host does not need to re-read often.
-            for (int i = 0; i < 30 && !g_stop; i++) Sleep(1000);
+            worker_sleep(30);
         } else {
             reported = false;
             // Back off on repeated failure. A full scan is ~40s of memory
@@ -348,8 +319,7 @@ DWORD WINAPI worker(LPVOID) {
             // loading screen is pure waste and floods the log.
             static int misses = 0;
             if (misses < 30) misses++;
-            int wait = 10 + misses * 10;   // 20s .. 5min
-            for (int i = 0; i < wait && !g_stop; i++) Sleep(1000);
+            worker_sleep(10 + misses * 10);   // 20s .. 5min
         }
     }
     return 0;
@@ -439,6 +409,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         }
         case DLL_PROCESS_DETACH:
             InterlockedExchange(&g_stop, 1);
+            fmk::input_uninstall();
             log_line("detach");
             if (g_log) { fclose(g_log); g_log = nullptr; }
             if (g_init) DeleteCriticalSection(&g_lock);
