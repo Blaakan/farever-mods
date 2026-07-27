@@ -31,6 +31,48 @@ Exact DXGI functions the game's modules import, from
 
 All five documented exports are forwarded anyway.
 
+## What stage 2 unlocks: the real account collection
+
+The plugin API has no collection reader, so `collection_atlas` can only record
+items as they pass through your hands — meaning anything you unlocked before
+installing it is invisible, and there is no way to ask "which appearances do I
+already own?"
+
+The data exists and is fully mapped. From `node tools/scan-hltypes.mjs`:
+
+```
+st.player.AccountProgress          extends st.DBState   sizeof=208
+  +0x0a8  collection      : st.player.Collection
+  +0x0b8  bank            : hl.types.ArrayObj
+  +0x0c0  bankEquipment   : hl.types.ArrayObj
+  +0x0c8  bankNbSlots     : I32
+
+st.player.Collection               extends st.DBBaseState  sizeof=168
+  +0x078  gliders  : hxbit.ArrayProxyData
+  +0x080  mounts   : hxbit.ArrayProxyData
+  +0x088  toys     : hxbit.ArrayProxyData
+  +0x090  emotes   : hxbit.ArrayProxyData
+  +0x098  gears    : hxbit.ArrayProxyData      <- armor appearances
+  +0x0a0  pets     : hxbit.ArrayProxyData      <- companions
+```
+
+That is the authoritative, account-wide collection — the exact six categories
+the game's own collection menu shows — reachable as
+`st.Player -> AccountProgress.collection -> {mounts, gliders, pets, gears,
+toys, emotes}`. `AccountProgress.bank` / `bankEquipment` covers the stored
+weapons and trinkets the vault currently has to infer.
+
+So the collection tracker becomes a real "12 / 63 owned" checklist rather than
+a discovery log, with zero re-collecting — but only through the host's own
+memory reader. Nothing in the plugin sandbox can reach it. This is the
+strongest argument for finishing stage 2, and the offsets above mean it is
+generation, not reverse-engineering: re-run the scan after a patch and the
+addresses regenerate.
+
+Finding `st.Player` at runtime is the one remaining unknown; the established
+technique (used by farever-minimap) is hooking `hl_alloc_obj` and watching for
+the type.
+
 ## Roadmap
 
 | Stage | What | State |
