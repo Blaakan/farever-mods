@@ -39,7 +39,7 @@
 --   farever.toast / farever.sound / farever.log / farever.now
 -- ============================================================================
 
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 
 -- ---------------------------------------------------------------------------
 -- Tunables
@@ -211,10 +211,18 @@ local function set_decode(s)
     return t, n
 end
 
+-- Second line of defence: even if a malformed id reaches a set in memory, it
+-- never gets persisted. A comma would corrupt the round-trip; a quote or
+-- newline would corrupt the host's Lua store file itself.
+local function safe_id(id)
+    return type(id) == "string" and #id >= 2 and #id <= 64
+       and string.match(id, "^[%w_]+$") ~= nil
+end
+
 local function set_encode(t)
     local ids, skipped = {}, 0
     for id in pairs(t) do
-        if string.find(id, ",", 1, true) then
+        if not safe_id(id) then
             skipped = skipped + 1
         else
             ids[#ids + 1] = id
@@ -222,7 +230,7 @@ local function set_encode(t)
     end
     if skipped > 0 then
         farever.log.warn(string.format(
-            "collection_atlas: %d id(s) contain a comma and were not saved", skipped))
+            "collection_atlas: %d malformed id(s) were not saved", skipped))
     end
     table.sort(ids)
     return table.concat(ids, ",")
@@ -242,7 +250,8 @@ end
 local function map_encode(t)
     local out = {}
     for k, v in pairs(t) do
-        if not string.find(k, "[,=]") then
+        -- map keys are item kinds / monster kinds, same validity rule as sets
+        if safe_id(k) then
             out[#out + 1] = k .. "=" .. tostring(v)
         end
     end
@@ -600,8 +609,24 @@ local function note_vault(kind, level, upgrade)
     farever.toast("Vault keeper: " .. kind, 3.0)
 end
 
+-- Equipment / inventory reads can hand back garbage for uninitialised slots:
+-- the live dump showed level=-1745460232, and a bad `kind` pointer once
+-- surfaced the asset path "/Vines/vines02.fbx@", which got recorded as an
+-- appearance and displaced the real ones. Real Farever ids are strictly
+-- [A-Za-z0-9_], so anything else is a misread and must never reach the store.
+local rejected = {}
+
 local function note_item(kind, level, upgrade, slot_name)
     if not kind or kind == "" then return end
+    if not safe_id(kind) then
+        if not rejected[kind] then
+            rejected[kind] = true
+            farever.log.warn(string.format(
+                "collection_atlas: ignoring malformed item kind %q (slot %s)",
+                string.sub(tostring(kind), 1, 60), tostring(slot_name)))
+        end
+        return
+    end
     local r = route_of(kind, slot_name)
     if r == "mount" or r == "glider" or r == "companion" then
         note_collection(r, kind)

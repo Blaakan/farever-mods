@@ -220,6 +220,35 @@ try {
     ok(!exported.includes('LavendulaPetal'), 'materials churn is not tracked');
   }
 
+  // --- Regression: malformed kinds from uninitialised equipment slots -------
+  // A live session recorded the asset path "/Vines/vines02.fbx@" as an
+  // appearance and displaced the real ones. Garbage kinds must be rejected
+  // before they reach a collection, and must never be persisted.
+  run(
+    L,
+    `MOCK.equipment = {
+       { kind = "/Vines/vines02.fbx@", level = -1745460232, upgrade = 588, slot = 6, slot_name = "Chest" },
+       { kind = "res/pack/ui.png",     level = 0, upgrade = 0, slot = 3,  slot_name = "Head" },
+       { kind = "Bad,Comma_Id",        level = 0, upgrade = 0, slot = 7,  slot_name = "Back" },
+       { kind = "Legs_RDemon_Wiz",     level = 25, upgrade = 0, slot = 10, slot_name = "Legs" },
+     }
+     MOCK.inventory = {}`,
+    'garbage equipment'
+  );
+  frames(L, 6, 0.6);
+  const appear = evalLua(L, `tostring(MOCK.store["acct_appearances"])`);
+  ok(!appear.includes('Vines'), 'asset-path garbage never reaches the store', appear.slice(0, 120));
+  ok(!appear.includes('res/pack'), 'slashed paths rejected');
+  ok(!appear.includes('Bad,Comma_Id'), 'comma-bearing id rejected');
+  ok(appear.includes('Legs_RDemon_Wiz'), 'the real armor alongside it still records', appear.slice(0, 120));
+  ok(
+    appear.includes('Feet_RKobold_FigCle'),
+    'previously-recorded appearances survive a garbage batch',
+    appear.slice(0, 160)
+  );
+  const warned = evalLua(L, `table.concat(MOCK.logs, "\\n")`);
+  ok(/ignoring malformed item kind/.test(warned), 'malformed kinds are logged for diagnosis');
+
   ok(num(L, '#MOCK.store_bad') === 0, 'never persists a non-scalar to the store');
 } catch (e) {
   failures++;
