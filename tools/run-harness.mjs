@@ -107,6 +107,7 @@ try {
        { kind = "Staff_Craft_C",       level = 27, upgrade = 3, slot = 1,  slot_name = "Weapon1" },
        { kind = "Mount_Boar_05",       level = 0,  upgrade = 0, slot = 20, slot_name = "" },
        { kind = "StoneOfPower_Trinket",level = 25, upgrade = 1, slot = 14, slot_name = "Trinket" },
+       { kind = "Sprout_Garlic_Spark", level = 0,  upgrade = 0, slot = 27, slot_name = "" },
      }
      MOCK.codex = {
        Boar_Z1W_E = { state = "complete", completed = true, progress = 10,
@@ -133,6 +134,7 @@ try {
   ok(toasts.includes('Appearance unlocked: Feet_RKobold_FigCle'), 'armor sighting unlocks its appearance');
   ok(toasts.includes('Vault keeper: Staff_Craft_C'), 'weapon goes to the vault');
   ok(toasts.includes('Vault keeper: StoneOfPower_Trinket'), 'trinket (by slot_name) goes to the vault');
+  ok(toasts.includes('New companion recorded: Sprout_Garlic_Spark'), 'companion (Sprout) is recorded');
 
   // Codex capture via target_changed
   run(L, `on_event("target_changed", { kind = "Boar_Z1W_E" })`, 'codex evt');
@@ -243,31 +245,48 @@ try {
   ok(cfgJson !== null, 'hand-written encoder emits valid JSON');
   if (cfgJson) {
     ok(Array.isArray(cfgJson.auras) && cfgJson.auras.length === 2, 'seeds 2 starter auras');
-    ok(cfgJson.screen_w === 1920, 'defaults to 1920 wide');
     ok(typeof cfgJson.buffs === 'object', 'serialises the buff group');
   }
 
-  // --- StatusTracker: "total" semantics (value holds steady) --------------
+  // --- Permanent + stacked statuses (the live-game trio: duration 0 / -1) --
   run(
     L,
     `MOCK.statuses = {
-       { kind = "Mage_ShieldOfSpark_Status", duration = 12.0, stacks = 2, shield_amount = 400 },
+       { kind = "Staff_SummonDemon_Skill1_Status", duration = 0.0,  stacks = 20, shield_amount = 0 },
+       { kind = "Staff_Censer_Passive_Buff",       duration = -1.0, stacks = 5,  shield_amount = 0 },
+       { kind = "Mage_ShieldOfSpark_Status",       duration = 8.0,  stacks = 2,  shield_amount = 400 },
      }`,
-    'statuses total'
+    'statuses live trio'
   );
   frames(L, 12, 0.3);
+  let texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
+  ok(/Staff_SummonDemon_Skill1.*x20/.test(texts), 'permanent aura (duration 0) renders with stacks', texts.slice(-400));
+  ok(/Staff_Censer_Passive.*x5/.test(texts), 'permanent aura (duration -1) renders with stacks');
+  ok(/Mage_ShieldOfSpark.*\d(\.\d)?s/.test(texts), 'timed aura renders a countdown');
+
+  // Permanent auras must not vanish over time (v1 bug: they rendered expired).
+  run(L, `MOCK.texts = {}`, 'clear texts');
+  frames(L, 40, 0.3);
+  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
+  ok(/Staff_SummonDemon_Skill1.*x20/.test(texts), 'permanent aura still shown 12s later', texts.slice(-300));
+
+  // Status diagnostics tab reports the detected modes
+  run(L, `MOCK.checks["settings"] = true`, 'open settings');
+  frames(L, 1, 0.1);
   run(L, `MOCK.combo["##tab"] = 1`, 'status tab');
   frames(L, 2, 0.3);
-  let texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/\[total\]/.test(texts), 'detects a non-decaying duration as "total"', texts.slice(-400));
+  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
+  ok(/\[permanent\]/.test(texts), 'status tab labels permanent mode', texts.slice(-500));
+  ok(/\[total\]/.test(texts), 'status tab labels a non-decaying duration as "total"');
+  run(L, `MOCK.checks["settings"] = false`, 'close settings');
+  frames(L, 1, 0.1);
 
   // --- StatusTracker: "remaining" semantics (value decays) ----------------
   const { L: L2 } = boot('aura_forge.lua');
   run(L2, `on_init()`, 'init2');
   run(
     L2,
-    `MOCK.statuses = { { kind = "Regen_Status", duration = 20.0, stacks = 1, shield_amount = 0 } }
-     MOCK.combo["##tab"] = 1`,
+    `MOCK.statuses = { { kind = "Regen_Status", duration = 20.0, stacks = 1, shield_amount = 0 } }`,
     'statuses remaining'
   );
   run(
@@ -279,6 +298,9 @@ try {
      end`,
     'decay'
   );
+  run(L2, `MOCK.checks["settings"] = true`, 'open settings2');
+  run(L2, `MOCK.t = MOCK.t + 0.3; on_render()`, 'frame');
+  run(L2, `MOCK.combo["##tab"] = 1; MOCK.t = MOCK.t + 0.3; on_render()`, 'status tab2');
   texts = evalLua(L2, `table.concat(MOCK.texts, "\\n")`);
   ok(
     /\[remaining\]/.test(texts),
@@ -286,7 +308,7 @@ try {
     texts.slice(-400)
   );
 
-  // --- CooldownTracker ----------------------------------------------------
+  // --- CooldownTracker (HUD face) ------------------------------------------
   run(
     L,
     `MOCK.skills = {
@@ -296,42 +318,37 @@ try {
     'skills'
   );
   frames(L, 2, 0.3);
+  run(L, `MOCK.texts = {}`, 'clear');
   run(L, `on_event("damage_dealt", { skill = "Mage_RayOfSpark", amount = 120, is_crit = false })`, 'cast');
   frames(L, 2, 0.3);
   texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Mage_RayOfSpark\s+[\d.]+\s*\/\s*8s/.test(texts), 'cooldown starts on first damage event', texts.slice(-500));
+  ok(/Mage_RayOfSpark\s+\d(\.\d)?s/.test(texts), 'cooldown row appears on first damage event', texts.slice(-400));
 
-  // Multi-hit must not restart a running cooldown.
-  const before = num(L, 'MOCK.t');
+  // Multi-hit must not restart a running cooldown: remaining keeps falling.
   run(L, `on_event("damage_dealt", { skill = "Mage_RayOfSpark", amount = 40 })`, 'multihit');
+  run(L, `MOCK.texts = {}`, 'clear');
+  frames(L, 10, 0.3);
+  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
+  const times = [...texts.matchAll(/Mage_RayOfSpark\s+(\d+(?:\.\d)?)s/g)].map((x) => parseFloat(x[1]));
+  ok(
+    times.length > 1 && times[times.length - 1] < times[0],
+    'multi-hit does not restart the cooldown (remaining keeps falling)',
+    JSON.stringify(times)
+  );
+
+  // Expire: with show_ready off the row disappears from the HUD.
+  frames(L, 30, 0.3);
+  run(L, `MOCK.texts = {}`, 'clear');
   frames(L, 2, 0.3);
   texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  const m = texts.match(/Mage_RayOfSpark\s+([\d.]+)\s*\/\s*8s/g);
-  ok(m !== null && m.length > 0, 'cooldown still tracking after a second hit');
+  ok(!/Mage_RayOfSpark\s+\d/.test(texts), 'expired cooldown drops off the HUD', texts.slice(-300));
 
-  // Let it expire, then confirm it reports ready.
-  frames(L, 40, 0.3);
+  // --- Alerts ---------------------------------------------------------------
+  run(L, `MOCK.health = 200; MOCK.texts = {}`, 'low hp');
+  frames(L, 2, 0.2);
   texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Mage_RayOfSpark\s+ready/.test(texts), 'cooldown expires back to ready', texts.slice(-400));
+  ok(/LOW HEALTH/.test(texts), 'low-health starter aura triggers at 20% hp', texts.slice(-300));
 
-  // --- HUD actually draws -------------------------------------------------
-  run(L, `MOCK.draws = 0; MOCK.draw_texts = {}`, 'reset draws');
-  run(
-    L,
-    `MOCK.statuses = {
-       { kind = "Mage_ShieldOfSpark_Status", duration = 12.0, stacks = 3, shield_amount = 400 },
-       { kind = "Haste_Status", duration = 6.0, stacks = 1, shield_amount = 0 },
-     }
-     MOCK.health = 200`,
-    'hud state'
-  );
-  frames(L, 3, 0.2);
-  ok(num(L, 'MOCK.draws') > 0, 'HUD issues absolute draw primitives');
-  const drawn = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
-  ok(/Mage_ShieldOfSpark/.test(drawn), 'buff bar draws the status name', drawn.slice(0, 200));
-  ok(/LOW HEALTH/.test(drawn), 'low-health starter aura triggers at 20% hp', drawn.slice(0, 200));
-
-  // Target-casting starter aura
   run(
     L,
     `MOCK.target.exists = true
@@ -339,18 +356,20 @@ try {
      MOCK.target.cast_skill = "Boar_Skill1"
      MOCK.target.cast_total = 3.0
      MOCK.target.cast_elapsed = 1.0
-     MOCK.draw_texts = {}`,
+     MOCK.texts = {}`,
     'cast'
   );
   frames(L, 2, 0.2);
   ok(
-    /TARGET CASTING/.test(evalLua(L, `table.concat(MOCK.draw_texts, "|")`)),
+    /TARGET CASTING/.test(evalLua(L, `table.concat(MOCK.texts, "\\n")`)),
     'target-cast starter aura fires'
   );
 
   // --- JSON round-trip, discriminating test -------------------------------
   // Add a 3rd aura, persist, reload the chunk (fresh locals), add a 4th.
   // If decode were broken the reload would re-seed 2 and we would end at 3.
+  run(L, `MOCK.checks["settings"] = true`, 'settings');
+  frames(L, 1, 0.1);
   run(L, `MOCK.combo["##tab"] = 4; MOCK.clicks["Add"] = true`, 'add3');
   frames(L, 1, 0.1);
   frames(L, 2, 3.0); // let the 2s save interval elapse
@@ -359,6 +378,8 @@ try {
 
   run(L, src, 'reload chunk');
   run(L, `on_init()`, 'reload init');
+  run(L, `MOCK.checks["settings"] = true`, 'settings again');
+  frames(L, 1, 0.1);
   run(L, `MOCK.combo["##tab"] = 4; MOCK.clicks["Add"] = true`, 'add4');
   frames(L, 1, 0.1);
   frames(L, 2, 3.0);
@@ -369,7 +390,7 @@ try {
   );
 
   // --- Import path --------------------------------------------------------
-  run(L, `MOCK.combo["##tab"] = 6; MOCK.clicks["Export to box"] = true`, 'export box');
+  run(L, `MOCK.combo["##tab"] = 5; MOCK.clicks["Export to box"] = true`, 'export box');
   frames(L, 1, 0.1);
   run(L, `MOCK.clicks["Write to file"] = true`, 'write file');
   frames(L, 1, 0.1);
@@ -383,12 +404,12 @@ try {
   }
   ok(sharedJson !== null && sharedJson.auras.length === 4, 'shared config is valid JSON');
 
-  // Walk every tab
-  for (let t = 1; t <= 6; t++) {
+  // Walk every settings tab
+  for (let t = 1; t <= 5; t++) {
     run(L, `MOCK.combo["##tab"] = ${t}`, 'tab');
     frames(L, 2, 0.3);
   }
-  ok(true, 'all 6 tabs render without error');
+  ok(true, 'all 5 settings tabs render without error');
 
   ok(num(L, '#MOCK.store_bad') === 0, 'never persists a non-scalar to the store');
 } catch (e) {

@@ -16,6 +16,7 @@
 MOCK = {
     t          = 1000.0,   -- farever.now()
     clicks     = {},       -- label -> true, consumed by the next imgui.button
+    checks     = {},       -- label -> forced bool, consumed by the next checkbox
     combo      = {},       -- label -> forced index, makes combo report changed
     draws      = 0,        -- count of absolute draw_* primitives issued
     draw_texts = {},
@@ -279,7 +280,11 @@ imgui = {
         note_text(s)
     end,
     button = function(label) return take_click(label) end,
-    checkbox = function(label, cur) return cur, false end,
+    checkbox = function(label, cur)
+        local f = MOCK.checks[label]
+        if f ~= nil then MOCK.checks[label] = nil; return f, true end
+        return cur, false
+    end,
     slider_float = function(label, v) return v, false end,
     drag_float = function(label, v) return v, false end,
     input_text = function(label, cur) return cur, false end,
@@ -290,7 +295,9 @@ imgui = {
         if forced then return forced, true end
         return idx, false
     end,
-    progress = function(v, overlay) end,
+    progress = function(v, overlay)
+        if type(overlay) == "string" and overlay ~= "" then note_text(overlay) end
+    end,
     separator = function() end,
     spacing = function() end,
     same_line = function() end,

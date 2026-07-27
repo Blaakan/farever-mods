@@ -1,66 +1,48 @@
 -- ============================================================================
--- aura_forge.lua  -  v1.0.0
+-- aura_forge.lua  -  v2.0.0
 --
--- A WeakAuras-style HUD for Farever: movable buff, cooldown and alert displays
--- driven by user-defined trigger rules.
+-- A WeakAuras-style HUD for Farever: buff bars with icons, stacks and
+-- countdowns, cooldown bars, and rule-driven alerts.
 --
 -- Built for the farever-minimap plugin runtime:
 --   https://github.com/ramisotti13-eng/farever-minimap
 -- Drop this file into  <Farever>\data\plugins\  and it hot-loads in ~1s.
 --
--- ARCHITECTURE (and why it looks like this)
+-- v2 ARCHITECTURE
 --
---   The plugin API gives absolute screen-space drawing primitives
---   (draw_rect / draw_text / draw_circle / ...) but the icon widgets
---   (imgui.icon, imgui.atlas_icon) are FLOW widgets that only render at the
---   ImGui cursor inside the plugin's own window. There is also no mouse API
---   and no screen-size query.
+--   Everything renders INSIDE the plugin's own window - the pattern the
+--   first-party example plugins use (cursor-relative flow widgets). v1 tried
+--   to paint a free-floating HUD with the absolute draw primitives; in
+--   practice those clip to the plugin window, so v1's HUD was invisible and
+--   all you saw was the diagnostics text. The window itself is the HUD now:
+--   drag it where you want (the host saves window positions in
+--   farever_layout.ini), lock the overlay with the padlock, done.
 --
---   So the plugin splits, exactly the way WeakAuras splits display from
---   options:
+--   The window has two faces:
+--     HUD (default)  - alerts, then buffs, then cooldowns, as icon+bar rows
+--     settings       - tick the "settings" box to open the config tabs
 --
---     HUD LAYER    - drawn with the absolute primitives, positioned by
---                    anchor + offset, freely movable anywhere on screen.
---                    Shapes and text only. This is the thing you play with.
+-- WHAT THE LIVE GAME TAUGHT US (read out of a running session's log)
 --
---     CONFIGURATOR - this plugin window. Lists your auras, edits triggers and
---                    positions, and previews with the game's real skill icons
---                    (which is the one place icons can be drawn).
+--   * statuses() reports duration 0.00 or -1.00 for PERMANENT auras
+--     (passives, stack accumulators). v1 treated <=0 as expired and hid
+--     them; v2 gives them a "permanent" mode: full bar, stacks, no timer.
+--     A stack-only aura is just a permanent aura with stacks > 1.
+--   * Timed auras report a positive duration; whether it is total-length
+--     or remaining is detected at runtime by watching whether it decays.
+--   * Status kinds ("Staff_Censer_Passive_Buff") often have a sibling skill
+--     record whose icon IS resolvable ("Staff_Censer..."), so icons are
+--     looked up through a fallback chain and cached.
 --
---   Because there is no mouse API, "move it around" is anchor + X/Y offset
---   controls plus an Unlock mode that outlines and labels every element,
---   rather than click-drag. Nine screen anchors mean an element stays put
---   when you change resolution.
---
---   Screen size cannot be queried, so it is a setting (Layout tab). Get it
---   right once and every anchor lands correctly.
---
--- TWO THINGS THE GAME DOES NOT HAND US, AND HOW THIS SOLVES THEM
---
---   1. farever.player.skills() reports each skill's cooldown DURATION, not the
---      remaining time. So remaining is tracked client-side: a skill's cooldown
---      starts when we observe it being used (damage_dealt / heal_dealt /
---      shield_applied). Skills that neither damage, heal nor shield are never
---      observed and cannot be tracked. See docs/aura-forge.md.
---
---   2. farever.player.statuses() reports a `duration` whose meaning (total vs
---      remaining) is not specified. StatusTracker below detects which one it
---      is at runtime by watching whether the value decays, then counts down
---      correctly either way.
+-- COOLDOWNS: skills() reports each skill's cooldown DURATION, not remaining.
+-- Remaining is derived client-side: a cooldown starts when the skill is seen
+-- being used (damage_dealt / heal_dealt / shield_applied events). Skills that
+-- neither damage, heal nor shield cannot be tracked - API limit.
 -- ============================================================================
 
-local VERSION = "1.0.0"
+local VERSION = "2.0.0"
 
--- ---------------------------------------------------------------------------
--- Constants
--- ---------------------------------------------------------------------------
-
-local ANCHORS = { "Top Left", "Top Center", "Top Right",
-                  "Mid Left", "Center",     "Mid Right",
-                  "Bot Left", "Bot Center", "Bot Right" }
-
-local GROW      = { "Right", "Left", "Down", "Up" }
-local DISPLAYS  = { "Bar", "Tile", "Text" }
+local TABS      = { "Status", "Buffs", "Cooldowns", "Auras", "Share" }
 local TRIGGERS  = { "Status (buff)", "Skill cooldown", "Resource",
                     "In combat", "Target casting", "Target HP" }
 local OPS       = { "<", "<=", ">", ">=" }
@@ -68,25 +50,9 @@ local SOUNDS    = { "(none)", "alert", "warning", "info", "beep" }
 local RESOURCES = { "health_pct", "shield", "energy", "rage", "spark",
                     "focus", "combo_point", "poise", "oxygen" }
 
-local RES_PRESETS = {
-    { label = "1920 x 1080", w = 1920, h = 1080 },
-    { label = "2560 x 1440", w = 2560, h = 1440 },
-    { label = "3440 x 1440", w = 3440, h = 1440 },
-    { label = "3840 x 2160", w = 3840, h = 2160 },
-    { label = "1280 x 720",  w = 1280, h = 720  },
-    { label = "Custom",      w = 0,    h = 0    },
-}
-local RES_LABELS = {}
-for i, r in ipairs(RES_PRESETS) do RES_LABELS[i] = r.label end
-
-local TABS = { "Status", "Buff bar", "Cooldown bar", "Auras", "Layout", "Share" }
-
 -- ---------------------------------------------------------------------------
--- Minimal JSON codec
---
--- The store only holds scalars, so the whole configuration is serialised to
--- one JSON string. Doubles as the import/export share format. `load` is
--- removed by the sandbox, so this is a hand-written recursive-descent parser.
+-- Minimal JSON codec (store holds scalars only; also the share format).
+-- `load` is sandboxed away, so this is a hand-written parser.
 -- ---------------------------------------------------------------------------
 
 local json = {}
@@ -138,10 +104,9 @@ local function jskip(s, i)
     return (j or i - 1) + 1
 end
 
-local jvalue   -- forward declaration
+local jvalue
 
 local function jstring(s, i)
-    -- s[i] == '"'
     i = i + 1
     local buf = {}
     while true do
@@ -217,10 +182,7 @@ end
 
 function json.decode(s)
     if type(s) ~= "string" or s == "" then return nil, "empty" end
-    local ok, v = pcall(function()
-        local val = jvalue(s, 1)
-        return val
-    end)
+    local ok, v = pcall(function() return jvalue(s, 1) end)
     if not ok then return nil, tostring(v) end
     return v
 end
@@ -229,20 +191,14 @@ end
 -- Configuration model
 -- ---------------------------------------------------------------------------
 
-local function default_group(kind)
+local function default_group(is_cd)
     return {
-        enabled  = true,
-        anchor   = kind == "buff" and 8 or 8,   -- Bot Center
-        dx       = kind == "buff" and -260 or 0,
-        dy       = kind == "buff" and -180 or -140,
-        grow     = 1,        -- Right
-        w        = 84,
-        h        = 22,
-        spacing  = 4,
-        limit    = 8,
-        include  = "",       -- comma-separated substrings; empty = everything
-        exclude  = "",
-        show_ready = false,  -- cooldown group only
+        enabled    = true,
+        show_icons = true,
+        limit      = 10,
+        include    = "",
+        exclude    = "",
+        show_ready = is_cd and false or nil,
     }
 end
 
@@ -251,18 +207,12 @@ local function default_aura(id)
         id       = id,
         name     = "New aura",
         enabled  = true,
-        trigger  = 1,        -- Status (buff)
+        trigger  = 1,
         pattern  = "",
         resource = 1,
         op       = 1,
         value    = 0.35,
         invert   = false,
-        display  = 1,        -- Bar
-        anchor   = 5,        -- Center
-        dx       = 0,
-        dy       = -140,
-        w        = 180,
-        h        = 24,
         r = 1.0, g = 0.45, b = 0.25,
         sound    = 1,
         toast    = false,
@@ -274,32 +224,30 @@ local function default_aura(id)
 end
 
 local cfg = {
-    enabled   = true,
-    unlocked  = false,
-    screen_w  = 1920,
-    screen_h  = 1080,
-    res_idx   = 1,
-    buffs     = default_group("buff"),
-    cds       = default_group("cd"),
-    auras     = {},
-    next_id   = 1,
+    enabled = true,
+    buffs   = default_group(false),
+    cds     = default_group(true),
+    auras   = {},
+    next_id = 1,
 }
 
 -- ---------------------------------------------------------------------------
 -- Runtime state
 -- ---------------------------------------------------------------------------
 
+local ui_settings  = false   -- settings face open? (not persisted: boot = HUD)
 local tab          = 1
-local sel_aura     = 1
 local share_text   = ""
 local share_msg    = ""
 local dirty        = false
 local last_save    = 0
 local last_poll    = 0
-local status_cache = {}    -- kind -> tracker record
-local skill_cache  = {}    -- kind -> { cooldown, base_cooldown, charges, icon }
-local skill_used   = {}    -- kind -> timestamp of last observed use
-local fired        = {}    -- aura id -> true while its action has already run
+local status_cache = {}      -- kind -> tracker record
+local skill_cache  = {}      -- kind -> { cooldown, base_cooldown, charges }
+local skill_used   = {}      -- kind -> timestamp of last observed use
+local fired        = {}      -- aura id -> already-actioned flag
+local icon_cache   = {}      -- kind -> resolvable icon kind, or false
+local sel_aura     = 1
 
 local SAVE_INTERVAL = 2.0
 local POLL_INTERVAL = 0.25
@@ -335,14 +283,10 @@ local function load_config()
         farever.log.warn("aura_forge: config unreadable (" .. tostring(err) .. "), using defaults")
         return
     end
-    cfg.enabled  = v.enabled ~= false
-    cfg.unlocked = v.unlocked == true
-    cfg.screen_w = tonumber(v.screen_w) or 1920
-    cfg.screen_h = tonumber(v.screen_h) or 1080
-    cfg.res_idx  = tonumber(v.res_idx) or 1
-    cfg.next_id  = tonumber(v.next_id) or 1
-    if type(v.buffs) == "table" then cfg.buffs = merge_defaults(v.buffs, default_group("buff")) end
-    if type(v.cds)   == "table" then cfg.cds   = merge_defaults(v.cds,   default_group("cd"))   end
+    cfg.enabled = v.enabled ~= false
+    cfg.next_id = tonumber(v.next_id) or 1
+    if type(v.buffs) == "table" then cfg.buffs = merge_defaults(v.buffs, default_group(false)) end
+    if type(v.cds)   == "table" then cfg.cds   = merge_defaults(v.cds,   default_group(true))  end
     cfg.auras = {}
     if type(v.auras) == "table" then
         for _, a in ipairs(v.auras) do
@@ -356,10 +300,9 @@ end
 -- ---------------------------------------------------------------------------
 -- StatusTracker
 --
--- statuses() gives { kind, duration, stacks, shield_amount } but does not say
--- whether `duration` is the total or the remaining time. Watch it: if it
--- decays it is remaining; if it holds steady it is total and we count down
--- from first sight ourselves.
+-- Live-game ground truth: permanent auras (passives, stack accumulators)
+-- report duration 0.00 or -1.00. Timed auras report a positive duration whose
+-- meaning (total vs remaining) is detected by watching whether it decays.
 -- ---------------------------------------------------------------------------
 
 local function status_tick(now)
@@ -374,18 +317,24 @@ local function status_tick(now)
             seen[kind] = true
             local d   = tonumber(s.duration) or 0
             local rec = status_cache[kind]
+            local is_new = false
 
             if not rec then
                 rec = { kind = kind, first = now, d0 = d, dlast = d,
                         mode = "unknown", stacks = 0, shield = 0 }
                 status_cache[kind] = rec
+                is_new = true
             end
 
-            -- A jump upward means the buff was refreshed / reapplied.
-            if d > rec.dlast + 0.25 then
+            if d <= 0.01 then
+                -- 0 or -1: no time limit. A pure-stack aura is just a
+                -- permanent aura whose stacks field moves.
+                rec.mode = "permanent"
+            elseif d > rec.dlast + 0.25 then
+                -- jumped upward: refreshed / reapplied
                 rec.first = now
                 rec.d0    = d
-            elseif rec.mode == "unknown" then
+            elseif rec.mode == "unknown" or rec.mode == "permanent" then
                 if d < rec.dlast - 0.05 then
                     rec.mode = "remaining"
                 elseif (now - rec.first) > 1.5 and math.abs(d - rec.d0) < 0.01 then
@@ -398,6 +347,13 @@ local function status_tick(now)
             rec.shield  = tonumber(s.shield_amount) or 0
             rec.active  = true
             rec.seen_at = now
+            if is_new then
+                -- One log line per new status per session: keeps the duration
+                -- semantics auditable in farever-mod.log.
+                farever.log.info(string.format(
+                    "af_status %s duration=%.2f stacks=%d shield=%.0f",
+                    kind, d, rec.stacks, rec.shield))
+            end
         end
     end
 
@@ -406,14 +362,15 @@ local function status_tick(now)
     end
 end
 
+-- remaining, total. Permanent auras return (0, 0) and are flagged by mode.
 local function status_remaining(rec, now)
     if not rec or not rec.active then return 0, 0 end
+    if rec.mode == "permanent" then return 0, 0 end
     if rec.mode == "remaining" then
         return math.max(0, rec.dlast), math.max(rec.d0, rec.dlast)
     elseif rec.mode == "total" then
         return math.max(0, rec.dlast - (now - rec.first)), rec.dlast
     end
-    -- undecided: show the raw value, assume it is the whole window
     return math.max(0, rec.dlast), math.max(rec.d0, rec.dlast)
 end
 
@@ -431,7 +388,6 @@ local function skills_tick()
                 cooldown      = tonumber(s.cooldown) or 0,
                 base_cooldown = tonumber(s.base_cooldown) or 0,
                 charges       = tonumber(s.charges) or 0,
-                icon          = s.icon,
             }
         end
     end
@@ -445,8 +401,8 @@ local function cd_remaining(kind, now)
     return math.max(0, rec.cooldown - (now - used)), rec.cooldown
 end
 
--- A skill firing several damage events (multi-hit, DoT ticks) must not keep
--- restarting its own cooldown, so only a skill already off cooldown starts one.
+-- Multi-hit skills fire several damage events per cast; only a skill that is
+-- already off cooldown starts a new one.
 local function note_skill_used(kind, now)
     if not kind or kind == "" then return end
     local rem = cd_remaining(kind, now)
@@ -454,24 +410,17 @@ local function note_skill_used(kind, now)
 end
 
 -- ---------------------------------------------------------------------------
--- Resource / target reads
+-- Trigger evaluation
 -- ---------------------------------------------------------------------------
 
 local function read_resource(name)
-    local p = farever.player
-    local fn = p[name]
+    local fn = farever.player[name]
     if has(fn) then
         local ok, v = pcall(fn)
         if ok then return tonumber(v) or 0 end
     end
     return 0
 end
-
--- ---------------------------------------------------------------------------
--- Trigger evaluation
---
--- Returns: active, remaining, total, label, stacks
--- ---------------------------------------------------------------------------
 
 local function match_pattern(kind, pat)
     if pat == "" then return true end
@@ -503,6 +452,7 @@ local function aura_loaded(a)
     return true
 end
 
+-- Returns: active, remaining, total, label, stacks
 local function eval_aura(a, now)
     local active, rem, total, label, stacks = false, 0, 0, a.name, 0
 
@@ -577,161 +527,6 @@ local function eval_aura(a, now)
     return active, rem, total, label, stacks
 end
 
--- ---------------------------------------------------------------------------
--- HUD drawing
--- ---------------------------------------------------------------------------
-
-local function anchor_origin(idx)
-    local w, h = cfg.screen_w, cfg.screen_h
-    local col = (idx - 1) % 3          -- 0 left, 1 center, 2 right
-    local row = math.floor((idx - 1) / 3)
-    local x = (col == 0) and 0 or (col == 1) and (w / 2) or w
-    local y = (row == 0) and 0 or (row == 1) and (h / 2) or h
-    return x, y
-end
-
-local function fmt_time(t)
-    if t <= 0 then return "" end
-    if t >= 60 then return string.format("%d:%02d", math.floor(t / 60), math.floor(t % 60)) end
-    if t < 10 then return string.format("%.1f", t) end
-    return string.format("%d", math.floor(t + 0.5))
-end
-
--- One HUD element. Style 1 = Bar, 2 = Tile, 3 = Text.
-local function draw_element(x, y, w, h, style, fill, label, right_text,
-                            r, g, b, pulse_on, stacks)
-    local a = 1.0
-    if pulse_on then a = 0.55 + 0.45 * ((math.sin(farever.now() * 8) + 1) / 2) end
-
-    if style == 3 then
-        imgui.draw_text(x, y, r, g, b, a, label)
-        if right_text ~= "" then
-            imgui.draw_text(x + w - 34, y, r, g, b, a, right_text)
-        end
-        return
-    end
-
-    -- backdrop
-    imgui.draw_rect_filled(x, y, x + w, y + h, 0.05, 0.06, 0.09, 0.78)
-    -- fill
-    if fill > 0 then
-        local fw = w * math.max(0, math.min(1, fill))
-        imgui.draw_rect_filled(x, y, x + fw, y + h, r, g, b, 0.85 * a)
-    end
-    -- border
-    imgui.draw_rect(x, y, x + w, y + h, r * 0.9, g * 0.9, b * 0.9, a, 1.5)
-
-    if style == 2 then
-        -- Tile: centred countdown, small label underneath
-        if right_text ~= "" then
-            imgui.draw_text(x + w * 0.5 - 10, y + h * 0.5 - 8, 1, 1, 1, a, right_text)
-        end
-        imgui.draw_text(x, y + h + 1, 0.8, 0.8, 0.85, a * 0.9,
-                        string.sub(label, 1, 12))
-    else
-        imgui.draw_text(x + 5, y + h * 0.5 - 8, 1, 1, 1, a, string.sub(label, 1, 22))
-        if right_text ~= "" then
-            imgui.draw_text(x + w - 34, y + h * 0.5 - 8, 1, 1, 1, a, right_text)
-        end
-    end
-
-    if stacks and stacks > 1 then
-        imgui.draw_text(x + w - 14, y + 1, 1, 0.9, 0.3, a, tostring(stacks))
-    end
-end
-
-local function outline(x, y, w, h, name)
-    imgui.draw_rect(x - 1, y - 1, x + w + 1, y + h + 1, 0.2, 1.0, 0.4, 0.9, 1.0)
-    imgui.draw_text(x, y - 15, 0.2, 1.0, 0.4, 1.0, name)
-end
-
--- Lay out the i-th member of a group. Groups always render as bars, so the
--- vertical step is just the bar height; no room needed for a tile caption.
-local function group_slot(grp, ox, oy, i)
-    local step = (grp.grow <= 2) and (grp.w + grp.spacing) or (grp.h + grp.spacing)
-    local n = i - 1
-    if     grp.grow == 1 then return ox + n * step, oy
-    elseif grp.grow == 2 then return ox - n * step, oy
-    elseif grp.grow == 3 then return ox, oy + n * step
-    else                      return ox, oy - n * step end
-end
-
-local function draw_buff_group(now)
-    local grp = cfg.buffs
-    if not grp.enabled then return end
-    local ax, ay = anchor_origin(grp.anchor)
-    local ox, oy = ax + grp.dx, ay + grp.dy
-
-    local list = {}
-    for kind, rec in pairs(status_cache) do
-        if rec.active and match_pattern(kind, grp.include)
-           and not (grp.exclude ~= "" and match_pattern(kind, grp.exclude)) then
-            local r, t = status_remaining(rec, now)
-            list[#list + 1] = { kind = kind, r = r, t = t, stacks = rec.stacks }
-        end
-    end
-    table.sort(list, function(p, q) return p.r < q.r end)
-
-    if cfg.unlocked then
-        outline(ox, oy, grp.w, grp.h, "Buff bar")
-        if #list == 0 then
-            draw_element(ox, oy, grp.w, grp.h, 1, 0.6, "(no buffs)", "",
-                         0.3, 0.7, 1.0, false, 0)
-        end
-    end
-
-    for i = 1, math.min(#list, grp.limit) do
-        local e = list[i]
-        local x, y = group_slot(grp, ox, oy, i)
-        local fill = (e.t > 0) and (e.r / e.t) or 1.0
-        local r, g, b = 0.3, 0.75, 1.0
-        if e.r > 0 and e.r <= 3 then r, g, b = 1.0, 0.55, 0.2 end
-        draw_element(x, y, grp.w, grp.h, 1, fill,
-                     string.sub(e.kind, 1, 18), fmt_time(e.r),
-                     r, g, b, e.r > 0 and e.r <= 2, e.stacks)
-    end
-end
-
-local function draw_cd_group(now)
-    local grp = cfg.cds
-    if not grp.enabled then return end
-    local ax, ay = anchor_origin(grp.anchor)
-    local ox, oy = ax + grp.dx, ay + grp.dy
-
-    local list = {}
-    for kind, rec in pairs(skill_cache) do
-        if match_pattern(kind, grp.include)
-           and not (grp.exclude ~= "" and match_pattern(kind, grp.exclude)) then
-            local r, t = cd_remaining(kind, now)
-            if r > 0 or grp.show_ready then
-                list[#list + 1] = { kind = kind, r = r, t = t }
-            end
-        end
-    end
-    table.sort(list, function(p, q) return p.r < q.r end)
-
-    if cfg.unlocked then
-        outline(ox, oy, grp.w, grp.h, "Cooldown bar")
-        if #list == 0 then
-            draw_element(ox, oy, grp.w, grp.h, 1, 0.6, "(no cooldowns)", "",
-                         0.8, 0.5, 1.0, false, 0)
-        end
-    end
-
-    for i = 1, math.min(#list, grp.limit) do
-        local e = list[i]
-        local x, y = group_slot(grp, ox, oy, i)
-        local ready = e.r <= 0
-        local fill  = ready and 1.0 or (1.0 - (e.t > 0 and e.r / e.t or 0))
-        local r, g, b = 0.75, 0.45, 1.0
-        if ready then r, g, b = 0.35, 0.9, 0.45 end
-        draw_element(x, y, grp.w, grp.h, 1, fill,
-                     string.sub(e.kind, 1, 18),
-                     ready and "" or fmt_time(e.r),
-                     r, g, b, false, 0)
-    end
-end
-
 local function run_actions(a, active)
     if active and not fired[a.id] then
         fired[a.id] = true
@@ -742,62 +537,227 @@ local function run_actions(a, active)
     end
 end
 
-local function draw_auras(now)
+-- ---------------------------------------------------------------------------
+-- HUD rendering (in-window flow widgets)
+-- ---------------------------------------------------------------------------
+
+local function fmt_time(t)
+    if t <= 0 then return "" end
+    if t >= 60 then return string.format("%d:%02d", math.floor(t / 60), math.floor(t % 60)) end
+    if t < 10 then return string.format("%.1fs", t) end
+    return string.format("%ds", math.floor(t + 0.5))
+end
+
+local function short(s, n)
+    s = tostring(s)
+    -- strip the noise suffixes for display
+    s = string.gsub(s, "_Status$", "")
+    s = string.gsub(s, "_Buff$", "")
+    if #s <= n then return s end
+    return string.sub(s, 1, n - 1) .. "~"
+end
+
+-- Statuses rarely resolve an icon under their own kind, but their parent
+-- skill usually does ("Staff_Censer_Passive_Buff" -> "Staff_Censer_Passive").
+-- Try a fallback chain once, cache the winner (or the failure).
+local function draw_icon_for(kind, size)
+    local hit = icon_cache[kind]
+    if hit == false then return false end
+    if hit ~= nil then return imgui.icon(hit, size) end
+
+    local candidates = { kind }
+    local base = string.gsub(kind, "_Status$", "")
+    base = string.gsub(base, "_Buff$", "")
+    base = string.gsub(base, "_Debuff$", "")
+    if base ~= kind then candidates[#candidates + 1] = base end
+    local base2 = string.gsub(base, "_Accum$", "")
+    base2 = string.gsub(base2, "_Passive$", "")
+    if base2 ~= base then candidates[#candidates + 1] = base2 end
+
+    for _, cand in ipairs(candidates) do
+        if imgui.icon(cand, size) then
+            icon_cache[kind] = cand
+            return true
+        end
+    end
+    icon_cache[kind] = false
+    return false
+end
+
+local function passes_filters(kind, grp)
+    if not match_pattern(kind, grp.include) then return false end
+    if grp.exclude ~= "" and match_pattern(kind, grp.exclude) then return false end
+    return true
+end
+
+local function draw_alerts(now)
     for _, a in ipairs(cfg.auras) do
         if a.enabled and aura_loaded(a) then
-            local active, rem, total, label, stacks = eval_aura(a, now)
+            local active, rem, total, label = eval_aura(a, now)
             run_actions(a, active)
-            if active or cfg.unlocked then
-                local ax, ay = anchor_origin(a.anchor)
-                local x, y = ax + a.dx, ay + a.dy
-                local fill = 1.0
-                if total > 0 then fill = math.max(0, math.min(1, rem / total)) end
-                local rt = ""
-                if a.trigger == 1 or a.trigger == 2 or a.trigger == 5 then
-                    rt = fmt_time(rem)
+            if active then
+                local alpha = 1.0
+                if a.pulse then
+                    alpha = 0.55 + 0.45 * ((math.sin(now * 8) + 1) / 2)
                 end
-                if cfg.unlocked then outline(x, y, a.w, a.h, a.name) end
-                draw_element(x, y, a.w, a.h, a.display, fill, label, rt,
-                             a.r, a.g, a.b, a.pulse and active, stacks)
+                imgui.font_scale(1.5)
+                local text = label
+                if rem > 0 and (a.trigger == 1 or a.trigger == 2 or a.trigger == 5) then
+                    text = text .. "  " .. fmt_time(rem)
+                end
+                imgui.text_colored(a.r, a.g, a.b, alpha, text)
+                imgui.font_scale(1.0)
+                if total > 0 then
+                    imgui.progress(math.max(0, math.min(1, rem / total)), "")
+                end
             end
         end
     end
 end
 
-local function draw_hud()
-    if not cfg.enabled then return end
-    if not farever.player.locked() then return end
-    local now = farever.now()
-    draw_buff_group(now)
-    draw_cd_group(now)
-    draw_auras(now)
+local function draw_buffs(now)
+    local grp = cfg.buffs
+    if not grp.enabled then return end
+
+    local timed, perm = {}, {}
+    for kind, rec in pairs(status_cache) do
+        if rec.active and passes_filters(kind, grp) then
+            if rec.mode == "permanent" then
+                perm[#perm + 1] = rec
+            else
+                local r, t = status_remaining(rec, now)
+                rec._r, rec._t = r, t
+                timed[#timed + 1] = rec
+            end
+        end
+    end
+    table.sort(timed, function(p, q) return p._r < q._r end)
+    table.sort(perm,  function(p, q) return p.kind < q.kind end)
+
+    local shown = 0
+    local function row(rec)
+        if shown >= grp.limit then return end
+        shown = shown + 1
+        if grp.show_icons and draw_icon_for(rec.kind, 20) then
+            imgui.same_line()
+        end
+        local label = short(rec.kind, 24)
+        if rec.stacks > 1 then label = label .. "  x" .. rec.stacks end
+        if rec.mode == "permanent" then
+            imgui.progress(1.0, label)
+        else
+            local fill = (rec._t > 0) and (rec._r / rec._t) or 0
+            imgui.progress(math.max(0, math.min(1, fill)),
+                           label .. "   " .. fmt_time(rec._r))
+        end
+    end
+
+    -- expiring first, then the permanent block
+    for _, rec in ipairs(timed) do row(rec) end
+    for _, rec in ipairs(perm)  do row(rec) end
+end
+
+local function draw_cds(now)
+    local grp = cfg.cds
+    if not grp.enabled then return end
+
+    local list = {}
+    for kind in pairs(skill_cache) do
+        if passes_filters(kind, grp) then
+            local r, t = cd_remaining(kind, now)
+            if r > 0 or grp.show_ready then
+                list[#list + 1] = { kind = kind, r = r, t = t }
+            end
+        end
+    end
+    if #list == 0 then return end
+    table.sort(list, function(p, q) return p.r < q.r end)
+
+    imgui.separator()
+    local shown = 0
+    for _, e in ipairs(list) do
+        if shown >= grp.limit then break end
+        shown = shown + 1
+        if grp.show_icons and draw_icon_for(e.kind, 20) then
+            imgui.same_line()
+        end
+        if e.r <= 0 then
+            imgui.progress(1.0, short(e.kind, 24) .. "   ready")
+        else
+            local fill = (e.t > 0) and (1.0 - e.r / e.t) or 0
+            imgui.progress(math.max(0, math.min(1, fill)),
+                           short(e.kind, 24) .. "   " .. fmt_time(e.r))
+        end
+    end
+end
+
+local function draw_hud(now)
+    if not farever.player.locked() then
+        imgui.text_colored(1, 0.6, 0.2, 1, "waiting for character...")
+        return
+    end
+    draw_alerts(now)
+    draw_buffs(now)
+    draw_cds(now)
 end
 
 -- ---------------------------------------------------------------------------
--- Configurator UI
+-- Settings tabs
 -- ---------------------------------------------------------------------------
+
+local function draw_status_tab()
+    imgui.text(string.format("aura_forge v%s", VERSION))
+    local v, c = imgui.checkbox("HUD enabled", cfg.enabled)
+    if c then cfg.enabled = v; mark_dirty() end
+    imgui.separator()
+
+    if not farever.player.locked() then
+        imgui.text_colored(1, 0.6, 0.2, 1, "waiting for player lock...")
+        return
+    end
+
+    local now = farever.now()
+    local n_active = 0
+    for _, rec in pairs(status_cache) do if rec.active then n_active = n_active + 1 end end
+    imgui.text(string.format("Active statuses: %d", n_active))
+    for kind, rec in pairs(status_cache) do
+        if rec.active then
+            local r = status_remaining(rec, now)
+            local t = (rec.mode == "permanent") and "-" or fmt_time(r)
+            imgui.text(string.format("  %-30s %6s  x%d  [%s]",
+                string.sub(kind, 1, 30), t, rec.stacks, rec.mode))
+        end
+    end
+
+    imgui.separator()
+    local n_sk, n_cd = 0, 0
+    for kind in pairs(skill_cache) do
+        n_sk = n_sk + 1
+        if cd_remaining(kind, now) > 0 then n_cd = n_cd + 1 end
+    end
+    imgui.text(string.format("Skills resolved: %d   on cooldown: %d", n_sk, n_cd))
+    for kind, rec in pairs(skill_cache) do
+        local r = cd_remaining(kind, now)
+        if r > 0 then
+            imgui.text_colored(1, 0.7, 0.3, 1, string.format("  %-28s %6s / %.0fs",
+                string.sub(kind, 1, 28), fmt_time(r), rec.cooldown))
+        else
+            imgui.text_colored(0.5, 0.9, 0.5, 1, string.format("  %-28s ready (%.0fs)",
+                string.sub(kind, 1, 28), rec.cooldown))
+        end
+    end
+    if n_sk == 0 then
+        imgui.text_colored(0.7, 0.7, 0.7, 1,
+            "Skills resolve as you use them - go hit something.")
+    end
+end
 
 local function group_editor(grp, title, is_cd)
     local v, c
     v, c = imgui.checkbox("Enabled##" .. title, grp.enabled)
     if c then grp.enabled = v; mark_dirty() end
-
-    v, c = imgui.combo("Anchor##" .. title, grp.anchor, ANCHORS)
-    if c then grp.anchor = v; mark_dirty() end
-    v, c = imgui.drag_float("Offset X##" .. title, grp.dx, 1, -4000, 4000)
-    if c then grp.dx = v; mark_dirty() end
-    v, c = imgui.drag_float("Offset Y##" .. title, grp.dy, 1, -4000, 4000)
-    if c then grp.dy = v; mark_dirty() end
-    v, c = imgui.combo("Grow##" .. title, grp.grow, GROW)
-    if c then grp.grow = v; mark_dirty() end
-
-    imgui.separator()
-    v, c = imgui.drag_float("Width##" .. title, grp.w, 1, 24, 500)
-    if c then grp.w = v; mark_dirty() end
-    v, c = imgui.drag_float("Height##" .. title, grp.h, 1, 8, 120)
-    if c then grp.h = v; mark_dirty() end
-    v, c = imgui.drag_float("Spacing##" .. title, grp.spacing, 1, 0, 60)
-    if c then grp.spacing = v; mark_dirty() end
+    v, c = imgui.checkbox("Show icons##" .. title, grp.show_icons)
+    if c then grp.show_icons = v; mark_dirty() end
     v, c = imgui.drag_float("Max shown##" .. title, grp.limit, 1, 1, 24)
     if c then grp.limit = math.floor(v); mark_dirty() end
 
@@ -812,60 +772,6 @@ local function group_editor(grp, title, is_cd)
     if is_cd then
         v, c = imgui.checkbox("Also show ready skills##" .. title, grp.show_ready)
         if c then grp.show_ready = v; mark_dirty() end
-    end
-end
-
-local function draw_status_tab()
-    imgui.text(string.format("aura_forge v%s", VERSION))
-    local v, c
-    v, c = imgui.checkbox("HUD enabled", cfg.enabled)
-    if c then cfg.enabled = v; mark_dirty() end
-    imgui.same_line()
-    v, c = imgui.checkbox("Unlocked (show placement outlines)", cfg.unlocked)
-    if c then cfg.unlocked = v; mark_dirty() end
-    imgui.separator()
-
-    if not farever.player.locked() then
-        imgui.text_colored(1, 0.6, 0.2, 1, "waiting for player lock...")
-        return
-    end
-
-    local now = farever.now()
-
-    local n_active = 0
-    for _, rec in pairs(status_cache) do if rec.active then n_active = n_active + 1 end end
-    imgui.text(string.format("Active statuses: %d", n_active))
-    for kind, rec in pairs(status_cache) do
-        if rec.active then
-            local r, t = status_remaining(rec, now)
-            imgui.text(string.format("  %-26s %5s  x%d  [%s]",
-                string.sub(kind, 1, 26), fmt_time(r), rec.stacks, rec.mode))
-        end
-    end
-
-    imgui.separator()
-    local n_sk, n_cd = 0, 0
-    for kind in pairs(skill_cache) do
-        n_sk = n_sk + 1
-        if cd_remaining(kind, now) > 0 then n_cd = n_cd + 1 end
-    end
-    imgui.text(string.format("Skills resolved: %d   on cooldown: %d", n_sk, n_cd))
-    for kind, rec in pairs(skill_cache) do
-        local r = cd_remaining(kind, now)
-        -- The configurator is the one place the game's real icons can be drawn.
-        if not imgui.icon(kind, 18) then imgui.text(" ") end
-        imgui.same_line()
-        if r > 0 then
-            imgui.text_colored(1, 0.7, 0.3, 1, string.format("%-24s %5s / %.0fs",
-                string.sub(kind, 1, 24), fmt_time(r), rec.cooldown))
-        else
-            imgui.text_colored(0.5, 0.9, 0.5, 1, string.format("%-24s ready (%.0fs)",
-                string.sub(kind, 1, 24), rec.cooldown))
-        end
-    end
-    if n_sk == 0 then
-        imgui.text_colored(0.7, 0.7, 0.7, 1,
-            "Skills resolve as you use them - go hit something.")
     end
 end
 
@@ -948,20 +854,6 @@ local function aura_editor()
     if c then a.invert = v; mark_dirty() end
 
     imgui.separator()
-    imgui.text("Display")
-    v, c = imgui.combo("Style", a.display, DISPLAYS)
-    if c then a.display = v; mark_dirty() end
-    v, c = imgui.combo("Anchor##a", a.anchor, ANCHORS)
-    if c then a.anchor = v; mark_dirty() end
-    v, c = imgui.drag_float("Offset X##a", a.dx, 1, -4000, 4000)
-    if c then a.dx = v; mark_dirty() end
-    v, c = imgui.drag_float("Offset Y##a", a.dy, 1, -4000, 4000)
-    if c then a.dy = v; mark_dirty() end
-    v, c = imgui.drag_float("Width##a", a.w, 1, 20, 800)
-    if c then a.w = v; mark_dirty() end
-    v, c = imgui.drag_float("Height##a", a.h, 1, 8, 200)
-    if c then a.h = v; mark_dirty() end
-
     local r, g, b, ch = imgui.color_edit("Color", a.r, a.g, a.b)
     if ch then a.r, a.g, a.b = r, g, b; mark_dirty() end
     v, c = imgui.checkbox("Pulse while active", a.pulse)
@@ -991,47 +883,6 @@ local function aura_editor()
     else
         imgui.text_colored(0.6, 0.6, 0.6, 1, "LIVE: off")
     end
-end
-
-local function draw_layout_tab()
-    imgui.text("Anchors are computed from the screen size, which the plugin")
-    imgui.text("API cannot query. Set it once so anchors land correctly.")
-    imgui.separator()
-
-    local v, c = imgui.combo("Resolution", cfg.res_idx, RES_LABELS)
-    if c then
-        cfg.res_idx = v
-        local p = RES_PRESETS[v]
-        if p and p.w > 0 then cfg.screen_w, cfg.screen_h = p.w, p.h end
-        mark_dirty()
-    end
-    if cfg.res_idx == #RES_PRESETS then
-        v, c = imgui.drag_float("Width", cfg.screen_w, 1, 640, 8000)
-        if c then cfg.screen_w = v; mark_dirty() end
-        v, c = imgui.drag_float("Height", cfg.screen_h, 1, 480, 5000)
-        if c then cfg.screen_h = v; mark_dirty() end
-    end
-    imgui.text(string.format("Using %.0f x %.0f", cfg.screen_w, cfg.screen_h))
-
-    imgui.separator()
-    v, c = imgui.checkbox("Unlocked (outline + label every element)", cfg.unlocked)
-    if c then cfg.unlocked = v; mark_dirty() end
-    imgui.text_colored(0.7, 0.7, 0.7, 1,
-        "Turn this on, nudge the Offset X / Y values, turn it off to play.")
-
-    imgui.separator()
-    if imgui.button("Save now") then save(true); farever.toast("Layout saved") end
-    imgui.same_line()
-    if imgui.button("Reset all positions") then
-        cfg.buffs = default_group("buff")
-        cfg.cds   = default_group("cd")
-        mark_dirty(); save(true)
-        farever.toast("Group positions reset")
-    end
-
-    imgui.separator()
-    imgui.text_colored(0.7, 0.7, 0.7, 1, "If HUD elements do not appear at all,")
-    imgui.text_colored(0.7, 0.7, 0.7, 1, "see the clipping note in docs/aura-forge.md.")
 end
 
 local function draw_share_tab()
@@ -1081,20 +932,16 @@ end
 function on_init()
     load_config()
     if #cfg.auras == 0 then
-        -- Two starters so a fresh install shows something useful immediately.
         local low = default_aura(cfg.next_id); cfg.next_id = cfg.next_id + 1
         low.name, low.trigger, low.resource = "LOW HEALTH", 3, 1
         low.op, low.value = 1, 0.35
-        low.anchor, low.dx, low.dy = 5, -90, -150
         low.r, low.g, low.b = 1.0, 0.25, 0.25
-        low.sound, low.display = 3, 1
+        low.sound = 3
         cfg.auras[#cfg.auras + 1] = low
 
         local cast = default_aura(cfg.next_id); cfg.next_id = cfg.next_id + 1
         cast.name, cast.trigger, cast.pattern = "TARGET CASTING", 5, ""
-        cast.anchor, cast.dx, cast.dy = 2, -90, 120
         cast.r, cast.g, cast.b = 1.0, 0.75, 0.2
-        cast.display = 1
         cfg.auras[#cfg.auras + 1] = cast
 
         mark_dirty(); save(true)
@@ -1112,7 +959,7 @@ function on_event(name, data)
     elseif name == "shield_applied" then
         note_skill_used(data.skill, now)
     elseif name == "hero_locked" then
-        status_cache, skill_cache, skill_used, fired = {}, {}, {}, {}
+        status_cache, skill_cache, skill_used, fired, icon_cache = {}, {}, {}, {}, {}
     end
 end
 
@@ -1123,19 +970,28 @@ function on_render()
         status_tick(now)
         skills_tick()
     end
-
-    -- The HUD is drawn every frame so countdowns stay smooth.
-    draw_hud()
     save(false)
 
-    local v, c = imgui.combo("##tab", tab, TABS)
-    if c then tab = v end
+    local v, c = imgui.checkbox("settings", ui_settings)
+    if c then ui_settings = v end
+
+    if not ui_settings then
+        if cfg.enabled then
+            draw_hud(now)
+        else
+            imgui.text_colored(0.6, 0.6, 0.6, 1, "(HUD disabled - open settings)")
+        end
+        return
+    end
+
+    imgui.separator()
+    local t, tc = imgui.combo("##tab", tab, TABS)
+    if tc then tab = t end
     imgui.separator()
 
     if     tab == 1 then draw_status_tab()
     elseif tab == 2 then group_editor(cfg.buffs, "buffs", false)
     elseif tab == 3 then group_editor(cfg.cds, "cds", true)
     elseif tab == 4 then aura_editor()
-    elseif tab == 5 then draw_layout_tab()
     else                 draw_share_tab() end
 end

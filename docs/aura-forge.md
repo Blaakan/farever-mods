@@ -1,162 +1,90 @@
 # AuraForge
 
-A WeakAuras-style HUD for Farever: movable buff bars, cooldown bars, and
-rule-driven alerts.
+A WeakAuras-style HUD for Farever: buff bars with icons, stacks and countdowns,
+cooldown bars, and rule-driven alerts.
 
 Install: copy [`plugins/aura_forge.lua`](../plugins/aura_forge.lua) into
 `<Farever>\data\plugins\`.
 
-## Set this first
+## How it presents (v2)
 
-Go to the **Layout** tab and pick your resolution.
+The plugin window **is** the HUD. Drag it where you want it — the host mod
+saves window positions — and lock the overlay with the padlock when you're
+done. Content, top to bottom:
 
-The plugin API has no way to query screen size, so anchors are computed from a
-value you supply. Get it right once and every element lands where you put it,
-at any resolution.
+1. **Alerts** — your rule-driven auras, as large pulsing text (plus a progress
+   bar when the trigger has a duration, e.g. an enemy cast).
+2. **Buffs** — one row per active status: icon (when resolvable), name, stack
+   count, and a draining bar with the remaining time. Expiring buffs sort
+   first; **permanent buffs render as full bars with their stacks** and sit
+   below the timed ones.
+3. **Cooldowns** — one row per tracked skill on cooldown, filling back up as
+   it recovers. Optionally keeps ready skills visible.
 
-Then tick **Unlocked**: every HUD element gets a green outline and a label, even
-when inactive, so you can see what you are positioning. Untick it to play.
+Tick the small **settings** checkbox to flip the window into config mode
+(Status diagnostics, Buffs, Cooldowns, Auras, Share tabs). Untick to play.
 
-## What you get
+### Buff semantics, from the live game
 
-### Buff bar
-Auto-arranging list of your active statuses, shortest remaining first. Each bar
-drains as its buff expires, shows the remaining time, turns orange under 3
-seconds, and pulses under 2. Stack counts appear in the corner.
+Read out of a running session's log rather than assumed:
 
-Configurable: anchor, X/Y offset, grow direction (right/left/down/up), bar size,
-spacing, max shown, and include/exclude filters.
+- **Permanent auras** (passives, stack accumulators) report `duration` **0.00
+  or −1.00** through the API. AuraForge gives them a `permanent` mode: always
+  full, no timer, stacks displayed. A "stack-only" aura is just a permanent
+  aura whose stack count moves.
+- **Timed auras** report a positive duration; whether that number is the
+  total length or the remaining time is unspecified, so it's detected at
+  runtime by watching whether it decays. The Status tab shows the detected
+  mode per buff (`[permanent]`, `[remaining]`, `[total]`).
+- **Icons**: a status kind (`Staff_Censer_Passive_Buff`) rarely has its own
+  icon, but its parent skill usually does — icons resolve through a fallback
+  chain (strip `_Status`/`_Buff`, then `_Passive`/`_Accum`) and are cached.
 
-### Cooldown bar
-Same layout engine, for skill cooldowns. Bars fill as the cooldown recovers.
-Optionally keeps ready skills on screen in green instead of hiding them.
+## Auras (the alert rules)
 
-### Auras
-Individually placed alerts, each driven by a trigger:
+Each aura has a **trigger**:
 
 | Trigger | Fires on |
 |---|---|
-| **Status (buff)** | a matching buff being active; shows its countdown |
-| **Skill cooldown** | a matching skill being on cooldown; shows remaining |
-| **Resource** | health %, shield, energy, rage, spark, focus, combo points, poise, oxygen vs a threshold |
-| **In combat** | the game's own combat flag |
-| **Target casting** | your target casting a matching skill; shows the cast bar |
-| **Target HP** | target health % vs a threshold |
+| Status (buff) | a matching buff being active; shows its countdown |
+| Skill cooldown | a matching skill being on cooldown; shows remaining |
+| Resource | health %, shield, energy, rage, spark, focus, combo, poise, oxygen vs a threshold |
+| In combat | the game's combat flag |
+| Target casting | your target casting a matching skill; shows the cast bar |
+| Target HP | target health % vs a threshold |
 
-Each aura also has:
+Plus: **Invert** ("show when NOT matched" — missing-buff warnings), colour,
+pulse, **actions** (sound/toast, fired once per activation), and **load
+conditions** (class / min level / in-combat only).
 
-- **Invert** — fire when *not* matched. This is how you build "you are missing
-  your buff" warnings, which is most of what WeakAuras gets used for.
-- **Display** — Bar, Tile (compact, centred countdown), or Text.
-- **Position** — one of nine screen anchors plus an X/Y offset.
-- **Colour**, and an optional pulse while active.
-- **Actions** — play a sound and/or pop a toast when it turns on. Fires once per
-  activation, not once per frame.
-- **Load conditions** — restrict to a class, a minimum level, or in-combat only.
-  An aura that fails its load conditions is not evaluated at all.
+Matching is by comma-separated substrings against internal ids
+(`shield,barrier`). The Status tab lists live ids so you know what to type.
 
-Matching is by substring against the internal id, comma-separated for
-alternatives — `shield,barrier` matches either. Leave it empty to match
-everything of that type. The **Status** tab lists the live ids so you can see
-what to type.
+Two starters ship: **LOW HEALTH** (under 35%) and **TARGET CASTING**.
 
-Two starter auras ship on first run: a red **LOW HEALTH** alert under 35%, and a
-**TARGET CASTING** bar.
+## Cooldown tracking — the honest limits
 
-### Status tab
-Live diagnostics: every active status with its resolved countdown and detected
-duration mode, and every skill the mod has seen with its cooldown state. This is
-the tab that tells you what strings to match on.
+`skills()` reports each skill's cooldown **duration**, never the remaining
+time, so remaining is derived: a cooldown starts when the skill is observed
+being used via the `damage_dealt` / `heal_dealt` / `shield_applied` events.
 
-It is also the one place the game's **real skill icons** are drawn — see below.
+Consequences: a skill that neither damages, heals nor shields cannot be
+tracked; no skill is known until used once in the session; multi-hit skills
+don't restart their own cooldown (a cooldown only starts when the skill was
+off cooldown).
 
-### Share
-Export your whole setup as JSON into a text box, or paste someone else's in and
-import it. **Write to file** drops it in
-`%LOCALAPPDATA%\farever-minimap\combatlogs\aura-forge-config.json`.
+## Share
 
-## Design notes — why it works this way
+Settings → Share: export the whole config as JSON to a text box or to
+`%LOCALAPPDATA%\farever-minimap\combatlogs\aura-forge-config.json`; paste and
+import someone else's.
 
-Three API constraints shaped the whole plugin. They are worth understanding,
-because they explain the parts that look unusual.
+## v1 → v2
 
-### 1. "Movable" means anchor + offset, not drag
-
-There is no mouse API — no cursor position, no click or drag state. So elements
-cannot be dragged with the mouse.
-
-Instead: nine screen anchors plus an X/Y offset, adjusted with drag-sliders in
-the configurator, with **Unlocked** mode outlining everything so you can see
-what you are doing. Anchoring to a corner also means elements stay put if you
-change resolution, which dragging would not give you.
-
-### 2. The HUD is shapes and text; icons live in the configurator
-
-`imgui.icon()` is a *flow* widget — it draws at the ImGui cursor inside the
-plugin's own window. The absolute `draw_*` primitives, which are what let you
-paint anywhere on screen, have no image variant.
-
-So the plugin splits the way WeakAuras splits display from options:
-
-- **HUD layer** — absolute primitives, positioned anywhere, freely movable.
-  Bars, borders, countdown text, stack counters, pulses. No icons.
-- **Configurator** — this window. Lists, editors, live previews, and the game's
-  real skill icons, which can only be drawn here.
-
-### 3. Cooldown *remaining* has to be derived
-
-`farever.player.skills()` reports each skill's cooldown **duration**, not how
-much of it is left. Nothing reports remaining time.
-
-So AuraForge tracks it: when a skill is observed being used, its cooldown starts
-locally, and remaining is `cooldown - (now - used)`. Uses are observed from the
-`damage_dealt`, `heal_dealt` and `shield_applied` events.
-
-**The consequence:** a skill that neither damages, heals, nor shields is never
-observed, so it cannot be tracked. Pure mobility and utility skills are the gap.
-Nothing in the current API closes it.
-
-A skill also only appears at all once the mod has resolved it, which happens
-during combat — an empty cooldown list right after login is normal.
-
-Multi-hit skills and damage-over-time ticks fire several `damage_dealt` events
-for one cast. A cooldown therefore only (re)starts when the skill is already
-off cooldown, so extra hits do not keep resetting it.
-
-### Buff duration semantics are detected at runtime
-
-`farever.player.statuses()` returns a `duration` field, and the API docs do not
-specify whether it is the buff's total length or its remaining time — they only
-say plugins should compute countdowns themselves.
-
-Rather than guess, AuraForge watches the value:
-
-- if it **decays** between samples → it is *remaining*, use it directly;
-- if it **holds steady** for over 1.5s → it is *total*, count down from first
-  sight;
-- a jump upward means the buff was refreshed, so the countdown restarts.
-
-The detected mode is shown in brackets on the Status tab (`[remaining]`,
-`[total]`, `[unknown]`). Both paths are covered by the test harness.
-
-## Limitations
-
-- **No mouse dragging**, as above.
-- **Screen size is a setting**, not detected.
-- **No icons on the HUD layer** — shapes and text only.
-- **Utility/mobility skills cannot have cooldowns tracked**, and no skill is
-  known until it has been used once in the session.
-- **Your own casts of non-damaging buffs** are only seen through
-  `shield_applied`, so buff-type cooldowns are partially covered.
-- **Only your own statuses.** The API exposes no party or target aura list.
-- **Absolute draws may clip.** The drawing primitives are documented as
-  absolute screen-space, and the host mod advertises them for exactly this kind
-  of custom HUD. If elements near the screen edge do not appear, they are being
-  clipped to the plugin window's draw region — move or enlarge the AuraForge
-  window, or bring the offsets inward.
-
-## Performance
-
-State polling runs at 4 Hz; the HUD redraws every frame so countdowns stay
-smooth. Config saves are batched to at most one write every 2 seconds, and only
-when something actually changed.
+v1 painted a free-floating HUD with the absolute draw primitives, positioned
+by nine screen anchors plus a resolution setting. In the real game those
+draws clip to the plugin's window, so the HUD was invisible. v2 renders
+everything in-window (the pattern the host's example plugins use), which also
+deletes the resolution/anchor configuration — position is now just "drag the
+window". Permanent buffs also rendered as expired in v1; v2 fixes that with
+the `permanent` mode above.

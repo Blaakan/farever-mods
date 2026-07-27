@@ -90,7 +90,15 @@ local WEAPON_PREFIXES  = { "sword_", "staff_", "bow_", "daggers_", "dagger_",
                            "book_", "shield_" }
 local ARMOR_PREFIXES   = { "head_", "hair_", "shoulders_", "back_", "hands_",
                            "waist_", "legs_", "feet_", "chest_", "torso_" }
-local TRINKET_PREFIXES = { "trinket_", "neck_", "ring_", "amulet_" }
+-- "necklace_" / "finger_" confirmed from a live equipment dump
+-- (Necklace_Z2RCraft in slot Neck, Finger_Z3RCraft_Cri in the finger slots).
+local TRINKET_PREFIXES = { "trinket_", "necklace_", "neck_", "finger_",
+                           "ring_", "amulet_" }
+-- Companions: Sprout_* ids carry cosmetic variants in the bytecode
+-- (Sprout_Rice_Spark, Sprout_Onion_Orange...). Zone-tagged Sprout_*_Z2W ids
+-- are world mobs, but mobs never appear in equipment or bags, so the bare
+-- prefix is safe in item context.
+local COMPANION_PREFIXES = { "sprout_", "companion_", "pet_" }
 
 local TABS = { "Dashboard", "Nearby", "Areas", "Route", "Collections", "Vault", "Codex", "Settings" }
 
@@ -112,9 +120,9 @@ local done        = {}    -- id -> true, the collected set for this character
 local codex_seen  = {}    -- monster kind -> "state:progress:max"
 
 -- Account-wide records; their store keys carry no character suffix.
-local acct        = { mount = {}, glider = {}, appearance = {} }
-local acct_n      = { mount = 0,  glider = 0,  appearance = 0 }
-local vault       = {}    -- kind -> "level|upgrade|char"
+local acct   = { mount = {}, glider = {}, companion = {}, appearance = {} }
+local acct_n = { mount = 0,  glider = 0,  companion = 0,  appearance = 0 }
+local vault  = {}    -- kind -> "level|upgrade|char"
 
 local profile     = ""    -- store key suffix for the active character
 local dirty       = false
@@ -254,6 +262,7 @@ local function flush(force)
     farever.store.set(key("codex"), map_encode(codex_seen))
     farever.store.set("acct_mounts",      set_encode(acct.mount))
     farever.store.set("acct_gliders",     set_encode(acct.glider))
+    farever.store.set("acct_companions",  set_encode(acct.companion))
     farever.store.set("acct_appearances", set_encode(acct.appearance))
     farever.store.set("acct_vault",       map_encode(vault))
     last_flush = now
@@ -540,6 +549,7 @@ local function route_of(kind, slot_name)
     local k = lower(kind)
     if starts_with_any(k, { "mount_" })  then return "mount" end
     if starts_with_any(k, { "glider_" }) then return "glider" end
+    if starts_with_any(k, COMPANION_PREFIXES) then return "companion" end
     if slot_name and slot_name ~= "" then
         if WEAPON_SLOTS[slot_name]  then return "weapon" end
         if TRINKET_SLOTS[slot_name] then return "trinket" end
@@ -562,14 +572,20 @@ local function note_collection(cat, kind)
     if total then
         farever.toast(string.format("New %s recorded: %s (%d / %d known)",
             cat, kind, acct_n[cat], total), 3.0)
-    else
+    elseif cat == "appearance" then
         farever.toast("Appearance unlocked: " .. kind, 3.0)
+    else
+        farever.toast(string.format("New %s recorded: %s", cat, kind), 3.0)
     end
     farever.sound("info")
 end
 
 local function note_vault(kind, level, upgrade)
     level, upgrade = tonumber(level) or 0, tonumber(upgrade) or 0
+    -- Utility slots report garbage level/upgrade values (uninitialised
+    -- reads like -1745460232 seen in a live dump); clamp to sane ranges.
+    if level < 0 or level > 999 then level = 0 end
+    if upgrade < 0 or upgrade > 99 then upgrade = 0 end
     local cur = vault[kind]
     if cur then
         local l, u = string.match(cur, "^(%-?%d+)|(%-?%d+)")
@@ -587,7 +603,7 @@ end
 local function note_item(kind, level, upgrade, slot_name)
     if not kind or kind == "" then return end
     local r = route_of(kind, slot_name)
-    if r == "mount" or r == "glider" then
+    if r == "mount" or r == "glider" or r == "companion" then
         note_collection(r, kind)
     elseif r == "armor" then
         note_collection("appearance", kind)
@@ -596,8 +612,33 @@ local function note_item(kind, level, upgrade, slot_name)
     end
 end
 
+-- One-shot per load: log the raw item ids so routing rules can be checked
+-- against reality (the lines land in farever-mod.log as "ca_dump ...").
+local dumped = false
+local function dump_items()
+    if dumped or not has(farever.player.equipment) then return end
+    local eq_ok, eq = pcall(farever.player.equipment)
+    if not eq_ok or type(eq) ~= "table" or #eq == 0 then return end
+    for _, it in ipairs(eq) do
+        farever.log.info(string.format("ca_dump equip kind=%s slot=%s(%s) lvl=%d upg=%d",
+            tostring(it.kind), tostring(it.slot), tostring(it.slot_name),
+            tonumber(it.level) or 0, tonumber(it.upgrade) or 0))
+    end
+    if has(farever.player.inventory) then
+        local ok, inv = pcall(farever.player.inventory)
+        if ok and type(inv) == "table" then
+            for _, it in ipairs(inv) do
+                farever.log.info(string.format("ca_dump bag kind=%s stack=%d lvl=%d",
+                    tostring(it.kind), tonumber(it.stack) or 0, tonumber(it.level) or 0))
+            end
+        end
+    end
+    dumped = true
+end
+
 local function collections_tick()
     if not farever.player.locked() then return end
+    dump_items()
     if has(farever.player.equipment) then
         local ok, items = pcall(farever.player.equipment)
         if ok and type(items) == "table" then
@@ -729,7 +770,7 @@ local function export_json()
     add("]")
 
     add(',"collections":{')
-    local ckeys = { "mount", "glider", "appearance" }
+    local ckeys = { "mount", "glider", "companion", "appearance" }
     for ci, cat in ipairs(ckeys) do
         if ci > 1 then add(",") end
         add(string.format('"%s":[', cat))
@@ -798,6 +839,17 @@ local function draw_dashboard()
     imgui.text(string.format("Character: %s   lvl %d   %s",
         profile, farever.player.level(),
         has(farever.player.class) and farever.player.class() or "?"))
+    imgui.separator()
+
+    -- Account collections up front - this is what most people came for.
+    imgui.text_colored(0.5, 0.8, 1.0, 1.0, "Account collections")
+    bar("Mounts ", acct_n.mount,  KNOWN_TOTALS.mount)
+    bar("Gliders", acct_n.glider, KNOWN_TOTALS.glider)
+    imgui.text(string.format("Companions %d    Appearances %d    Vault %d",
+        acct_n.companion, acct_n.appearance,
+        (function() local n = 0; for _ in pairs(vault) do n = n + 1 end; return n end)()))
+    imgui.text_colored(0.7, 0.7, 0.7, 1,
+        "  full lists in the Collections / Vault tabs (dropdown above)")
     imgui.separator()
 
     local t_total, t_done = 0, 0
@@ -952,7 +1004,8 @@ local function draw_collections()
 
     bar("Mounts ", acct_n.mount,  KNOWN_TOTALS.mount)
     bar("Gliders", acct_n.glider, KNOWN_TOTALS.glider)
-    imgui.text(string.format("Appearances unlocked: %d", acct_n.appearance))
+    imgui.text(string.format("Companions: %d    Appearances unlocked: %d",
+        acct_n.companion, acct_n.appearance))
     imgui.text_colored(0.7, 0.7, 0.7, 1,
         "  armor seen = appearance unlocked = safe to recycle / sell")
     imgui.separator()
@@ -960,6 +1013,7 @@ local function draw_collections()
     local sections = {
         { label = "Mounts",      set = acct.mount },
         { label = "Gliders",     set = acct.glider },
+        { label = "Companions",  set = acct.companion },
         { label = "Appearances", set = acct.appearance },
     }
     for _, sec in ipairs(sections) do
@@ -1095,6 +1149,8 @@ function on_init()
     acct_n.glider      = n
     acct.appearance, n = set_decode(farever.store.get("acct_appearances", ""))
     acct_n.appearance  = n
+    acct.companion, n  = set_decode(farever.store.get("acct_companions", ""))
+    acct_n.companion   = n
     vault = map_decode(farever.store.get("acct_vault", ""))
     profile = ""
     bind_profile()
