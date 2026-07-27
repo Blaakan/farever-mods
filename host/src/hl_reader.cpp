@@ -214,28 +214,55 @@ bool read_item(void* obj, const char* source, Item* out) {
     return true;
 }
 
+// Diagnostics are one-shot per source: this walk is several links deep and a
+// silent zero says nothing about which link broke.
+bool g_item_diag = true;
+
 // Walks an hl.types.ArrayObj of item objects.
 void read_item_array(void* array_obj, const char* source,
                      std::vector<Item>* out) {
-    if (!array_obj) return;
+    if (!array_obj) {
+        if (g_item_diag) host_log("items[%s]: array is null", source);
+        return;
+    }
+    std::string acls = obj_class_name(array_obj);
     int32_t len = read_i32(array_obj, off::hl_types_ArrayBase::length);
-    if (len <= 0 || len > 4096) return;
     void* varr = read_ptr(array_obj, off::hl_types_ArrayObj::array);
-    if (!varr) return;
-    int32_t cap = read_i32(varr, hlrt::varray_size);
-    if (cap < len) len = cap;
+    int32_t cap = varr ? read_i32(varr, hlrt::varray_size) : -1;
+    if (g_item_diag) {
+        host_log("items[%s]: cls=%s len=%d varr=%p cap=%d", source,
+                 acls.empty() ? "?" : acls.c_str(), len, varr, cap);
+    }
+    if (len <= 0 || len > 4096 || !varr) return;
+    if (cap >= 0 && cap < len) len = cap;
 
     void* elems = (uint8_t*)varr + hlrt::varray_data;
+    int rejected = 0;
     for (int32_t i = 0; i < len; i++) {
         void* e = read_ptr(elems, (uint32_t)(i * 8));
         Item it;
-        if (read_item(e, source, &it)) out->push_back(std::move(it));
+        if (read_item(e, source, &it)) {
+            out->push_back(std::move(it));
+        } else if (e) {
+            rejected++;
+            if (g_item_diag && rejected <= 3) {
+                host_log("items[%s]:   elem[%d]=%p cls=%s (rejected)", source, i,
+                         e, obj_class_name(e).c_str());
+            }
+        }
     }
 }
 
 // st.Inventory / st.Equipment both hold their items in `content`.
 void read_inventory(void* inv, const char* source, std::vector<Item>* out) {
-    if (!inv) return;
+    if (!inv) {
+        if (g_item_diag) host_log("items[%s]: inventory is null", source);
+        return;
+    }
+    if (g_item_diag) {
+        host_log("items[%s]: inventory cls=%s", source,
+                 obj_class_name(inv).c_str());
+    }
     void* content = read_ptr(inv, off::st_Inventory::content);
     read_item_array(content, source, out);
 }
@@ -264,13 +291,21 @@ bool reader_read_inventories(Inventories* out) {
     out->character = read_hx_string(read_ptr(player, off::st_Player::name));
 
     void* loadout = read_ptr(hero, off::ent_Hero::loadout);
-    if (obj_is(loadout, "st.Loadout")) {
+    if (g_item_diag) {
+        host_log("items: loadout=%p cls=%s", loadout,
+                 obj_class_name(loadout).c_str());
+    }
+    // Accept any class here rather than requiring an exact match: if the
+    // runtime type is a subclass the exact-name test would silently skip the
+    // whole walk, which is how the first attempt returned four empty lists.
+    if (loadout) {
         read_inventory(read_ptr(loadout, off::st_Loadout::equipment),
                        "equipped", &out->equipped);
         read_inventory(read_ptr(loadout, off::st_Loadout::inventory),
                        "bags", &out->bags);
     }
 
+    g_item_diag = false;   // one round of diagnostics is enough
     out->valid = true;
     return true;
 }
