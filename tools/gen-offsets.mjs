@@ -55,6 +55,8 @@ const types = JSON.parse(readFileSync(typesPath, 'utf8'));
 const WANT = [
   ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand', 'loadout']],
   ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin']],
+  // World position, for the loot tracker's distance/direction readout.
+  ['ent.GameObject', ['posx', 'posy', 'posz']],
   ['st.Player', ['accountProgress', 'progress', 'name']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],

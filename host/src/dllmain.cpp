@@ -47,6 +47,7 @@
 #include "hl_runtime.h"
 #include "dxgi_wrap.h"
 #include "input.h"
+#include "navigator.h"
 #include "overlay.h"
 #include "offsets.gen.h"
 
@@ -159,12 +160,27 @@ void log_caller(const char* api, void* ret_addr) {
 
 volatile LONG g_stop = 0;
 
+// The host composes its modules' draw callbacks; each module stays unaware
+// of the others. The navigator draws first so the atlas window stacks above
+// its pill.
+void host_draw(float w, float h) {
+    fmk::nav_draw(w, h);
+    fmk::atlas_ui_draw(w, h);
+}
+
 // One-second sleep slice shared by every wait in the worker: keeps shutdown
-// responsive and gives the UI its once-a-second persistence tick.
+// responsive, gives the UI its once-a-second persistence tick, and feeds the
+// navigator a fresh hero position (three validated qword reads - cheap).
 void worker_sleep(int seconds) {
     for (int i = 0; i < seconds && !g_stop; i++) {
         Sleep(1000);
         fmk::atlas_ui_tick();
+        fmk::nav_tick();
+        double x = 0, y = 0, z = 0;
+        if (fmk::reader_read_hero_pos(&x, &y, &z))
+            fmk::nav_set_hero_pos(true, x, y, z);
+        else
+            fmk::nav_set_hero_pos(false, 0, 0, 0);
     }
 }
 
@@ -249,7 +265,8 @@ DWORD WINAPI worker(LPVOID) {
         // observed the game's swap chain first.
         if (!overlay_tried) {
             overlay_tried = true;
-            fmk::overlay_set_draw(&fmk::atlas_ui_draw);
+            fmk::nav_init();
+            fmk::overlay_set_draw(&host_draw);
             fmk::overlay_install();
         }
         // The UI needs the device (atlas upload) and the window (input), both

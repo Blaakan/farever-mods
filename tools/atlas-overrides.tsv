@@ -1,0 +1,20 @@
+# atlas-overrides.tsv - hand-curated corrections merged by gen-atlas.mjs.
+#
+# The generator derives acquisition from the game's loot tables, crafts and
+# shop stalls, but some sources are not in any file (event rewards, quest
+# chains, Ramburg reputation, rift vendors...). Lines here patch the
+# generated data per item id, and survive regeneration after a game patch.
+#
+# Format (tab-separated):   id <TAB> field <TAB> text
+#
+#   field = acquire    replace the whole how-to-acquire text ( | separates lines)
+#           acquire+   append one how-to-acquire line
+#           desc       replace the description
+#           track      replace tracker targets:  Label@x,y,z;Label2@x,y,z
+#           track+     append tracker targets
+#
+# Ids are the internal kinds shown at the bottom of each tooltip in-game.
+# Example (remove the leading # to activate):
+#
+#Mount_Wolf_05	acquire+	Ramburg reputation vendor
+#Glider_Pigeon_Beige	track	Ramburg@1306.9,77.6,172.6

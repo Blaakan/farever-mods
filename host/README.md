@@ -210,7 +210,33 @@ vaults, merchants — inverted from the game's own CastleDB).
   `farever-modkit.ini` next to the game
 - mouse wheel scrolls; clicks over the window never reach the game
 - ownership for trinkets/weapons = bank + bank equipment + equipped + bags,
-  across characters (offline ones via their `farever-inventory-*.json`)
+  across characters (offline ones via their `farever-inventory-*.json`),
+  and the tooltip lists every stack separately: *Bank x3 - Lv 25 - Rare*,
+  *Equipped (Emsei) - Lv 5*, *Bags (other character) - Lv 9*
+
+### The navigator
+
+Sources with a fixed place - vault chests, dungeon bosses, merchants - carry
+world coordinates (from the POI table farever-minimap ships). The tooltip
+shows the distance and compass direction to the nearest one, and **clicking
+the item** toggles tracking: a small pill at the top of the screen keeps
+showing *name, distance, direction* while you travel, atlas open or not.
+Click again (or track something else) to stop. The tracked target survives
+restarts.
+
+The navigator is its own module (`navigator.cpp`) with a tiny interface, so
+any future mod on this host can request tracking the same way the atlas
+does. It deliberately does **not** draw inside the game's own map - the host
+never writes game memory. For real map pins, the `collection_atlas.lua`
+plugin running under farever-minimap places actual waypoints through that
+mod's API; the two can run side by side.
+
+### Fixing wrong or missing acquisition info
+
+`tools/atlas-overrides.tsv` patches the generated data per item id - replace
+or append acquisition lines, replace descriptions, or add tracker
+coordinates for sources the files cannot know (world-roaming bosses, event
+rewards). It survives regeneration; see the comments in the file.
 
 Data files, generated from your own game install:
 

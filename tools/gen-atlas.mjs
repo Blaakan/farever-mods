@@ -143,23 +143,30 @@ function tableLabel(id) {
   return id.replace(/_/g, ' ');
 }
 
-function lootSources(itemId) {
+// Direct tables, with generic containers climbed one step to whoever
+// references them. Shared by the text builder and the tracker targets.
+function resolvedTables(itemId) {
   const direct = tablesByItem.get(itemId) || [];
-  const labels = new Map();   // label -> best proba
+  const out = [];   // {id, proba} - id 'many enemies' for a diluted container
   for (const { table, proba } of direct) {
     let ids = [table];
-    // Generic container: one step up to whoever references it.
     if (GENERIC_TABLE.test(table)) {
       const parents = [...(tableParents.get(table) || [])]
         .filter((p) => !GENERIC_TABLE.test(p));
       if (parents.length && parents.length <= 6) ids = parents;
       else if (parents.length) ids = ['many enemies'];
     }
-    for (const id of ids) {
-      const label = id === 'many enemies' ? 'enemy drops' : tableLabel(id);
-      const prev = labels.get(label);
-      if (prev === undefined || proba > prev) labels.set(label, proba);
-    }
+    for (const id of ids) out.push({ id, proba });
+  }
+  return out;
+}
+
+function lootSources(itemId) {
+  const labels = new Map();   // label -> best proba
+  for (const { id, proba } of resolvedTables(itemId)) {
+    const label = id === 'many enemies' ? 'enemy drops' : tableLabel(id);
+    const prev = labels.get(label);
+    if (prev === undefined || proba > prev) labels.set(label, proba);
   }
   return [...labels.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -216,6 +223,69 @@ function acquisitionOf(itemId) {
   return parts;
 }
 
+// --- tracker targets --------------------------------------------------------
+//
+// World coordinates for sources that have a fixed place: vault chests,
+// dungeon bosses and merchants, out of the POI table farever-minimap ships.
+// The host shows distance and direction to the nearest target. Sources with
+// no fixed place (faction enemies, world-roaming bosses) get none; the
+// overrides file can supply hand-curated coordinates for those.
+
+const pois = (() => {
+  const p = join(game, 'data', 'pois_W1_Siagarta.json');
+  if (!existsSync(p)) {
+    console.warn('POI table not found (data/pois_W1_Siagarta.json) - no tracker targets');
+    return [];
+  }
+  try {
+    return JSON.parse(readFileSync(p, 'utf8'));
+  } catch (e) {
+    console.warn(`POI table unreadable: ${e.message}`);
+    return [];
+  }
+})();
+const prettyZone = (z) => (z ? z.replace(/^Z\d+_/, '').replace(/_/g, ' ') : 'unknown');
+const mkTarget = (label, poi) => ({
+  // '@' and ';' are the track column's own separators.
+  label: cleanText(label).replace(/[@;]/g, ' ').trim(),
+  x: Math.round(poi.x * 10) / 10,
+  y: Math.round(poi.y * 10) / 10,
+  z: Math.round(poi.z * 10) / 10,
+});
+
+const vaultChests = pois.filter((e) => e.name === 'VaultChest');
+const merchantPois = pois.filter((e) => e.kind === 'merchant');
+const dungeonPois = pois.filter((e) => e.kind === 'dungeon');
+
+function targetsFor(itemId, sold) {
+  const targets = [];
+  const push = (t) => {
+    if (targets.length < 6 && t.label && !targets.some((o) => o.label === t.label))
+      targets.push(t);
+  };
+  for (const { id } of resolvedTables(itemId)) {
+    let m;
+    if ((m = id.match(/^Vault_Z(\d+)_\d+$/))) {
+      for (const c of vaultChests)
+        if ((c.zone || '').startsWith(`Z${m[1]}_`))
+          push(mkTarget(`Vault - ${prettyZone(c.zone)}`, c));
+      continue;
+    }
+    const unit = unitById.get(id) || unitById.get(id.replace(/_?LT2$/, ''));
+    if (unit) {
+      // POI names abbreviate ('Nepsid' for Nepsilon), so match on a prefix.
+      const frag = unit.id.slice(0, 5).toLowerCase();
+      for (const d of dungeonPois)
+        if ((d.name || '').toLowerCase().includes(frag))
+          push(mkTarget(`${unit.texts?.name || unit.id} - ${prettyZone(d.zone)}`, d));
+    }
+  }
+  if (sold)
+    for (const mch of merchantPois)
+      push(mkTarget(`Merchant - ${prettyZone(mch.zone)}`, mch));
+  return targets;
+}
+
 // --- text cleanup -----------------------------------------------------------
 
 // Descriptions carry markup: [GameTerm] links and ::var:: value refs. The
@@ -253,6 +323,7 @@ for (const l of items) {
     desc: cleanText(l.texts?.desc),
     // Acquisition strings embed unit display names, which can be non-ASCII.
     acquire: acquisitionOf(l.id).map(cleanText),
+    track: targetsFor(l.id, soldItems.has(l.id)),
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
@@ -266,8 +337,9 @@ for (const u of units) {
   if (u.id === 'Base_Critter') continue;              // template, not a pet
   if (u.flags & UNIT_NO_COLLECTION) continue;
   const gfx = u.gfx || {};
-  const viaItem = itemById.has(`Critter_${u.id}`)
-    ? acquisitionOf(`Critter_${u.id}`).map(cleanText) : [];
+  const critterItem = `Critter_${u.id}`;
+  const viaItem = itemById.has(critterItem)
+    ? acquisitionOf(critterItem).map(cleanText) : [];
   entries.push({
     category: 'pets',
     id: u.id,
@@ -275,6 +347,8 @@ for (const u of units) {
     rarity: 0,
     desc: '',
     acquire: [...viaItem, 'Capture in the wild (Capture Net)'],
+    track: itemById.has(critterItem)
+      ? targetsFor(critterItem, soldItems.has(critterItem)) : [],
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
@@ -283,6 +357,68 @@ for (const u of units) {
 entries.sort((a, b) =>
   CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category) ||
   a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+
+// --- hand-curated overrides -------------------------------------------------
+//
+// tools/atlas-overrides.tsv patches whatever the generated data got wrong or
+// could not know: sources with no file trail, coordinates for world-roaming
+// bosses, better wording. Applied last so it always wins.
+
+const ovPath = join(HERE, 'atlas-overrides.tsv');
+if (existsSync(ovPath)) {
+  const byId = new Map();
+  for (const e of entries) {
+    if (!byId.has(e.id)) byId.set(e.id, []);
+    byId.get(e.id).push(e);
+  }
+  // Split on the LAST '@': labels may legitimately contain one
+  // ("Boss @ Camp@100,200,300"). Warn on anything that fails to parse
+  // rather than silently counting the line as applied.
+  const parseTrack = (s, id) => s.split(';').map((t) => {
+    const at = t.lastIndexOf('@');
+    if (at <= 0) {
+      console.warn(`override: unparseable track "${t}" for ${id}`);
+      return null;
+    }
+    const [x, y, z] = t.slice(at + 1).split(',').map(Number);
+    const target = {
+      label: cleanText(t.slice(0, at)).replace(/[@;]/g, ' ').trim(),
+      x, y, z,
+    };
+    if (!target.label || !Number.isFinite(x) || !Number.isFinite(y) ||
+        !Number.isFinite(z)) {
+      console.warn(`override: unparseable track "${t}" for ${id}`);
+      return null;
+    }
+    return target;
+  }).filter(Boolean);
+  let applied = 0;
+  for (const line of readFileSync(ovPath, 'utf8').split('\n')) {
+    if (!line.trim() || line.startsWith('#')) continue;
+    const [id, field, ...rest] = line.replace(/\r$/, '').split('\t');
+    const text = rest.join('\t');
+    const hits = byId.get(id);
+    if (!hits) { console.warn(`override: unknown id "${id}"`); continue; }
+    for (const e of hits) {
+      if (field === 'acquire') e.acquire = text.split(' | ').map(cleanText).filter(Boolean);
+      else if (field === 'acquire+') e.acquire.push(cleanText(text));
+      else if (field === 'desc') e.desc = cleanText(text);
+      else if (field === 'track') e.track = parseTrack(text, id);
+      else if (field === 'track+') e.track.push(...parseTrack(text, id));
+      else { console.warn(`override: unknown field "${field}" for ${id}`); continue; }
+      applied++;
+    }
+  }
+  // The host reads at most 8 targets per entry; shipping more would be
+  // silently dropped there, so trim (and say so) here instead.
+  for (const e of entries) {
+    if ((e.track || []).length > 8) {
+      console.warn(`${e.id}: ${e.track.length} tracker targets, keeping 8`);
+      e.track = e.track.slice(0, 8);
+    }
+  }
+  if (applied) console.log(`overrides: ${applied} applied from atlas-overrides.tsv`);
+}
 
 // --- icon atlas: repack 64px BC7 mips, no decoding --------------------------
 //
@@ -373,10 +509,15 @@ function ddsFile(w, h, payload) {
 mkdirSync(OUT, { recursive: true });
 
 const tsvField = (s) => String(s).replace(/[\t\r\n]+/g, ' ');
-const tsv = ['# category\tid\tname\trarity\ticon\tdesc\tacquire'];
+const tsv = ['# category\tid\tname\trarity\ticon\tdesc\tacquire\ttrack'];
+let tracked = 0;
 for (const e of entries) {
+  const track = (e.track || [])
+    .map((t) => `${t.label}@${t.x},${t.y},${t.z}`).join(';');
+  if (track) tracked++;
   tsv.push([e.category, e.id, tsvField(e.name), e.rarity, e.icon,
-            tsvField(e.desc), tsvField(e.acquire.join(' | '))].join('\t'));
+            tsvField(e.desc), tsvField(e.acquire.join(' | ')),
+            tsvField(track)].join('\t'));
 }
 writeFileSync(join(OUT, 'farever-atlas.tsv'), tsv.join('\n') + '\n');
 writeFileSync(join(OUT, 'farever-atlas-icons.dds'),
@@ -385,6 +526,7 @@ writeFileSync(join(OUT, 'farever-atlas-icons.dds'),
 const perCat = {};
 for (const e of entries) perCat[e.category] = (perCat[e.category] || 0) + 1;
 console.log('entries:', entries.length, perCat);
+console.log(`tracker targets on ${tracked} entries`);
 console.log(`atlas: ${ATLAS_W}x${ATLAS_H}, ${cellCount} icons, ` +
             `${((atlas.length + DDS_HEADER) / 1e6).toFixed(1)} MB`);
 

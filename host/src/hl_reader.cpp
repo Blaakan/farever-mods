@@ -444,6 +444,14 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
              inv.equipped.size(), inv.bags.size());
 }
 
+bool reader_read_hero_pos(double* x, double* y, double* z) {
+    void* hero = reader_hero();
+    if (!hero) return false;
+    return read(hero, off::ent_GameObject::posx, x) &&
+           read(hero, off::ent_GameObject::posy, y) &&
+           read(hero, off::ent_GameObject::posz, z);
+}
+
 bool reader_read_unit_state(UnitState* out) {
     *out = {};
     void* hero = reader_hero();

@@ -32,6 +32,14 @@ namespace ent_Unit {
     constexpr uint32_t skin = 0x3dc;  // I32
 }  // namespace ent_Unit
 
+// ent.GameObject  (sizeof=592, extends ent.Entity)
+namespace ent_GameObject {
+    constexpr uint32_t SIZEOF = 592;
+    constexpr uint32_t posx = 0xb0;  // F64
+    constexpr uint32_t posy = 0xb8;  // F64
+    constexpr uint32_t posz = 0xc0;  // F64
+}  // namespace ent_GameObject
+
 // st.Player  (sizeof=385, extends st.State)
 namespace st_Player {
     constexpr uint32_t SIZEOF = 385;

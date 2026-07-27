@@ -25,6 +25,7 @@
 
 #include "atlas_ui.h"
 #include "input.h"
+#include "navigator.h"
 #include "overlay.h"
 
 namespace fmk {
@@ -44,6 +45,7 @@ const char* kCatTsv[kCats] = {"appearances", "mounts", "pets",
 struct Entry {
     std::string id, name, desc;
     std::vector<std::string> acquire;
+    std::vector<NavTarget> targets;   // tracker destinations, often empty
     int rarity = 0;      // 0..4 = common..legendary, from the CastleDB
     int icon = -1;       // cell in the icon atlas, -1 = none
     int cat = 0;
@@ -59,10 +61,27 @@ volatile LONG g_loaded = 0;
 
 // --- ownership snapshot (swapped whole under g_own_cs) ----------------------
 
+// One physical stack of an item somewhere: the bank, or a specific
+// character's equipped gear or bags. Collection unlocks (appearances,
+// mounts, pets, gliders) have no copies - just `unlocked`.
+enum Where : uint8_t { kBank = 0, kBankSlots, kEquipped, kBags, kWhereCount };
+const char* kWhereName[kWhereCount] = {"Bank", "Bank slots", "Equipped", "Bags"};
+
+struct OwnedCopy {
+    uint8_t where = kBank;
+    std::string character;   // empty for the account-wide bank
+    int level = 0;
+    int rarity = -1;         // -1 = use the CastleDB rarity
+    int count = 1;
+};
+
 struct Owned {
-    int level = -1;      // -1 = not applicable (collection unlocks)
-    int rarity = -1;     // -1 = use the CastleDB rarity
-    int count = 0;
+    bool unlocked = false;             // collection categories
+    std::vector<OwnedCopy> copies;     // item categories
+    int dropped = 0;                   // stacks past the per-copy cap
+    int best_rarity = -1;
+    int max_level = -1;
+    int total = 0;
 };
 
 struct OwnSnap {
@@ -70,6 +89,31 @@ struct OwnSnap {
     int owned_count[kCats]{};
     std::string character;
 };
+
+// Aggregates always update, even when the per-stack list is full: the total,
+// the border rarity and the max level must reflect everything the account
+// holds, not just the stacks the tooltip has room to list.
+void owned_add_copy(Owned* o, uint8_t where, const std::string& character,
+                    int level, int rarity, int count) {
+    o->total += count;
+    if (rarity > o->best_rarity) o->best_rarity = rarity;
+    if (level > o->max_level) o->max_level = level;
+    for (auto& c : o->copies) {
+        if (c.where == where && c.character == character &&
+            c.level == level && c.rarity == rarity) {
+            c.count += count;
+            return;
+        }
+    }
+    if (o->copies.size() < 24)
+        o->copies.push_back({where, character, level, rarity, count});
+    else
+        o->dropped++;
+}
+
+void owned_finalize(Owned* o) {
+    if (o->unlocked && o->total == 0) o->total = 1;
+}
 
 CRITICAL_SECTION g_own_cs;
 std::shared_ptr<const OwnSnap> g_own;
@@ -234,6 +278,24 @@ bool load_tsv(const std::wstring& path) {
             e.acquire.push_back(a.substr(p, sep - p));
             p = sep + 3;
         }
+        // track is ";"-joined label@x,y,z
+        if (f.size() >= 8 && !f[7].empty()) {
+            size_t tp = 0;
+            const std::string& tr = f[7];
+            while (tp < tr.size() && e.targets.size() < 8) {
+                size_t sep = tr.find(';', tp);
+                if (sep == std::string::npos) sep = tr.size();
+                std::string one = tr.substr(tp, sep - tp);
+                tp = sep + 1;
+                size_t at = one.find('@');
+                if (at == std::string::npos || at == 0) continue;
+                NavTarget t{};
+                strncpy_s(t.label, one.substr(0, at).c_str(), _TRUNCATE);
+                if (sscanf_s(one.c_str() + at + 1, "%lf,%lf,%lf",
+                             &t.x, &t.y, &t.z) == 3)
+                    e.targets.push_back(t);
+            }
+        }
         entries.push_back(std::move(e));
     }
     if (entries.empty()) {
@@ -297,27 +359,28 @@ bool load_icons(const std::wstring& dir) {
 // --- other characters' inventories (worker thread) --------------------------
 //
 // One JSON per character, written by this host. Only bags and equipped are
-// character-scoped - the bank repeats in every file, so only the section
-// from "equipped" onward is merged (counting the shared bank once per file
+// character-scoped - the bank repeats in every file, so only the sections
+// from "equipped" onward are merged (counting the shared bank once per file
 // would multiply every stack by the number of characters). The scanner only
 // understands the exact flat shape hl_reader writes, which is all it has to.
 
-void scan_inventory_json(const std::string& text,
-                         const std::string& skip_char_sanitized,
-                         OwnSnap* snap) {
-    // {"character": "Name", ...} - the file stores the sanitized name.
-    size_t cpos = text.find("\"character\": \"");
-    if (cpos != std::string::npos) {
-        cpos += 14;
-        size_t end = text.find('"', cpos);
-        if (end != std::string::npos &&
-            text.substr(cpos, end - cpos) == skip_char_sanitized)
-            return;                        // live data already covers this one
+void merge_item(OwnSnap* snap, const std::string& kind, uint8_t where,
+                const std::string& character, int level, int rarity,
+                int count) {
+    for (int c : {4, 5}) {                 // trinkets, weapons
+        auto it = g_entry_by_id[c].find(kind);
+        if (it == g_entry_by_id[c].end()) continue;
+        owned_add_copy(&snap->byId[c][kind], where, character, level,
+                       clamp_rarity(rarity), count);
     }
+}
 
-    size_t pos = text.find("\"equipped\"");
-    if (pos == std::string::npos) return;
-    while ((pos = text.find("{\"kind\":\"", pos)) != std::string::npos) {
+// Scans one section's item objects within [from, to).
+void scan_section(const std::string& text, size_t from, size_t to,
+                  uint8_t where, const std::string& character, OwnSnap* snap) {
+    size_t pos = from;
+    while (pos < to && (pos = text.find("{\"kind\":\"", pos)) != std::string::npos) {
+        if (pos >= to) break;
         size_t kstart = pos + 9;
         size_t kend = text.find('"', kstart);
         if (kend == std::string::npos) break;
@@ -334,30 +397,41 @@ void scan_inventory_json(const std::string& text,
         };
         int level = num("\"level\":", 0);
         // Files written by older reader versions carry garbage rarity
-        // indices; anything outside 0..4 would index kRarity[] out of
-        // bounds on the render thread.
-        int rarity = clamp_rarity(num("\"rarity\":", -1));
+        // indices; clamp_rarity keeps them off the kRarity[] tables.
+        int rarity = num("\"rarity\":", -1);
         int count = num("\"count\":", 1);
         if (level < 0 || level > 999) level = 0;
         if (count < 1 || count > 100000) count = 1;
-
-        for (int c : {4, 5}) {             // trinkets, weapons
-            auto it = g_entry_by_id[c].find(kind);
-            if (it == g_entry_by_id[c].end()) continue;
-            Owned& o = snap->byId[c][kind];
-            if (level > o.level) o.level = level;
-            if (rarity > o.rarity) o.rarity = rarity;
-            o.count += count;
-        }
+        merge_item(snap, kind, where, character, level, rarity, count);
     }
+}
+
+void scan_inventory_json(const std::string& text,
+                         const std::string& skip_char_sanitized,
+                         OwnSnap* snap) {
+    // {"character": "Name", ...} - the file stores the sanitized name.
+    std::string who = "?";
+    size_t cpos = text.find("\"character\": \"");
+    if (cpos != std::string::npos) {
+        cpos += 14;
+        size_t end = text.find('"', cpos);
+        if (end != std::string::npos) who = text.substr(cpos, end - cpos);
+    }
+    if (who == skip_char_sanitized) return;   // live data covers this one
+    if (who == "unknown" || who == "?") return;   // stale, unattributable file
+
+    const size_t eq = text.find("\"equipped\"");
+    if (eq == std::string::npos) return;
+    const size_t bags = text.find("\"bags\"", eq);
+    scan_section(text, eq, bags == std::string::npos ? text.size() : bags,
+                 kEquipped, who, snap);
+    if (bags != std::string::npos)
+        scan_section(text, bags, text.size(), kBags, who, snap);
 }
 
 void merge_collection_list(const std::vector<std::string>& ids, int cat,
                            OwnSnap* snap) {
-    for (const auto& id : ids) {
-        Owned& o = snap->byId[cat][id];
-        o.count = o.count ? o.count : 1;
-    }
+    for (const auto& id : ids) snap->byId[cat][id].unlocked = true;
 }
 
 // --- drawing helpers (render thread) ----------------------------------------
@@ -425,24 +499,68 @@ struct Hover {
     float cell_x = 0, cell_y = 0;
 };
 
-void draw_tooltip(const Entry& e, const Owned* owned, float mx, float my,
-                  float screen_w, float screen_h) {
+// One "Bank x3 - Lv 25 - Rare" line per stored stack.
+std::string copy_line(const OwnedCopy& c) {
+    char buf[160];
+    std::string s = kWhereName[c.where];
+    if (!c.character.empty()) s += " (" + c.character + ")";
+    if (c.count > 1) {
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, " x%d", c.count);
+        s += buf;
+    }
+    if (c.level > 0) {
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, " - Lv %d", c.level);
+        s += buf;
+    }
+    if (c.rarity >= 0 && c.rarity <= 4) {
+        s += " - ";
+        s += kRarityName[c.rarity];
+    }
+    return s;
+}
+
+void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
+                  float mx, float my, float screen_w, float screen_h) {
     const float tw = 340;
     const float pad = 10;
     const float name_sz = 15, body_sz = 13, small_sz = 12;
+    constexpr size_t kMaxCopyLines = 5;
 
-    // Measure first: lines of desc + acquire.
-    std::vector<std::string> desc_lines, acq_lines;
+    // Measure first, draw second - the box height needs every line known.
+    std::vector<std::string> desc_lines, acq_lines, copy_lines;
     if (!e.desc.empty()) wrap_text(e.desc, body_sz, tw - 2 * pad, &desc_lines);
     for (const auto& a : e.acquire) {
         std::vector<std::string> lines;
         wrap_text(a, body_sz, tw - 2 * pad - 10, &lines);
         for (auto& l : lines) acq_lines.push_back(l);
     }
+    if (owned) {
+        for (const auto& c : owned->copies) {
+            if (copy_lines.size() == kMaxCopyLines) {
+                char more[48];
+                _snprintf_s(more, sizeof(more), _TRUNCATE, "+%zu more stacks",
+                            owned->copies.size() - kMaxCopyLines +
+                                (size_t)owned->dropped);
+                copy_lines.push_back(more);
+                break;
+            }
+            copy_lines.push_back(copy_line(c));
+        }
+    }
+
+    // Tracker lines: live distance when the hero position is fresh, the
+    // target list otherwise, and the click hint.
+    char track_dist[96] = {0};
+    const bool tracked = nav_is_tracked(track_key);
+    if (!e.targets.empty())
+        nav_format_distance(e.targets.data(), (int)e.targets.size(),
+                            track_dist, sizeof(track_dist));
 
     float th = pad + 20 /*name*/ + 17 /*status line*/;
+    th += copy_lines.size() * 16.0f;
     if (!desc_lines.empty()) th += 6 + desc_lines.size() * 16.0f;
     if (!acq_lines.empty()) th += 6 + 16 /*header*/ + acq_lines.size() * 16.0f;
+    if (!e.targets.empty()) th += 6 + 16 + (track_dist[0] ? 16.0f : 0);
     th += 4 + 14 /*id line*/ + pad;
 
     float tx = mx + 18, ty = my + 18;
@@ -451,35 +569,32 @@ void draw_tooltip(const Entry& e, const Owned* owned, float mx, float my,
     if (tx < 8) tx = 8;
     if (ty < 8) ty = 8;
 
+    const int rar = owned && owned->best_rarity >= 0 ? owned->best_rarity
+                                                     : e.rarity;
     draw_rect(tx, ty, tw, th, {0.03f, 0.04f, 0.06f, 0.97f});
-    draw_rect_outline(tx, ty, tw, th, 1.5f,
-                      owned ? kRarity[owned->rarity >= 0 ? owned->rarity
-                                                         : e.rarity]
-                            : kMissEdge);
+    draw_rect_outline(tx, ty, tw, th, 1.5f, owned ? kRarity[rar] : kMissEdge);
 
     float yy = ty + pad;
-    const int rar = owned && owned->rarity >= 0 ? owned->rarity : e.rarity;
     draw_text(tx + pad, yy, name_sz, kRarity[rar], e.name.c_str());
     yy += 20;
 
     char status[96];
     if (owned) {
-        if (owned->level >= 0) {
-            if (owned->count > 1)
-                sprintf_s(status, "Owned x%d - Level %d - %s", owned->count,
-                          owned->level, kRarityName[rar]);
-            else
-                sprintf_s(status, "Owned - Level %d - %s", owned->level,
-                          kRarityName[rar]);
-        } else {
+        if (owned->total > 1)
+            sprintf_s(status, "Owned x%d - %s", owned->total, kRarityName[rar]);
+        else
             sprintf_s(status, "Owned - %s", kRarityName[rar]);
-        }
         draw_text(tx + pad, yy, small_sz, {0.45f, 0.85f, 0.45f, 1.0f}, status);
     } else {
         sprintf_s(status, "Not collected - %s", kRarityName[rar]);
         draw_text(tx + pad, yy, small_sz, kTextDim, status);
     }
     yy += 17;
+
+    for (const auto& l : copy_lines) {
+        draw_text(tx + pad + 10, yy, body_sz, kTextDim, l.c_str());
+        yy += 16;
+    }
 
     if (!desc_lines.empty()) {
         yy += 6;
@@ -496,6 +611,22 @@ void draw_tooltip(const Entry& e, const Owned* owned, float mx, float my,
             draw_text(tx + pad + 10, yy, body_sz, kAcquire, l.c_str());
             yy += 16;
         }
+    }
+    if (!e.targets.empty()) {
+        yy += 6;
+        if (track_dist[0]) {
+            char line[128];
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "Nearest: %s",
+                        track_dist);
+            draw_text(tx + pad, yy, body_sz, kAccent, line);
+            yy += 16;
+        }
+        draw_text(tx + pad, yy, small_sz,
+                  tracked ? Color{1.0f, 0.75f, 0.35f, 1.0f}
+                          : Color{0.55f, 0.60f, 0.70f, 1.0f},
+                  tracked ? "Tracking - click to stop"
+                          : "Click to track this location");
+        yy += 16;
     }
     yy += 4;
     draw_text(tx + pad, yy, 11, kTextFaint, e.id.c_str());
@@ -544,23 +675,19 @@ void atlas_ui_update(const Collection& c, const Inventories& inv) {
     }
 
     if (inv.valid) {
-        auto add_items = [&](const std::vector<Item>& items) {
-            for (const Item& it : items) {
-                const int rarity = clamp_rarity(it.rarity);
-                for (int cat : {4, 5}) {   // trinkets, weapons
-                    auto f = g_entry_by_id[cat].find(it.kind);
-                    if (f == g_entry_by_id[cat].end()) continue;
-                    Owned& o = snap->byId[cat][it.kind];
-                    if (it.level > o.level) o.level = it.level;
-                    if (rarity > o.rarity) o.rarity = rarity;
-                    o.count += it.count;
-                }
-            }
+        // The bank is account-wide: no character attribution. Equipped and
+        // bags belong to whoever is logged in.
+        const std::string& who = snap->character;
+        auto add_items = [&](const std::vector<Item>& items, uint8_t where,
+                             const std::string& character) {
+            for (const Item& it : items)
+                merge_item(snap.get(), it.kind, where, character, it.level,
+                           it.rarity, it.count);
         };
-        add_items(inv.bank);
-        add_items(inv.bank_equipment);
-        add_items(inv.equipped);
-        add_items(inv.bags);
+        add_items(inv.bank, kBank, "");
+        add_items(inv.bank_equipment, kBankSlots, "");
+        add_items(inv.equipped, kEquipped, who);
+        add_items(inv.bags, kBags, who);
     }
 
     // Offline characters: their bags/equipped only exist in the JSON files
@@ -578,12 +705,13 @@ void atlas_ui_update(const Collection& c, const Inventories& inv) {
         FindClose(h);
     }
 
-    // A collection unlock has no level; an inventory item does. Counts per
-    // category only count ids that actually exist in the database.
+    // Finalize aggregates, then count owned ids that exist in the database.
     for (int cat = 0; cat < kCats; cat++) {
         int n = 0;
-        for (const auto& kv : snap->byId[cat])
+        for (auto& kv : snap->byId[cat]) {
+            owned_finalize(&kv.second);
             if (g_entry_by_id[cat].count(kv.first)) n++;
+        }
         snap->owned_count[cat] = n;
     }
 
@@ -774,7 +902,8 @@ void atlas_ui_draw(float screen_w, float screen_h) {
             // the full cell is inside the band (partial borders look broken).
             if (y >= clip0 && y + kIcon <= clip1) {
                 if (owned) {
-                    const int rar = owned->rarity >= 0 ? owned->rarity : e.rarity;
+                    const int rar = owned->best_rarity >= 0 ? owned->best_rarity
+                                                            : e.rarity;
                     draw_rect_outline(x, y, kIcon, kIcon, 2, kRarity[rar]);
                 } else {
                     draw_rect_outline(x, y, kIcon, kIcon, 1, kMissEdge);
@@ -787,6 +916,17 @@ void atlas_ui_draw(float screen_w, float screen_h) {
                 hover.entry = idx;
                 hover.cell_x = x;
                 hover.cell_y = y;
+            }
+
+            // A click on a cell with known coordinates toggles the tracker.
+            if (clicked && !e.targets.empty() &&
+                in.click_x >= x && in.click_x < x + kIcon &&
+                in.click_y >= by0 && in.click_y < by1) {
+                char key[192];
+                _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
+                            kCatTsv[tab], e.id.c_str());
+                nav_track(key, e.name.c_str(), e.targets.data(),
+                          (int)e.targets.size());
             }
         }
     }
@@ -815,7 +955,10 @@ void atlas_ui_draw(float screen_w, float screen_h) {
             auto f = own->byId[tab].find(e.id);
             if (f != own->byId[tab].end()) owned = &f->second;
         }
-        draw_tooltip(e, owned, (float)in.mouse_x, (float)in.mouse_y,
+        char key[192];
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s", kCatTsv[tab],
+                    e.id.c_str());
+        draw_tooltip(e, owned, key, (float)in.mouse_x, (float)in.mouse_y,
                      screen_w, screen_h);
     }
 

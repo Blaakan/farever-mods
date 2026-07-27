@@ -32,6 +32,7 @@ cl /nologo /LD /O2 /MT /W3 /EHa /std:c++17 ^
    /Fo:build\ /Fe:build\dxgi.dll ^
    src\dllmain.cpp src\hl_runtime.cpp src\hl_scan.cpp src\hl_reader.cpp ^
    src\dxgi_wrap.cpp src\overlay_d3d12.cpp src\input.cpp src\atlas_ui.cpp ^
+   src\navigator.cpp ^
    /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib advapi32.lib ^
    user32.lib gdi32.lib dxgi.lib d3d12.lib d3dcompiler.lib
 
