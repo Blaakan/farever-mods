@@ -114,7 +114,10 @@ VSOut VSMain(VSIn i) {
 }
 float4 PSMain(VSOut i) : SV_TARGET {
     if (i.uv.x < 0) return i.col;
-    float a = tex.Sample(smp, i.uv).a;
+    // The atlas is R8_UNORM, so a sample reads back as (r, 0, 0, 1) - glyph
+    // coverage lives in .r and .a is a constant 1.0. Sampling .a made every
+    // glyph a solid block, which is exactly how it first rendered.
+    float a = tex.Sample(smp, i.uv).r;
     return float4(i.col.rgb, i.col.a * a);
 }
 )";
