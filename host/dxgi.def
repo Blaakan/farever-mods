@@ -1,0 +1,14 @@
+; Export names must match the real dxgi.dll exactly, because the game's
+; modules import them by name. Each maps to a Proxy_* implementation in
+; src/dllmain.cpp which forwards to the genuine system DLL.
+;
+; The game's own modules only need CreateDXGIFactory / 1 / 2 (confirmed with
+; tools/pe-imports.mjs --funcs), but the debug and adapter-removal entry
+; points are forwarded too so nothing that probes for them gets a null.
+LIBRARY dxgi
+EXPORTS
+    CreateDXGIFactory                 = Proxy_CreateDXGIFactory
+    CreateDXGIFactory1                = Proxy_CreateDXGIFactory1
+    CreateDXGIFactory2                = Proxy_CreateDXGIFactory2
+    DXGIGetDebugInterface1            = Proxy_DXGIGetDebugInterface1
+    DXGIDeclareAdapterRemovalSupport  = Proxy_DXGIDeclareAdapterRemovalSupport

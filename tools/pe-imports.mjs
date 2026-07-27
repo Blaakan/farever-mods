@@ -62,16 +62,32 @@ function parsePE(path) {
     return b.toString('ascii', off, e);
   };
 
-  // --- imports ---
+  // --- imports (with per-function names from the import name table) ---
   const imports = [];
   if (impRva) {
     let p = toOff(impRva);
     while (p > 0 && p + 20 <= b.length) {
+      const intRva = b.readUInt32LE(p); // OriginalFirstThunk
       const nameRva = b.readUInt32LE(p + 12);
       if (nameRva === 0) break;
       const name = cstr(toOff(nameRva));
       if (!name) break;
-      imports.push(name);
+
+      const funcs = [];
+      let thunk = toOff(intRva || b.readUInt32LE(p + 16)); // fall back to IAT
+      while (thunk > 0 && thunk + 8 <= b.length) {
+        const lo = b.readUInt32LE(thunk);
+        const hi = b.readUInt32LE(thunk + 4);
+        if (lo === 0 && hi === 0) break;
+        if (hi & 0x80000000) {
+          funcs.push(`#${lo & 0xffff}`); // import by ordinal
+        } else {
+          const off = toOff(lo);
+          if (off > 0) funcs.push(cstr(off + 2)); // skip hint word
+        }
+        thunk += 8;
+      }
+      imports.push({ name, funcs });
       p += 20;
     }
   }
@@ -103,8 +119,13 @@ for (const f of files) {
   try {
     const { pe32plus, imports, exports } = parsePE(f);
     console.log(`\n${basename(f)}  (${pe32plus ? 'x64' : 'x86'})`);
-    console.log(`  imports (${imports.length}):`);
-    for (const i of imports.sort()) console.log(`      ${i}`);
+    console.log(`  imports (${imports.length} modules):`);
+    for (const i of imports.sort((a, b) => a.name.localeCompare(b.name))) {
+      console.log(`      ${i.name}`);
+      if (process.argv.includes('--funcs')) {
+        for (const fn of i.funcs) console.log(`          ${fn}`);
+      }
+    }
     if (exports.length) {
       console.log(`  exports (${exports.length}):`);
       const show = exports.slice(0, 24);

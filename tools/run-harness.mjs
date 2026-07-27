@@ -249,6 +249,7 @@ try {
   }
 
   // --- Permanent + stacked statuses (the live-game trio: duration 0 / -1) --
+  // The icon strip renders stacks / countdowns as absolute draw_text overlays.
   run(
     L,
     `MOCK.statuses = {
@@ -259,16 +260,24 @@ try {
     'statuses live trio'
   );
   frames(L, 12, 0.3);
-  let texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Staff_SummonDemon_Skill1.*x20/.test(texts), 'permanent aura (duration 0) renders with stacks', texts.slice(-400));
-  ok(/Staff_Censer_Passive.*x5/.test(texts), 'permanent aura (duration -1) renders with stacks');
-  ok(/Mage_ShieldOfSpark.*\d(\.\d)?s/.test(texts), 'timed aura renders a countdown');
+  let texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  ok(/\b20\b/.test(texts), 'permanent aura (duration 0) shows its x20 stacks', texts.slice(-300));
+  ok(/\b5\b/.test(texts), 'permanent aura (duration -1) shows its x5 stacks');
+  ok(/\d(\.\d)?s/.test(texts), 'timed aura renders a countdown');
 
   // Permanent auras must not vanish over time (v1 bug: they rendered expired).
-  run(L, `MOCK.texts = {}`, 'clear texts');
+  run(L, `MOCK.draw_texts = {}`, 'clear draw texts');
   frames(L, 40, 0.3);
-  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Staff_SummonDemon_Skill1.*x20/.test(texts), 'permanent aura still shown 12s later', texts.slice(-300));
+  texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  ok(/\b20\b/.test(texts), 'permanent aura still shown 12s later', texts.slice(-300));
+
+  // Unresolvable icons fall back to a monogram tile, keeping the grid whole.
+  run(L, `MOCK.icon_known = {}; MOCK.draw_texts = {}; MOCK.draws = 0`, 'no icons');
+  frames(L, 2, 0.3);
+  texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  ok(/Su/.test(texts) && /Ce/.test(texts), 'missing icons render monogram tiles', texts.slice(-300));
+  ok(num(L, 'MOCK.draws') > 0, 'monogram tiles are drawn as shapes');
+  run(L, `MOCK.icon_known = nil`, 'icons back');
 
   // Status diagnostics tab reports the detected modes
   run(L, `MOCK.checks["settings"] = true`, 'open settings');
@@ -318,30 +327,30 @@ try {
     'skills'
   );
   frames(L, 2, 0.3);
-  run(L, `MOCK.texts = {}`, 'clear');
+  run(L, `MOCK.draw_texts = {}`, 'clear');
   run(L, `on_event("damage_dealt", { skill = "Mage_RayOfSpark", amount = 120, is_crit = false })`, 'cast');
   frames(L, 2, 0.3);
-  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Mage_RayOfSpark\s+\d(\.\d)?s/.test(texts), 'cooldown row appears on first damage event', texts.slice(-400));
+  texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  ok(/\d(\.\d)?s/.test(texts), 'cooldown countdown appears on first damage event', texts.slice(-300));
 
   // Multi-hit must not restart a running cooldown: remaining keeps falling.
   run(L, `on_event("damage_dealt", { skill = "Mage_RayOfSpark", amount = 40 })`, 'multihit');
-  run(L, `MOCK.texts = {}`, 'clear');
+  run(L, `MOCK.draw_texts = {}`, 'clear');
   frames(L, 10, 0.3);
-  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  const times = [...texts.matchAll(/Mage_RayOfSpark\s+(\d+(?:\.\d)?)s/g)].map((x) => parseFloat(x[1]));
+  texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  const times = [...texts.matchAll(/(\d+(?:\.\d)?)s/g)].map((x) => parseFloat(x[1]));
   ok(
     times.length > 1 && times[times.length - 1] < times[0],
     'multi-hit does not restart the cooldown (remaining keeps falling)',
     JSON.stringify(times)
   );
 
-  // Expire: with show_ready off the row disappears from the HUD.
+  // Expire: with show_ready off the countdown disappears from the HUD.
   frames(L, 30, 0.3);
-  run(L, `MOCK.texts = {}`, 'clear');
+  run(L, `MOCK.draw_texts = {}`, 'clear');
   frames(L, 2, 0.3);
-  texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(!/Mage_RayOfSpark\s+\d/.test(texts), 'expired cooldown drops off the HUD', texts.slice(-300));
+  texts = evalLua(L, `table.concat(MOCK.draw_texts, "|")`);
+  ok(!/\d(\.\d)?s/.test(texts), 'expired cooldown drops off the HUD', texts.slice(-300));
 
   // --- Alerts ---------------------------------------------------------------
   run(L, `MOCK.health = 200; MOCK.texts = {}`, 'low hp');

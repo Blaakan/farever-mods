@@ -40,7 +40,7 @@
 -- neither damage, heal nor shield cannot be tracked - API limit.
 -- ============================================================================
 
-local VERSION = "2.0.0"
+local VERSION = "2.1.0"
 
 local TABS      = { "Status", "Buffs", "Cooldowns", "Auras", "Share" }
 local TRIGGERS  = { "Status (buff)", "Skill cooldown", "Resource",
@@ -223,10 +223,15 @@ local function default_aura(id)
     }
 end
 
+local function default_strip()
+    return { size = 36, per_row = 8, show_cds = true, show_time = true }
+end
+
 local cfg = {
     enabled = true,
     buffs   = default_group(false),
     cds     = default_group(true),
+    strip   = default_strip(),
     auras   = {},
     next_id = 1,
 }
@@ -287,6 +292,7 @@ local function load_config()
     cfg.next_id = tonumber(v.next_id) or 1
     if type(v.buffs) == "table" then cfg.buffs = merge_defaults(v.buffs, default_group(false)) end
     if type(v.cds)   == "table" then cfg.cds   = merge_defaults(v.cds,   default_group(true))  end
+    if type(v.strip) == "table" then cfg.strip = merge_defaults(v.strip, default_strip()) end
     cfg.auras = {}
     if type(v.auras) == "table" then
         for _, a in ipairs(v.auras) do
@@ -548,46 +554,93 @@ local function fmt_time(t)
     return string.format("%ds", math.floor(t + 0.5))
 end
 
-local function short(s, n)
-    s = tostring(s)
-    -- strip the noise suffixes for display
-    s = string.gsub(s, "_Status$", "")
-    s = string.gsub(s, "_Buff$", "")
-    if #s <= n then return s end
-    return string.sub(s, 1, n - 1) .. "~"
+-- Statuses rarely resolve an icon under their own kind, but their parent
+-- skill usually does ("Staff_Censer_Passive_Buff" -> "Staff_Censer_Passive",
+-- "Mage_Talent_Chaincast_Accum_Status" -> "Mage_Talent_Chaincast"). Each
+-- candidate attempt IS a draw at the cell position, so the first success
+-- lands in place. Failures retry every 5s because the host resolves icons
+-- lazily (a skill's icon appears once its record has been read).
+local function icon_variants(kind)
+    local v = { kind }
+    local cur = kind
+    for _, pat in ipairs({ "_Status$", "_Buff$", "_Debuff$",
+                           "_Accum$", "_Passive$", "_Skill%d+$" }) do
+        local nxt = string.gsub(cur, pat, "")
+        if nxt ~= cur then cur = nxt; v[#v + 1] = cur end
+    end
+    return v
 end
 
--- Statuses rarely resolve an icon under their own kind, but their parent
--- skill usually does ("Staff_Censer_Passive_Buff" -> "Staff_Censer_Passive").
--- Try a fallback chain once, cache the winner (or the failure).
-local function draw_icon_for(kind, size)
-    local hit = icon_cache[kind]
-    if hit == false then return false end
-    if hit ~= nil then return imgui.icon(hit, size) end
-
-    local candidates = { kind }
-    local base = string.gsub(kind, "_Status$", "")
-    base = string.gsub(base, "_Buff$", "")
-    base = string.gsub(base, "_Debuff$", "")
-    if base ~= kind then candidates[#candidates + 1] = base end
-    local base2 = string.gsub(base, "_Accum$", "")
-    base2 = string.gsub(base2, "_Passive$", "")
-    if base2 ~= base then candidates[#candidates + 1] = base2 end
-
-    for _, cand in ipairs(candidates) do
+local function draw_icon_cell(kind, size, now)
+    local e = icon_cache[kind]
+    if e and e.win then return imgui.icon(e.win, size) end
+    if e and e.retry and now < e.retry then return false end
+    for _, cand in ipairs(icon_variants(kind)) do
         if imgui.icon(cand, size) then
-            icon_cache[kind] = cand
+            icon_cache[kind] = { win = cand }
             return true
         end
     end
-    icon_cache[kind] = false
+    icon_cache[kind] = { retry = now + 5.0 }
     return false
+end
+
+-- Deterministic tile colour + monogram for statuses with no resolvable icon,
+-- so the grid stays uniform instead of leaving holes.
+local function tile_color(kind)
+    local h = 0
+    for i = 1, #kind do h = (h * 31 + string.byte(kind, i)) % 360 end
+    local function chan(off)
+        local x = math.abs(((h + off) % 360) - 180) / 180
+        return 0.35 + 0.5 * x
+    end
+    return chan(0), chan(120), chan(240)
+end
+
+local function monogram(kind)
+    local toks = {}
+    for t in string.gmatch(kind, "[^_]+") do toks[#toks + 1] = t end
+    local t = toks[2] or toks[1] or "?"
+    return string.sub(t, 1, 2)
 end
 
 local function passes_filters(kind, grp)
     if not match_pattern(kind, grp.include) then return false end
     if grp.exclude ~= "" and match_pattern(kind, grp.exclude) then return false end
     return true
+end
+
+-- One icon cell at the current cursor position. o: { stacks, fill, below,
+-- center, dark }. Overlays are absolute draws anchored to the cell origin,
+-- the same pattern as examples/plugins/animation_demo.lua.
+local function cell(kind, size, now, o)
+    local x, y = imgui.cursor_pos()
+    if not draw_icon_cell(kind, size, now) then
+        local r, g, b = tile_color(kind)
+        imgui.draw_rect_filled(x, y, x + size, y + size, r * 0.5, g * 0.5, b * 0.5, 0.9)
+        imgui.draw_rect(x, y, x + size, y + size, r, g, b, 1.0, 1.5)
+        imgui.draw_text(x + 4, y + size * 0.5 - 8, 1, 1, 1, 1, monogram(kind))
+        imgui.dummy(size, size)
+    end
+    if o.dark then
+        imgui.draw_rect_filled(x, y, x + size, y + size, 0, 0, 0, 0.55)
+    end
+    if o.center and o.center ~= "" then
+        imgui.draw_text(x + 3, y + size * 0.5 - 8, 1, 1, 1, 1, o.center)
+    end
+    if o.stacks and o.stacks > 1 then
+        local s = tostring(o.stacks)
+        imgui.draw_text(x + size - 8 * #s - 1, y + size - 16, 1, 0.95, 0.4, 1, s)
+    end
+    if o.fill then
+        local f = math.max(0, math.min(1, o.fill))
+        imgui.draw_rect_filled(x, y + size + 1, x + size, y + size + 4, 0, 0, 0, 0.6)
+        imgui.draw_rect_filled(x, y + size + 1, x + size * f, y + size + 4,
+                               0.35, 0.8, 1.0, 0.95)
+    end
+    if o.below and o.below ~= "" then
+        imgui.draw_text(x, y + size + 6, 0.92, 0.92, 0.97, 1, o.below)
+    end
 end
 
 local function draw_alerts(now)
@@ -615,78 +668,82 @@ local function draw_alerts(now)
     end
 end
 
-local function draw_buffs(now)
-    local grp = cfg.buffs
-    if not grp.enabled then return end
+-- One unified icon grid, mirroring the game's own buff display: buffs first
+-- (expiring soonest first, permanents after), then cooldowns as darkened
+-- icons with a centred countdown. No category headers.
+local function draw_strip(now)
+    local st = cfg.strip
+    local entries = {}
 
-    local timed, perm = {}, {}
-    for kind, rec in pairs(status_cache) do
-        if rec.active and passes_filters(kind, grp) then
-            if rec.mode == "permanent" then
-                perm[#perm + 1] = rec
-            else
-                local r, t = status_remaining(rec, now)
-                rec._r, rec._t = r, t
-                timed[#timed + 1] = rec
+    if cfg.buffs.enabled then
+        local timed, perm = {}, {}
+        for kind, rec in pairs(status_cache) do
+            if rec.active and passes_filters(kind, cfg.buffs) then
+                if rec.mode == "permanent" then
+                    perm[#perm + 1] = rec
+                else
+                    local r, t = status_remaining(rec, now)
+                    rec._r, rec._t = r, t
+                    timed[#timed + 1] = rec
+                end
             end
         end
-    end
-    table.sort(timed, function(p, q) return p._r < q._r end)
-    table.sort(perm,  function(p, q) return p.kind < q.kind end)
+        table.sort(timed, function(p, q) return p._r < q._r end)
+        table.sort(perm,  function(p, q) return p.kind < q.kind end)
 
-    local shown = 0
-    local function row(rec)
-        if shown >= grp.limit then return end
-        shown = shown + 1
-        if grp.show_icons and draw_icon_for(rec.kind, 20) then
-            imgui.same_line()
+        local n = 0
+        local function push(rec, is_perm)
+            if n >= cfg.buffs.limit then return end
+            n = n + 1
+            entries[#entries + 1] = {
+                kind   = rec.kind,
+                stacks = rec.stacks,
+                fill   = is_perm and 1.0
+                         or ((rec._t > 0) and rec._r / rec._t or 0),
+                below  = (st.show_time and not is_perm) and fmt_time(rec._r) or "",
+            }
         end
-        local label = short(rec.kind, 24)
-        if rec.stacks > 1 then label = label .. "  x" .. rec.stacks end
-        if rec.mode == "permanent" then
-            imgui.progress(1.0, label)
-        else
-            local fill = (rec._t > 0) and (rec._r / rec._t) or 0
-            imgui.progress(math.max(0, math.min(1, fill)),
-                           label .. "   " .. fmt_time(rec._r))
-        end
+        for _, rec in ipairs(timed) do push(rec, false) end
+        for _, rec in ipairs(perm)  do push(rec, true)  end
     end
 
-    -- expiring first, then the permanent block
-    for _, rec in ipairs(timed) do row(rec) end
-    for _, rec in ipairs(perm)  do row(rec) end
-end
-
-local function draw_cds(now)
-    local grp = cfg.cds
-    if not grp.enabled then return end
-
-    local list = {}
-    for kind in pairs(skill_cache) do
-        if passes_filters(kind, grp) then
-            local r, t = cd_remaining(kind, now)
-            if r > 0 or grp.show_ready then
-                list[#list + 1] = { kind = kind, r = r, t = t }
+    if st.show_cds and cfg.cds.enabled then
+        local list = {}
+        for kind in pairs(skill_cache) do
+            if passes_filters(kind, cfg.cds) then
+                local r, t = cd_remaining(kind, now)
+                if r > 0 or cfg.cds.show_ready then
+                    list[#list + 1] = { kind = kind, r = r, t = t }
+                end
             end
         end
-    end
-    if #list == 0 then return end
-    table.sort(list, function(p, q) return p.r < q.r end)
-
-    imgui.separator()
-    local shown = 0
-    for _, e in ipairs(list) do
-        if shown >= grp.limit then break end
-        shown = shown + 1
-        if grp.show_icons and draw_icon_for(e.kind, 20) then
-            imgui.same_line()
+        table.sort(list, function(p, q) return p.r < q.r end)
+        local n = 0
+        for _, e in ipairs(list) do
+            if n >= cfg.cds.limit then break end
+            n = n + 1
+            entries[#entries + 1] = {
+                kind   = e.kind,
+                dark   = e.r > 0,
+                center = (e.r > 0 and st.show_time) and fmt_time(e.r) or "",
+                fill   = (e.t > 0) and (1.0 - e.r / e.t) or 1.0,
+            }
         end
-        if e.r <= 0 then
-            imgui.progress(1.0, short(e.kind, 24) .. "   ready")
+    end
+
+    if #entries == 0 then
+        imgui.text_colored(0.5, 0.5, 0.55, 1, "(nothing active)")
+        return
+    end
+
+    local per_row = math.max(1, math.floor(st.per_row))
+    for i, e in ipairs(entries) do
+        cell(e.kind, st.size, now, e)
+        if i % per_row ~= 0 and i < #entries then
+            imgui.same_line()
         else
-            local fill = (e.t > 0) and (1.0 - e.r / e.t) or 0
-            imgui.progress(math.max(0, math.min(1, fill)),
-                           short(e.kind, 24) .. "   " .. fmt_time(e.r))
+            -- reserve room below the row for the underbar + time captions
+            imgui.dummy(1, st.show_time and 20 or 8)
         end
     end
 end
@@ -697,8 +754,7 @@ local function draw_hud(now)
         return
     end
     draw_alerts(now)
-    draw_buffs(now)
-    draw_cds(now)
+    draw_strip(now)
 end
 
 -- ---------------------------------------------------------------------------
@@ -752,12 +808,25 @@ local function draw_status_tab()
     end
 end
 
+local function strip_editor()
+    imgui.separator()
+    imgui.text("Display")
+    local st = cfg.strip
+    local v, c
+    v, c = imgui.drag_float("Icon size", st.size, 1, 16, 72)
+    if c then st.size = math.floor(v); mark_dirty() end
+    v, c = imgui.drag_float("Icons per row", st.per_row, 1, 2, 16)
+    if c then st.per_row = math.floor(v); mark_dirty() end
+    v, c = imgui.checkbox("Cooldowns in the strip", st.show_cds)
+    if c then st.show_cds = v; mark_dirty() end
+    v, c = imgui.checkbox("Time labels", st.show_time)
+    if c then st.show_time = v; mark_dirty() end
+end
+
 local function group_editor(grp, title, is_cd)
     local v, c
     v, c = imgui.checkbox("Enabled##" .. title, grp.enabled)
     if c then grp.enabled = v; mark_dirty() end
-    v, c = imgui.checkbox("Show icons##" .. title, grp.show_icons)
-    if c then grp.show_icons = v; mark_dirty() end
     v, c = imgui.drag_float("Max shown##" .. title, grp.limit, 1, 1, 24)
     if c then grp.limit = math.floor(v); mark_dirty() end
 
@@ -990,7 +1059,7 @@ function on_render()
     imgui.separator()
 
     if     tab == 1 then draw_status_tab()
-    elseif tab == 2 then group_editor(cfg.buffs, "buffs", false)
+    elseif tab == 2 then group_editor(cfg.buffs, "buffs", false); strip_editor()
     elseif tab == 3 then group_editor(cfg.cds, "cds", true)
     elseif tab == 4 then aura_editor()
     else                 draw_share_tab() end

@@ -304,7 +304,12 @@ imgui = {
     dummy = function(w, h) end,
     font_scale = function(s) end,
     cursor_pos = function() return 100.0, 100.0 end,
-    icon = function(kind, size) return true end,
+    icon = function(kind, size)
+        -- MOCK.icon_known = { [kind]=true } restricts which icons resolve;
+        -- nil (default) means every icon resolves.
+        if MOCK.icon_known ~= nil then return MOCK.icon_known[kind] == true end
+        return true
+    end,
     atlas_icon = function() return true end,
 
     draw_rect_filled = function() MOCK.draws = MOCK.draws + 1 end,
