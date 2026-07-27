@@ -121,9 +121,15 @@ removes the dependency.
 
 | Stage | What | State |
 |---|---|---|
-| 1 | dxgi proxy: load, forward, log | **built** |
-| 2 | HashLink state reader, driven by the offsets `tools/scan-hltypes.mjs` generates from `hlboot.dat` | not started |
-| 3 | D3D12 overlay + Lua runtime exposing the same `farever.*` / `imgui.*` API, so the existing plugins run unmodified | not started |
+| 1 | dxgi proxy: load, forward, log | **built, ran in-game** |
+| 2 | HashLink state reader (`hl_runtime`, `hl_scan`, `hl_reader`) + build-hash gate | **built, awaiting live verification** |
+| 2b | Post-patch update flow (`tools/update.mjs`) | **built, verified** |
+| 3a | Swap-chain observation via the factory wrapper | **built** |
+| 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | not started |
+| 3c | Port the two mods onto the host's draw + state API | not started |
+
+Stage 3b is the remaining bulk. Everything before it is either verified or
+waiting only on a game restart.
 
 Stage 3 matters for packaging: because the host reimplements the *same* API
 surface (53 entry points, see `docs/`), `collection_atlas.lua` and
