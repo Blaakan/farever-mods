@@ -69,9 +69,53 @@ strongest argument for finishing stage 2, and the offsets above mean it is
 generation, not reverse-engineering: re-run the scan after a patch and the
 addresses regenerate.
 
-Finding `st.Player` at runtime is the one remaining unknown; the established
-technique (used by farever-minimap) is hooking `hl_alloc_obj` and watching for
-the type.
+### The complete read path
+
+`ent.Hero.player` at `+0x4b8` closes the chain, and it starts from the Hero —
+the pointer every Farever mod already locates and tracks continuously. No new
+root-finding technique is needed, and in particular no extra `hl_alloc_obj`
+hook: this is a pure pointer walk off an anchor that already exists.
+
+```
+ent.Hero                        (already tracked)
+  +0x4b8  player            -> st.Player
+  +0x0e0    accountProgress -> st.player.AccountProgress
+  +0x0a8      collection    -> st.player.Collection
+                +0x080  mounts   -> hxbit.ArrayProxyData
+                +0x078  gliders                +0x028 array -> hl.types.ArrayDyn
+                +0x0a0  pets
+                +0x098  gears     (armor appearances)
+                +0x088  toys
+                +0x090  emotes
+
+  AccountProgress +0x0b8 bank / +0x0c0 bankEquipment -> hl.types.ArrayObj
+```
+
+`hxbit.ArrayProxyData` is a thin wrapper (`sizeof=48`) whose `array` field at
+`+0x28` holds the actual `hl.types.ArrayDyn`.
+
+Every offset above is generated from `hlboot.dat` by
+`tools/scan-hltypes.mjs`, so a game patch is a re-run rather than a
+re-investigation.
+
+### Two ways to reach it
+
+**Upstream (fast).** The host mod's plugin API is read-only by design, but the
+authoring guide invites requests: *"If you find a real-world use case that
+needs one of these, open an issue. We can probably expose a safe wrapper for
+it."* The maintainer has a track record of doing exactly that — issues #90
+(class), #93 (inventory), #94 (weapon skills) and #100 (a currency) were all
+API additions, shipped across v1.2.1–v1.2.4. A request for
+`farever.player.collection()` carrying the offsets above is a small, safe,
+read-only addition on a path the mod already walks.
+
+**In-house (stage 2).** The host's own reader, which is the standalone goal
+regardless. The pointer walk above is the whole job for collections; the
+remaining work is the generic HashLink array decoding and the safe read
+thread.
+
+These are not exclusive: upstream gets the feature working in days, stage 2
+removes the dependency.
 
 ## Roadmap
 
