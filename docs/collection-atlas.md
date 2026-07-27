@@ -50,33 +50,35 @@ and orders them greedily by travel distance. **Place waypoints** pushes them as
 numbered pins; **Clear waypoints** removes only the ones this plugin created,
 never your own.
 
-### Discoveries
-Every distinct item kind seen in your bag or on your character, bucketed into
-categories.
+### Collections
+Account-wide unlock records, mirroring how Farever actually treats these
+items — they live in collection lists, not in your bag:
 
-It is a **discovery log, not a checklist**: it records what you have found as
-you find it. New items fire a toast when they first appear.
+- **Mounts** and **gliders**, shown against the known totals for this build
+  (63 and 70, extracted from the game's bytecode by
+  [`tools/scan-hlboot.mjs`](../tools/scan-hlboot.mjs)).
+- **Appearances**: armor unlocks its appearance account-wide when obtained and
+  is then recycle/sell fodder. Every armor piece seen in your gear or bag is
+  recorded as an unlocked appearance — the record survives selling the item,
+  which is the whole point.
 
-Categories are matched by anchored prefixes in `ITEM_CATEGORIES` at the top of
-the plugin. Those prefixes are **not guesses** — they were read out of the
-game's own HashLink bytecode by
-[`tools/scan-hlboot.mjs`](../tools/scan-hlboot.mjs), which finds 63 `Mount_*`
-ids, 70 `Glider_*`, 74 `Recipe_*` and the full armour slot set. See
-[docs/scanning.md](scanning.md).
+The plugin API has no account-collections getter, so ownership is **observed**:
+an item is recorded the first time it passes through your equipment or bag.
+Equip each mount and glider once and the collection fills in. These records are
+stored account-wide (no character suffix), so every character sees the same
+list.
 
-Prefixes are tried before loose substrings, so `Chest_Z1U2_Cle` is correctly
-armour rather than being pulled into another bucket. Anything unmatched lands
-in **Unclassified**, where you can read the raw ids and add a rule — editing
-the table and saving hot-reloads instantly:
+### Vault
+Weapons and trinkets — the items that unlock nothing and are usually worth
+keeping in the bank. Each records the best level/upgrade observed and which
+character last improved it.
 
-```lua
-{ cat = "Mounts", prefixes = { "mount_" } },
-```
+Routing is by equipment `slot_name` where available (`Weapon1`, `Trinket`,
+`Neck`, the finger slots…), with id-prefix fallbacks for bag items. Materials
+and consumables are deliberately **not tracked** — they are churn.
 
-If you want a true *checklist* — "you own 12 of 63 mounts" — run
-`node tools/scan-hlboot.mjs --lua` to generate the full id list from your own
-install and paste it in. It is left out of the shipped plugin deliberately:
-those lists are game data, not ours to redistribute.
+The bank itself is not readable through the plugin API; the vault records what
+passed through your hands.
 
 ### Codex
 Bestiary completion, recorded whenever you change target. Shows progress per
@@ -114,9 +116,11 @@ so a crash never costs you a pickup.
 
 - **Separate collected-set** from the host mod's, as above.
 - **Auto-mark is proximity-based** and can produce false positives.
-- **Discovery, not completion**, for mounts/gliders/gear by default. The full id
-  lists *can* be extracted (see above) but are not shipped, so out of the box
-  the plugin counts what you have rather than what you lack.
+- **Ownership is observed, not queried.** A mount you own but never equip while
+  the plugin runs is not recorded. Totals (x / 63) are known from the bytecode
+  scan; the per-id checklist fills in as you cycle your collection once.
+- **Appearance unlocks are inferred** from armor sightings; armor obtained and
+  recycled before the plugin ever saw it will be missing until it appears again.
 - **`farever.store` holds scalars only**, so the collected set is packed into a
   comma-joined string. A POI id containing a comma cannot round-trip; those are
   skipped with a warning in `farever-mod.log` rather than corrupting the set.

@@ -98,12 +98,16 @@ try {
   run(
     L,
     `MOCK.inventory = {
-       { kind = "Mount_DesertRaptor", level = 1, upgrade = 0, stack = 1 },
-       { kind = "Glider_LinenWing",   level = 1, upgrade = 0, stack = 1 },
-       { kind = "LavendulaPetal",     level = 0, upgrade = 0, stack = 10 },
-       { kind = "Weird_Thing_XY",     level = 0, upgrade = 0, stack = 1 },
+       { kind = "Glider_Falcon_Blue",  level = 1,  upgrade = 0, stack = 1 },
+       { kind = "Feet_RKobold_FigCle", level = 24, upgrade = 0, stack = 1 },
+       { kind = "LavendulaPetal",      level = 0,  upgrade = 0, stack = 10 },
+       { kind = "Weird_Thing_XY",      level = 0,  upgrade = 0, stack = 1 },
      }
-     MOCK.equipment = { { kind = "Staff_Craft_C", level = 27, upgrade = 3 } }
+     MOCK.equipment = {
+       { kind = "Staff_Craft_C",       level = 27, upgrade = 3, slot = 1,  slot_name = "Weapon1" },
+       { kind = "Mount_Boar_05",       level = 0,  upgrade = 0, slot = 20, slot_name = "" },
+       { kind = "StoneOfPower_Trinket",level = 25, upgrade = 1, slot = 14, slot_name = "Trinket" },
+     }
      MOCK.codex = {
        Boar_Z1W_E = { state = "complete", completed = true, progress = 10,
                       max = 10, name = "Boar", path = "beasts/boar" },
@@ -121,27 +125,33 @@ try {
   const poiLine = evalLua(L, `MOCK.texts[#MOCK.texts]`);
   ok(num(L, '#MOCK.texts') > 0, 'dashboard renders');
 
-  // Discovery: inventory scan happens on the 1Hz poll
+  // Collections/vault scan happens on the 1Hz poll
   frames(L, 6, 0.5);
   const toasts = evalLua(L, `table.concat(MOCK.toasts, "|")`);
-  ok(toasts.includes('Mount_DesertRaptor'), 'discovers mount from inventory', toasts);
-  ok(toasts.includes('Glider_LinenWing'), 'discovers glider from inventory');
+  ok(toasts.includes('Mount_Boar_05'), 'records mount from the equipped mount slot', toasts);
+  ok(toasts.includes('Glider_Falcon_Blue'), 'records glider from the bag');
+  ok(toasts.includes('Appearance unlocked: Feet_RKobold_FigCle'), 'armor sighting unlocks its appearance');
+  ok(toasts.includes('Vault keeper: Staff_Craft_C'), 'weapon goes to the vault');
+  ok(toasts.includes('Vault keeper: StoneOfPower_Trinket'), 'trinket (by slot_name) goes to the vault');
 
   // Codex capture via target_changed
   run(L, `on_event("target_changed", { kind = "Boar_Z1W_E" })`, 'codex evt');
   run(L, `on_event("target_changed", { kind = "Skunk_Z1W" })`, 'codex evt2');
 
   // Walk every tab
-  for (let t = 1; t <= 7; t++) {
+  for (let t = 1; t <= 8; t++) {
     run(L, `MOCK.combo["##tab"] = ${t}`, 'tab');
     frames(L, 2, 0.5);
   }
-  ok(true, 'all 7 tabs render without error');
+  ok(true, 'all 8 tabs render without error');
 
   const texts = evalLua(L, `table.concat(MOCK.texts, "\\n")`);
-  ok(/Mount_DesertRaptor/.test(texts), 'discoveries tab lists the mount');
-  ok(/Unclassified/.test(texts), 'unmatched item falls into Unclassified');
+  ok(/Mount_Boar_05/.test(texts), 'collections tab lists the mount');
+  ok(/Appearances \(1\)/.test(texts), 'appearance section counts the armor unlock');
+  ok(/Staff_Craft_C\s+lvl 27/.test(texts), 'vault tab shows the weapon with its level');
   ok(/Boar/.test(texts), 'codex tab lists a bestiary entry');
+  const acctm = evalLua(L, `tostring(MOCK.store["acct_mounts"])`);
+  ok(acctm.includes('Mount_Boar_05'), 'mount record is account-wide (no character suffix)');
 
   // Route planning + waypoints (tab 4)
   run(L, `MOCK.combo["##tab"] = 4; MOCK.clicks["Plan route"] = true`, 'plan');
@@ -177,7 +187,7 @@ try {
   );
 
   // Export
-  run(L, `MOCK.combo["##tab"] = 7; MOCK.clicks["Export JSON"] = true`, 'export');
+  run(L, `MOCK.combo["##tab"] = 8; MOCK.clicks["Export JSON"] = true`, 'export');
   frames(L, 1, 0.1);
   const exported = evalLua(L, `tostring(MOCK.files["collection-atlas-Testchar.json"])`);
   ok(exported !== 'nil', 'export writes a combat-log file');
@@ -193,10 +203,19 @@ try {
     ok(typeof parsed.categories === 'object', 'export carries category totals');
     ok(Array.isArray(parsed.areas) && parsed.areas.length > 0, 'export carries areas');
     ok(
-      Array.isArray(parsed.discovered) &&
-        parsed.discovered.some((d) => d.category === 'Mounts'),
-      'export classifies the mount'
+      parsed.collections && parsed.collections.mount.includes('Mount_Boar_05'),
+      'export carries the mount collection'
     );
+    ok(
+      parsed.collections.appearance.includes('Feet_RKobold_FigCle'),
+      'export carries the appearance unlock'
+    );
+    ok(
+      Array.isArray(parsed.vault) &&
+        parsed.vault.some((v) => v.kind === 'Staff_Craft_C' && v.level === 27),
+      'export carries the vault with levels'
+    );
+    ok(!exported.includes('LavendulaPetal'), 'materials churn is not tracked');
   }
 
   ok(num(L, '#MOCK.store_bad') === 0, 'never persists a non-scalar to the store');

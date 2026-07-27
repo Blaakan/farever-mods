@@ -17,8 +17,10 @@
 --       coordinates
 --     * a live nearest-uncollected list with distance, heading and altitude
 --     * a greedy route planner that pushes real map waypoints
---     * a discovery log for things the POI table does NOT cover - mounts,
---       gliders, gear and materials - harvested from your inventory
+--     * account-wide collection records for what the game treats as
+--       collections - mounts, gliders, armor appearances - plus a vault
+--       list of bank-worthy weapons and trinkets, observed from your gear
+--       and bag
 --     * a bestiary/codex progress view
 --     * a JSON export of everything
 --
@@ -57,39 +59,40 @@ local LANDMARK = {
     obelisk = true, respawn = true, town = true, camp = true,
 }
 
--- Classifier for the discovery log.
+-- Item routing, matching what the game actually does with items:
 --
--- `prefixes` are anchored and come from Farever's real naming scheme, read out
--- of the game's own HashLink bytecode by tools/scan-hlboot.mjs (Mount_Boar_05,
--- Glider_Falcon_Blue, Feet_RKobold_FigCle_Craft, Recipe_InvisibilityPotion...).
--- `pats` are unanchored fallbacks for families with no clean prefix.
+--   * Mounts, gliders and armor APPEARANCES are account-wide collection
+--     unlocks, not bag contents. Armor unlocks its appearance when obtained
+--     and is then recycle / sell fodder.
+--   * Weapons and trinkets unlock nothing and are usually worth keeping, so
+--     they get a separate "vault" record with the best level/upgrade seen.
+--   * Everything else (materials, consumables) is churn and is not tracked.
 --
--- Prefixes are tried before substrings, so Chest_ armor is not mistaken for a
--- container. Anything unmatched lands in "Unclassified", where you can read
--- the raw id and add a rule - the file hot-reloads on save.
+-- The plugin API exposes no account-collections getter, so ownership is
+-- OBSERVED: an item is recorded when it passes through your equipment or bag.
+-- Equip each mount / glider once and the collection fills in.
 --
--- Regenerate the id lists after a game patch:
---     node tools/scan-hlboot.mjs --lua
-local ITEM_CATEGORIES = {
-    { cat = "Mounts",     prefixes = { "mount_" } },
-    { cat = "Gliders",    prefixes = { "glider_" } },
-    { cat = "Recipes",    prefixes = { "recipe_" } },
-    { cat = "Weapons",    prefixes = { "sword_", "staff_", "bow_", "daggers_",
-                                       "dagger_", "axe_", "mace_", "hammer_",
-                                       "spear_", "wand_", "book_", "shield_" } },
-    { cat = "Armor",      prefixes = { "head_", "hair_", "shoulders_", "back_",
-                                       "hands_", "waist_", "legs_", "feet_",
-                                       "chest_", "torso_" } },
-    { cat = "Jewelry",    prefixes = { "neck_", "ring_", "amulet_", "trinket_" },
-                          pats     = { "trinket" } },
-    { cat = "Tools",      prefixes = { "pickaxe", "sickle" } },
-    { cat = "Consumable", pats = { "potion", "elixir", "food", "tonic", "scroll" } },
-    { cat = "Materials",  pats = { "ore", "ingot", "petal", "herb", "leather",
-                                   "hide", "cloth", "wood", "plank", "essence",
-                                   "beryl", "embroidery", "plate" } },
-}
+-- Prefixes come from the real id vocabulary extracted out of hlboot.dat by
+-- tools/scan-hlboot.mjs (Mount_Boar_05, Glider_Falcon_Blue,
+-- Feet_RKobold_FigCle_Craft...). KNOWN_TOTALS are from the same scan of this
+-- build - regenerate after a patch.
+local KNOWN_TOTALS = { mount = 63, glider = 70 }   -- July 2026 build
 
-local TABS = { "Dashboard", "Nearby", "Areas", "Route", "Discoveries", "Codex", "Settings" }
+local WEAPON_SLOTS  = { Weapon1 = true, Weapon2 = true, OffhandWeapon = true }
+local TRINKET_SLOTS = { Trinket = true, Neck = true,
+                        FingerLeft = true, FingerRight = true }
+local GEAR_SLOTS    = { Head = true, Shoulders = true, Chest = true,
+                        Back = true, Hands = true, Waist = true,
+                        Legs = true, Feet = true }
+
+local WEAPON_PREFIXES  = { "sword_", "staff_", "bow_", "daggers_", "dagger_",
+                           "axe_", "mace_", "hammer_", "spear_", "wand_",
+                           "book_", "shield_" }
+local ARMOR_PREFIXES   = { "head_", "hair_", "shoulders_", "back_", "hands_",
+                           "waist_", "legs_", "feet_", "chest_", "torso_" }
+local TRINKET_PREFIXES = { "trinket_", "neck_", "ring_", "amulet_" }
+
+local TABS = { "Dashboard", "Nearby", "Areas", "Route", "Collections", "Vault", "Codex", "Settings" }
 
 -- ---------------------------------------------------------------------------
 -- Runtime state (reset on every hot reload; anything durable lives in store)
@@ -106,8 +109,12 @@ local areas       = {}    -- clustered regions
 local areas_sorted = {}
 
 local done        = {}    -- id -> true, the collected set for this character
-local discovered  = {}    -- item kind -> first-seen timestamp string
 local codex_seen  = {}    -- monster kind -> "state:progress:max"
+
+-- Account-wide records; their store keys carry no character suffix.
+local acct        = { mount = {}, glider = {}, appearance = {} }
+local acct_n      = { mount = 0,  glider = 0,  appearance = 0 }
+local vault       = {}    -- kind -> "level|upgrade|char"
 
 local profile     = ""    -- store key suffix for the active character
 local dirty       = false
@@ -243,9 +250,12 @@ local function flush(force)
     if not dirty then return end
     local now = farever.now()
     if not force and (now - last_flush) < FLUSH_INTERVAL then return end
-    farever.store.set(key("done"),       set_encode(done))
-    farever.store.set(key("discovered"), map_encode(discovered))
-    farever.store.set(key("codex"),      map_encode(codex_seen))
+    farever.store.set(key("done"),  set_encode(done))
+    farever.store.set(key("codex"), map_encode(codex_seen))
+    farever.store.set("acct_mounts",      set_encode(acct.mount))
+    farever.store.set("acct_gliders",     set_encode(acct.glider))
+    farever.store.set("acct_appearances", set_encode(acct.appearance))
+    farever.store.set("acct_vault",       map_encode(vault))
     last_flush = now
     dirty = false
 end
@@ -297,9 +307,8 @@ local function bind_profile()
 
     flush(true)              -- persist the previous character before switching
     profile = p
-    done                 = set_decode(farever.store.get(key("done"), ""))
-    discovered           = map_decode(farever.store.get(key("discovered"), ""))
-    codex_seen           = map_decode(farever.store.get(key("codex"), ""))
+    done       = set_decode(farever.store.get(key("done"), ""))
+    codex_seen = map_decode(farever.store.get(key("codex"), ""))
     dirty = false
     farever.log.info("collection_atlas: profile bound to '" .. profile .. "'")
 end
@@ -511,53 +520,98 @@ local function proximity_tick()
 end
 
 -- ---------------------------------------------------------------------------
--- Discovery log - the collectibles the POI table does not cover.
+-- Collections & vault
 --
--- There is no public master list of Farever mounts / gliders / gear, so this
--- builds one from what you actually own: every distinct item kind seen in your
--- bag or on your character is recorded with the time it first appeared.
+-- Ownership is observed from equipment() and inventory(): the API has no
+-- account-collections getter, so an entry is recorded the first time the item
+-- passes through your hands. Both records are account-wide.
 -- ---------------------------------------------------------------------------
 
--- Anchored prefixes win over loose substrings, so "Chest_Z1U2_Cle" is armor
--- rather than being dragged into Materials by an unrelated substring hit.
-local function classify(kind)
-    local k = lower(kind)
-    for _, row in ipairs(ITEM_CATEGORIES) do
-        for _, p in ipairs(row.prefixes or {}) do
-            if string.sub(k, 1, #p) == p then return row.cat end
-        end
+local function starts_with_any(k, prefixes)
+    for _, p in ipairs(prefixes) do
+        if string.sub(k, 1, #p) == p then return true end
     end
-    for _, row in ipairs(ITEM_CATEGORIES) do
-        for _, pat in ipairs(row.pats or {}) do
-            if string.find(k, pat, 1, true) then return row.cat end
-        end
-    end
-    return "Unclassified"
+    return false
 end
 
-local function note_item(kind, lvl)
-    if not kind or kind == "" then return end
-    if discovered[kind] then return end
-    discovered[kind] = string.format("%d|%s", round(farever.now()), tostring(lvl or 0))
+-- What is this item to the tracker? slot_name (present on equipment entries)
+-- is authoritative; bag items carry no slot, so prefixes fill in.
+local function route_of(kind, slot_name)
+    local k = lower(kind)
+    if starts_with_any(k, { "mount_" })  then return "mount" end
+    if starts_with_any(k, { "glider_" }) then return "glider" end
+    if slot_name and slot_name ~= "" then
+        if WEAPON_SLOTS[slot_name]  then return "weapon" end
+        if TRINKET_SLOTS[slot_name] then return "trinket" end
+        if GEAR_SLOTS[slot_name]    then return "armor" end
+        return nil                       -- Pickaxe, Sickle, unnamed slots
+    end
+    if starts_with_any(k, WEAPON_PREFIXES)  then return "weapon" end
+    if starts_with_any(k, TRINKET_PREFIXES) then return "trinket" end
+    if string.find(k, "_trinket", 1, true)  then return "trinket" end
+    if starts_with_any(k, ARMOR_PREFIXES)   then return "armor" end
+    return nil
+end
+
+local function note_collection(cat, kind)
+    if acct[cat][kind] then return end
+    acct[cat][kind] = true
+    acct_n[cat] = acct_n[cat] + 1
     mark_dirty()
-    farever.toast("New discovery: " .. kind, 3.0)
+    local total = KNOWN_TOTALS[cat]
+    if total then
+        farever.toast(string.format("New %s recorded: %s (%d / %d known)",
+            cat, kind, acct_n[cat], total), 3.0)
+    else
+        farever.toast("Appearance unlocked: " .. kind, 3.0)
+    end
     farever.sound("info")
 end
 
-local function discovery_tick()
-    if not farever.player.locked() then return end
-    local lvl = farever.player.level()
-
-    if has(farever.player.inventory) then
-        local ok, items = pcall(farever.player.inventory)
-        if ok and type(items) == "table" then
-            for _, it in ipairs(items) do note_item(it.kind, lvl) end
+local function note_vault(kind, level, upgrade)
+    level, upgrade = tonumber(level) or 0, tonumber(upgrade) or 0
+    local cur = vault[kind]
+    if cur then
+        local l, u = string.match(cur, "^(%-?%d+)|(%-?%d+)")
+        if level > (tonumber(l) or 0) or upgrade > (tonumber(u) or 0) then
+            vault[kind] = string.format("%d|%d|%s", level, upgrade, profile)
+            mark_dirty()
         end
+        return
     end
+    vault[kind] = string.format("%d|%d|%s", level, upgrade, profile)
+    mark_dirty()
+    farever.toast("Vault keeper: " .. kind, 3.0)
+end
+
+local function note_item(kind, level, upgrade, slot_name)
+    if not kind or kind == "" then return end
+    local r = route_of(kind, slot_name)
+    if r == "mount" or r == "glider" then
+        note_collection(r, kind)
+    elseif r == "armor" then
+        note_collection("appearance", kind)
+    elseif r == "weapon" or r == "trinket" then
+        note_vault(kind, level, upgrade)
+    end
+end
+
+local function collections_tick()
+    if not farever.player.locked() then return end
     if has(farever.player.equipment) then
         local ok, items = pcall(farever.player.equipment)
         if ok and type(items) == "table" then
-            for _, it in ipairs(items) do note_item(it.kind, lvl) end
+            for _, it in ipairs(items) do
+                note_item(it.kind, it.level, it.upgrade, it.slot_name)
+            end
+        end
+    end
+    if has(farever.player.inventory) then
+        local ok, items = pcall(farever.player.inventory)
+        if ok and type(items) == "table" then
+            for _, it in ipairs(items) do
+                note_item(it.kind, it.level, it.upgrade, nil)
+            end
         end
     end
 end
@@ -674,14 +728,31 @@ local function export_json()
     end
     add("]")
 
-    add(',"discovered":[')
-    local dnames = {}
-    for k in pairs(discovered) do dnames[#dnames + 1] = k end
-    table.sort(dnames)
-    for i, k in ipairs(dnames) do
+    add(',"collections":{')
+    local ckeys = { "mount", "glider", "appearance" }
+    for ci, cat in ipairs(ckeys) do
+        if ci > 1 then add(",") end
+        add(string.format('"%s":[', cat))
+        local names = {}
+        for k in pairs(acct[cat]) do names[#names + 1] = k end
+        table.sort(names)
+        for i, k in ipairs(names) do
+            if i > 1 then add(",") end
+            add('"' .. json_escape(k) .. '"')
+        end
+        add("]")
+    end
+    add("}")
+
+    add(',"vault":[')
+    local vnames = {}
+    for k in pairs(vault) do vnames[#vnames + 1] = k end
+    table.sort(vnames)
+    for i, k in ipairs(vnames) do
         if i > 1 then add(",") end
-        add(string.format('{"kind":"%s","category":"%s"}',
-            json_escape(k), json_escape(classify(k))))
+        local l, u, ch = string.match(vault[k] or "", "^(%-?%d+)|(%-?%d+)|(.*)$")
+        add(string.format('{"kind":"%s","level":%s,"upgrade":%s,"char":"%s"}',
+            json_escape(k), l or "0", u or "0", json_escape(ch or "")))
     end
     add("]")
 
@@ -874,43 +945,65 @@ local function draw_route()
     imgui.text(string.format("Total path: %s over %d stops", fmt_dist(total), #route))
 end
 
-local function draw_discoveries()
-    imgui.text("Every distinct item kind seen in your bag or on your character.")
-    imgui.text_colored(0.7, 0.7, 0.7, 1,
-        "Categories are pattern guesses - edit ITEM_CATEGORIES at the top")
-    imgui.text_colored(0.7, 0.7, 0.7, 1,
-        "of this file to teach it Farever's real mount / glider ids.")
+local function draw_collections()
+    imgui.text("Account-wide unlocks, observed as items pass through your")
+    imgui.text("hands. Equip each mount / glider once to record it.")
     imgui.separator()
 
-    local buckets = {}
-    local n = 0
-    for kind in pairs(discovered) do
-        local cat = classify(kind)
-        buckets[cat] = buckets[cat] or {}
-        table.insert(buckets[cat], kind)
-        n = n + 1
-    end
-    if n == 0 then
-        imgui.text("nothing discovered yet - open your bag once in game")
-        return
-    end
-
-    local cats = {}
-    for c in pairs(buckets) do cats[#cats + 1] = c end
-    table.sort(cats)
-
-    imgui.text(string.format("%d distinct items across %d categories", n, #cats))
+    bar("Mounts ", acct_n.mount,  KNOWN_TOTALS.mount)
+    bar("Gliders", acct_n.glider, KNOWN_TOTALS.glider)
+    imgui.text(string.format("Appearances unlocked: %d", acct_n.appearance))
+    imgui.text_colored(0.7, 0.7, 0.7, 1,
+        "  armor seen = appearance unlocked = safe to recycle / sell")
     imgui.separator()
 
-    for _, cat in ipairs(cats) do
-        local list = buckets[cat]
+    local sections = {
+        { label = "Mounts",      set = acct.mount },
+        { label = "Gliders",     set = acct.glider },
+        { label = "Appearances", set = acct.appearance },
+    }
+    for _, sec in ipairs(sections) do
+        local list = {}
+        for k in pairs(sec.set) do list[#list + 1] = k end
         table.sort(list)
         imgui.text_colored(0.5, 0.8, 1.0, 1.0,
-            string.format("%s (%d)", cat, #list))
-        for _, kind in ipairs(list) do
-            imgui.text("   " .. kind)
+            string.format("%s (%d)", sec.label, #list))
+        if #list == 0 then
+            imgui.text("    (none recorded yet)")
+        end
+        for i, k in ipairs(list) do
+            if i > 40 then
+                imgui.text(string.format("    ... %d more", #list - 40))
+                break
+            end
+            imgui.text("    " .. k)
         end
         imgui.spacing()
+    end
+end
+
+local function draw_vault()
+    imgui.text("Weapons and trinkets seen on this account - the items worth")
+    imgui.text("keeping in the bank, with the best level / upgrade observed.")
+    imgui.text_colored(0.7, 0.7, 0.7, 1,
+        "The bank itself is not readable through the plugin API; this")
+    imgui.text_colored(0.7, 0.7, 0.7, 1,
+        "records everything that passed through your bag or gear.")
+    imgui.separator()
+
+    local list = {}
+    for k in pairs(vault) do list[#list + 1] = k end
+    if #list == 0 then
+        imgui.text("nothing recorded yet - open your bag once in game")
+        return
+    end
+    table.sort(list)
+    imgui.text(string.format("%d item(s)", #list))
+    imgui.separator()
+    for _, k in ipairs(list) do
+        local l, u, ch = string.match(vault[k] or "", "^(%-?%d+)|(%-?%d+)|(.*)$")
+        imgui.text(string.format("%-30s lvl %s +%s  (%s)",
+            string.sub(k, 1, 30), l or "?", u or "?", ch or "?"))
     end
 end
 
@@ -995,6 +1088,14 @@ end
 
 function on_init()
     load_cfg()
+    local n
+    acct.mount, n      = set_decode(farever.store.get("acct_mounts", ""))
+    acct_n.mount       = n
+    acct.glider, n     = set_decode(farever.store.get("acct_gliders", ""))
+    acct_n.glider      = n
+    acct.appearance, n = set_decode(farever.store.get("acct_appearances", ""))
+    acct_n.appearance  = n
+    vault = map_decode(farever.store.get("acct_vault", ""))
     profile = ""
     bind_profile()
     refresh_pois()
@@ -1019,7 +1120,7 @@ function on_render()
         last_poll = now
         bind_profile()
         if not pois_loaded then refresh_pois() end
-        discovery_tick()
+        collections_tick()
         proximity_tick()
     end
     flush(false)
@@ -1032,7 +1133,8 @@ function on_render()
     elseif tab == 2 then draw_nearby()
     elseif tab == 3 then draw_areas()
     elseif tab == 4 then draw_route()
-    elseif tab == 5 then draw_discoveries()
-    elseif tab == 6 then draw_codex()
+    elseif tab == 5 then draw_collections()
+    elseif tab == 6 then draw_vault()
+    elseif tab == 7 then draw_codex()
     else                 draw_settings() end
 end
