@@ -98,6 +98,41 @@ Every offset above is generated from `hlboot.dat` by
 `tools/scan-hltypes.mjs`, so a game patch is a re-run rather than a
 re-investigation.
 
+### Reader status (verified live)
+
+```
+collection: mounts=21 gliders=30 pets=16 gears=185
+inventory:  Emsei bank=141 bankEq=6 equipped=20 bags=13
+```
+
+Written to `farever-collection.json` and `farever-inventory-<character>.json`
+next to the game, on change only.
+
+**Inventory slots are `HVIRTUAL`, not objects.** Both `bank`/`bankEquipment`
+and `equipped`/`bags` hold Haxe structural values with fields stored inline
+(`value` is null), which is why reading them as class instances rejected all
+141 bank entries:
+
+```
+bank / bankEquipment   { count:Int, it:st.item.Gear | st.Item, slot:Int }
+equipped / bags        { count:Int, item:st.item.Weapon | st.item.Gear }
+```
+
+The item field is `it` in the bank and `item` in inventories. Item classes
+seen live: `st.Item`, `st.item.Gear`, `st.item.Armor`, `st.item.Weapon`.
+
+**Open: rarity.** Reports `-1` for almost everything, and it is not a bad
+offset - `rarity` is declared *only* on `st.item.Weapon`. `st.item.Armor`
+extends `Gear` with no such field. The bytecode has `$HItem.getRarity` as a
+FUNCTION plus a `$Data.rarity` static, so rarity for non-weapons is computed
+from the item definition by kind.
+
+That converges with the other open item: rarity **and** the master "every
+item that exists" lists both come from the compiled CastleDB statics, so
+there is one remaining data problem, not two. See the CastleDB note under
+`tools/pak-extract.mjs` - it is compiled into `hlboot.dat`, not shipped in
+`res.pak`.
+
 ### Two ways to reach it
 
 **Upstream (fast).** The host mod's plugin API is read-only by design, but the
