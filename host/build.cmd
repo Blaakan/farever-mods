@@ -31,7 +31,8 @@ cl /nologo /LD /O2 /MT /W3 /EHa /std:c++17 ^
    /D_CRT_SECURE_NO_WARNINGS ^
    /Fo:build\ /Fe:build\dxgi.dll ^
    src\dllmain.cpp src\hl_runtime.cpp src\hl_scan.cpp src\hl_reader.cpp ^
-   /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib advapi32.lib
+   src\dxgi_wrap.cpp ^
+   /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib advapi32.lib dxgi.lib
 
 if errorlevel 1 (
   echo BUILD FAILED

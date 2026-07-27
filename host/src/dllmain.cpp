@@ -40,9 +40,11 @@
 #include <intrin.h>    // _ReturnAddress
 #include <stdarg.h>
 #include <stdio.h>
+#include <share.h>   // _SH_DENYNO
 
 #include "hl_reader.h"
 #include "hl_runtime.h"
+#include "dxgi_wrap.h"
 #include "offsets.gen.h"
 
 #pragma intrinsic(_ReturnAddress)
@@ -80,7 +82,10 @@ void open_log() {
     if (!slash) return;
     slash[1] = 0;
     wcsncat_s(path, MAX_PATH, L"farever-modkit.log", _TRUNCATE);
-    _wfopen_s(&g_log, path, L"w");
+    // Shared read: the log is the only way to see what the reader is doing, so
+    // it must stay readable (tail, editors, tools/update.mjs) while the game
+    // runs. Plain _wfopen takes an exclusive lock and makes it unreadable.
+    g_log = _wfsopen(path, L"w", _SH_DENYNO);
 }
 
 // Resolve the genuine dxgi.dll by absolute system path. Never by bare name -
@@ -244,25 +249,39 @@ DWORD WINAPI worker(LPVOID) {
 
 extern "C" {
 
+// Each creator forwards, then wraps the result so the swap chain the game
+// builds from it becomes observable. Wrapping is best-effort: if we cannot
+// fully stand in for the requested interface the original is returned
+// untouched, and the game is none the wiser.
+
 HRESULT WINAPI Proxy_CreateDXGIFactory(REFIID riid, void** out) {
     log_caller("CreateDXGIFactory", _ReturnAddress());
     using Fn = HRESULT(WINAPI*)(REFIID, void**);
     auto fn = (Fn)forward("CreateDXGIFactory");
-    return fn ? fn(riid, out) : E_FAIL;
+    if (!fn) return E_FAIL;
+    HRESULT hr = fn(riid, out);
+    if (SUCCEEDED(hr) && out && *out) *out = fmk::dxgi_wrap_factory(*out, riid);
+    return hr;
 }
 
 HRESULT WINAPI Proxy_CreateDXGIFactory1(REFIID riid, void** out) {
     log_caller("CreateDXGIFactory1", _ReturnAddress());
     using Fn = HRESULT(WINAPI*)(REFIID, void**);
     auto fn = (Fn)forward("CreateDXGIFactory1");
-    return fn ? fn(riid, out) : E_FAIL;
+    if (!fn) return E_FAIL;
+    HRESULT hr = fn(riid, out);
+    if (SUCCEEDED(hr) && out && *out) *out = fmk::dxgi_wrap_factory(*out, riid);
+    return hr;
 }
 
 HRESULT WINAPI Proxy_CreateDXGIFactory2(UINT flags, REFIID riid, void** out) {
     log_caller("CreateDXGIFactory2", _ReturnAddress());
     using Fn = HRESULT(WINAPI*)(UINT, REFIID, void**);
     auto fn = (Fn)forward("CreateDXGIFactory2");
-    return fn ? fn(flags, riid, out) : E_FAIL;
+    if (!fn) return E_FAIL;
+    HRESULT hr = fn(flags, riid, out);
+    if (SUCCEEDED(hr) && out && *out) *out = fmk::dxgi_wrap_factory(*out, riid);
+    return hr;
 }
 
 HRESULT WINAPI Proxy_DXGIGetDebugInterface1(UINT flags, REFIID riid, void** out) {
@@ -296,6 +315,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             log_line("attach: pid=%lu exe=%ls", GetCurrentProcessId(), exe);
             log_line("libhl.dll present in process: %s",
                      GetModuleHandleW(L"libhl.dll") ? "yes" : "not yet");
+            // Observing the swap chain costs nothing until it appears.
+            fmk::dxgi_set_swapchain_cb([](IDXGISwapChain* sc) {
+                log_line("dxgi: swap chain observed at %p", (void*)sc);
+            });
             // Reads happen on our own thread; DllMain stays minimal.
             CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
             break;
