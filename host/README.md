@@ -117,12 +117,40 @@ thread.
 These are not exclusive: upstream gets the feature working in days, stage 2
 removes the dependency.
 
+### Verified
+
+Stage 2 landed. A live run against the game produced:
+
+```
+collection: mounts=21 gliders=30 pets=16 gears=179 toys=0 emotes=0 bankSlots=6
+  mount  SparkHorse_01
+  mount  Mount_Ladybug_Blue
+  glider Glider_Dragon_BlueGreen
+  ...
+```
+
+Authoritative account ownership, with no equipping or observation required.
+The offsets derived offline from `hlboot.dat` held exactly against live
+memory.
+
+Two lessons worth keeping:
+
+- **Validate during the scan, not after.** Most qwords equal to a type
+  pointer are metadata (the type table, proto arrays, type params of other
+  types), not instances. Collecting "the first N matches" fills entirely on
+  metadata — it hit a 64-item cap in 47ms and never reached a real object.
+  Checking each candidate's full chain as it is found took 1,994 candidates
+  and 5.2s to land on the right one.
+- **Reading beats inferring.** `SparkHorse_01` is a mount with no `Mount_`
+  prefix. Any name-prefix heuristic misses it; reading the collection does
+  not.
+
 ## Roadmap
 
 | Stage | What | State |
 |---|---|---|
 | 1 | dxgi proxy: load, forward, log | **built, ran in-game** |
-| 2 | HashLink state reader (`hl_runtime`, `hl_scan`, `hl_reader`) + build-hash gate | **built, awaiting live verification** |
+| 2 | HashLink state reader (`hl_runtime`, `hl_scan`, `hl_reader`) + build-hash gate | **working in-game** — reads the real account collection |
 | 2b | Post-patch update flow (`tools/update.mjs`) | **built, verified** |
 | 3a | Swap-chain observation via the factory wrapper | **built** |
 | 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | not started |
