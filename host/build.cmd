@@ -25,11 +25,13 @@ if errorlevel 1 exit /b 1
 cd /d "%~dp0"
 if not exist build mkdir build
 
-cl /nologo /LD /O2 /MT /W3 /EHsc /std:c++17 ^
+REM /EHa: the reader guards game-memory dereferences with SEH __try/__except,
+REM which needs asynchronous exception handling.
+cl /nologo /LD /O2 /MT /W3 /EHa /std:c++17 ^
    /D_CRT_SECURE_NO_WARNINGS ^
    /Fo:build\ /Fe:build\dxgi.dll ^
-   src\dllmain.cpp ^
-   /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib
+   src\dllmain.cpp src\hl_runtime.cpp src\hl_scan.cpp src\hl_reader.cpp ^
+   /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib advapi32.lib
 
 if errorlevel 1 (
   echo BUILD FAILED

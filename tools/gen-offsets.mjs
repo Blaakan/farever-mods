@@ -59,6 +59,13 @@ const WANT = [
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],
   ['hxbit.ArrayProxyData', ['array']],
+  // Containers the decoder walks. ArrayDyn wraps an ArrayBase (in practice an
+  // ArrayObj); ArrayObj's `array` is a native varray whose elements start
+  // immediately after the varray header.
+  ['hl.types.ArrayDyn', ['array']],
+  ['hl.types.ArrayObj', ['length', 'array']],
+  ['hl.types.ArrayBase', ['length']],
+  ['String', ['bytes', 'length']],
 ];
 
 const hash = createHash('sha256').update(readFileSync(bootPath)).digest('hex');

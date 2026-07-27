@@ -65,5 +65,31 @@ namespace hxbit_ArrayProxyData {
     constexpr uint32_t array = 0x28;  // OBJ : hl.types.ArrayDyn
 }  // namespace hxbit_ArrayProxyData
 
+// hl.types.ArrayDyn  (sizeof=17, extends hl.types.ArrayAccess)
+namespace hl_types_ArrayDyn {
+    constexpr uint32_t SIZEOF = 17;
+    constexpr uint32_t array = 0x8;  // OBJ : hl.types.ArrayBase
+}  // namespace hl_types_ArrayDyn
+
+// hl.types.ArrayObj  (sizeof=24, extends hl.types.ArrayBase)
+namespace hl_types_ArrayObj {
+    constexpr uint32_t SIZEOF = 24;
+    constexpr uint32_t length = 0x8;  // I32
+    constexpr uint32_t array = 0x10;  // ARRAY
+}  // namespace hl_types_ArrayObj
+
+// hl.types.ArrayBase  (sizeof=12, extends hl.types.ArrayAccess)
+namespace hl_types_ArrayBase {
+    constexpr uint32_t SIZEOF = 12;
+    constexpr uint32_t length = 0x8;  // I32
+}  // namespace hl_types_ArrayBase
+
+// String  (sizeof=20)
+namespace String {
+    constexpr uint32_t SIZEOF = 20;
+    constexpr uint32_t bytes = 0x8;  // BYTES
+    constexpr uint32_t length = 0x10;  // I32
+}  // namespace String
+
 }  // namespace off
 }  // namespace fmk

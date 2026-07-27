@@ -36,9 +36,14 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <intrin.h>   // _ReturnAddress
+#include <wincrypt.h>  // build-hash verification (excluded by LEAN_AND_MEAN)
+#include <intrin.h>    // _ReturnAddress
 #include <stdarg.h>
 #include <stdio.h>
+
+#include "hl_reader.h"
+#include "hl_runtime.h"
+#include "offsets.gen.h"
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -121,6 +126,116 @@ void log_caller(const char* api, void* ret_addr) {
     log_line("%s <- %ls", api, base ? base + 1 : name);
 }
 
+// ---------------------------------------------------------------------------
+// Worker: everything that touches game memory runs here, on our own thread,
+// never on a game thread. It only ever reads.
+// ---------------------------------------------------------------------------
+
+volatile LONG g_stop = 0;
+
+// Refuse to walk pointers unless the running game is the build the offsets
+// were generated from. A patched game with stale offsets is exactly how a
+// reader turns into a crash.
+bool verify_build() {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return false;
+    slash[1] = 0;
+    wcsncat_s(path, MAX_PATH, L"hlboot.dat", _TRUNCATE);
+
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        log_line("build: cannot open hlboot.dat");
+        return false;
+    }
+
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    bool ok = false;
+    char hex[65] = {0};
+
+    if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES,
+                             CRYPT_VERIFYCONTEXT) &&
+        CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hash)) {
+        BYTE buf[64 * 1024];
+        DWORD got = 0;
+        while (ReadFile(f, buf, sizeof(buf), &got, nullptr) && got > 0) {
+            CryptHashData(hash, buf, got, 0);
+        }
+        BYTE digest[32];
+        DWORD dlen = sizeof(digest);
+        if (CryptGetHashParam(hash, HP_HASHVAL, digest, &dlen, 0)) {
+            for (int i = 0; i < 32; i++) sprintf_s(hex + i * 2, 3, "%02x", digest[i]);
+            ok = (strcmp(hex, FMK_BUILD_SHA256) == 0);
+        }
+    }
+    if (hash) CryptDestroyHash(hash);
+    if (prov) CryptReleaseContext(prov, 0);
+    CloseHandle(f);
+
+    log_line("build: hlboot.dat sha256=%s", hex);
+    if (!ok) {
+        log_line("build: MISMATCH - offsets were generated for %s", FMK_BUILD_SHA256);
+        log_line("build: memory reads DISABLED. Run: node tools/update.mjs");
+    } else {
+        log_line("build: verified, offsets apply");
+    }
+    return ok;
+}
+
+DWORD WINAPI worker(LPVOID) {
+    log_line("worker: started");
+
+    // Give the game time to boot and load a character.
+    for (int i = 0; i < 60 && !g_stop; i++) Sleep(1000);
+    if (g_stop) return 0;
+
+    const bool build_ok = verify_build();
+    if (!build_ok) {
+        log_line("worker: idling (build mismatch)");
+        return 0;
+    }
+
+    bool reported = false;
+    while (!g_stop) {
+        if (fmk::reader_locate_hero(false)) {
+            if (!reported) {
+                log_line("reader: hero located at %p", fmk::reader_hero());
+                reported = true;
+            }
+            fmk::Collection c;
+            if (fmk::reader_read_collection(&c) && c.valid) {
+                log_line("collection: mounts=%zu gliders=%zu pets=%zu gears=%zu "
+                         "toys=%zu emotes=%zu bankSlots=%d",
+                         c.mounts.size(), c.gliders.size(), c.pets.size(),
+                         c.gears.size(), c.toys.size(), c.emotes.size(),
+                         c.bank_slots);
+                size_t shown = 0;
+                for (const auto& m : c.mounts) {
+                    log_line("  mount  %s", m.c_str());
+                    if (++shown >= 10) break;
+                }
+                shown = 0;
+                for (const auto& g : c.gliders) {
+                    log_line("  glider %s", g.c_str());
+                    if (++shown >= 10) break;
+                }
+            } else {
+                log_line("collection: hero found but collection walk failed");
+            }
+            // Steady state: this host does not need to re-read often.
+            for (int i = 0; i < 30 && !g_stop; i++) Sleep(1000);
+        } else {
+            reported = false;
+            for (int i = 0; i < 10 && !g_stop; i++) Sleep(1000);
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -177,13 +292,16 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_init = true;
             wchar_t exe[MAX_PATH] = L"?";
             GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            log_line("# farever-modkit host (dxgi.dll proxy) stage 1");
+            log_line("# farever-modkit host (dxgi.dll proxy) stage 2");
             log_line("attach: pid=%lu exe=%ls", GetCurrentProcessId(), exe);
             log_line("libhl.dll present in process: %s",
                      GetModuleHandleW(L"libhl.dll") ? "yes" : "not yet");
+            // Reads happen on our own thread; DllMain stays minimal.
+            CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
             break;
         }
         case DLL_PROCESS_DETACH:
+            InterlockedExchange(&g_stop, 1);
             log_line("detach");
             if (g_log) { fclose(g_log); g_log = nullptr; }
             if (g_init) DeleteCriticalSection(&g_lock);
