@@ -259,8 +259,11 @@ bool verify_build() {
 DWORD WINAPI worker(LPVOID) {
     log_line("worker: started");
 
-    // Give the game time to boot and load a character.
-    for (int i = 0; i < 60 && !g_stop; i++) Sleep(1000);
+    // Let the game get through its own startup before we touch anything.
+    // 20s is enough for the renderer to exist; the reader retries on its own
+    // until a character is actually in the world, so waiting longer here only
+    // delays the overlay appearing.
+    for (int i = 0; i < 20 && !g_stop; i++) Sleep(1000);
     if (g_stop) return 0;
 
     const bool build_ok = verify_build();

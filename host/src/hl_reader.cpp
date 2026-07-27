@@ -90,6 +90,17 @@ bool reader_locate_hero(bool force_rescan) {
     }
     if (!force_rescan && g_hero && obj_is(g_hero, "ent.Hero")) return true;
 
+    // A rescan is ~8GB of memory traffic. The Hero pointer goes stale exactly
+    // when the game is loading or changing zone - the worst possible moment to
+    // add that pressure, while it is busy deserialising. Hold off briefly so
+    // the load can finish before we sweep.
+    static DWORD last_scan = 0;
+    DWORD now_ms = GetTickCount();
+    if (g_hero_type && last_scan && (now_ms - last_scan) < 15000) {
+        return false;
+    }
+    last_scan = now_ms;
+
     g_hero = nullptr;
     // The local Hero is one of several ent.Hero instances (party members
     // stream in as Heroes too), and most qwords matching the type pointer are
