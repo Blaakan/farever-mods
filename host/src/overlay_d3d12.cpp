@@ -3,88 +3,132 @@
 //
 // Draws into the game's own D3D12 swap chain.
 //
-// How it gets there: dxgi_wrap hands us the swap chain the game created, so
-// hooking Present is one vtable entry on an object we hold - no signature
-// scanning, nothing to re-find after a patch.
+// How we get there without pattern scanning:
+//   * dxgi_wrap owns CreateDXGIFactory*, so it sees the factory the game
+//     builds and records the swap chain that comes out of it.
+//   * Present is then one vtable entry on an object we legitimately hold.
+//   * The command queue is the one thing D3D12 will not hand back from a swap
+//     chain, so it is captured from ID3D12CommandQueue::ExecuteCommandLists.
+//     That is the only unavoidable hook in the whole host.
 //
-// The renderer is intentionally small. It draws exactly what the two mods
-// need - solid quads and textured quads - through a single pipeline state
-// with one orthographic transform. Text is drawn as textured quads from a
-// font atlas built at startup. There is no widget toolkit and no depth
-// buffer; configuration lives in a hot-reloaded file instead of in-game
-// panels, which is what keeps this file a few hundred lines instead of
-// several thousand.
+// The renderer is deliberately minimal: one pipeline state, one vertex format,
+// solid and textured quads, alpha blended, no depth. Text is glyph quads from
+// an atlas rasterised once at startup with GDI, so no font file ships and no
+// font data is embedded. That is everything the two mods need - icon strips,
+// bars, countdowns, stack counts.
 //
-// Threading: Present runs on the game's render thread. Everything here is
-// therefore on that thread, and must be cheap and must never block. Game
-// state is read on the worker thread and published through a snapshot the
-// draw callback copies - the render thread never walks the game's heap.
+// Failure policy: if anything in init fails, g_failed latches and Present
+// stays a pure pass-through forever. A broken overlay must never be worse
+// than no overlay.
 // ---------------------------------------------------------------------------
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <d3dcompiler.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <vector>
-#include <mutex>
 
 #include "overlay.h"
 #include "dxgi_wrap.h"
 
 namespace fmk {
 
-// Logging lives in dllmain; declared here to avoid a header for one function.
 void host_log(const char* fmt, ...);
 
 namespace {
 
-// --- vertex format ---------------------------------------------------------
+// --- font atlas geometry ----------------------------------------------------
+constexpr int kFirstChar = 32;
+constexpr int kLastChar  = 126;
+constexpr int kNumChars  = kLastChar - kFirstChar + 1;
+constexpr int kGlyphCols = 16;
+constexpr int kGlyphRows = (kNumChars + kGlyphCols - 1) / kGlyphCols;
+constexpr int kCell      = 32;                    // px per glyph cell
+constexpr int kAtlasW    = kGlyphCols * kCell;
+constexpr int kAtlasH    = kGlyphRows * kCell;
+constexpr float kFontPx  = 24.0f;                 // rasterised size
+
+struct Glyph {
+    float u0, v0, u1, v1;
+    float w;    // advance in atlas pixels
+};
+Glyph g_glyphs[kNumChars]{};
+
 struct Vertex {
-    float x, y;      // pixels; the shader converts to clip space
-    float u, v;      // atlas coords; (-1,-1) marks an untextured quad
+    float x, y;
+    float u, v;      // u < 0 marks an untextured quad
     float r, g, b, a;
 };
 
-// --- state -----------------------------------------------------------------
-struct Frame {
-    ID3D12CommandAllocator* alloc = nullptr;
-    ID3D12Resource*         rtv_res = nullptr;
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
-    ID3D12Resource*         vbuf = nullptr;
-    void*                   vbuf_cpu = nullptr;
-    UINT                    vbuf_cap = 0;
-};
+constexpr UINT kMaxVerts = 48 * 1024;
 
+// --- device objects ---------------------------------------------------------
 ID3D12Device*              g_dev = nullptr;
 ID3D12CommandQueue*        g_queue = nullptr;
-ID3D12GraphicsCommandList* g_cmdlist = nullptr;
-ID3D12DescriptorHeap*      g_rtv_heap = nullptr;
-ID3D12DescriptorHeap*      g_srv_heap = nullptr;
 ID3D12RootSignature*       g_root = nullptr;
 ID3D12PipelineState*       g_pso = nullptr;
-std::vector<Frame>         g_frames;
+ID3D12DescriptorHeap*      g_rtv_heap = nullptr;
+ID3D12DescriptorHeap*      g_srv_heap = nullptr;
+ID3D12GraphicsCommandList* g_cmd = nullptr;
+ID3D12Resource*            g_font_tex = nullptr;
 UINT                       g_rtv_stride = 0;
 
-bool g_ready = false;
-bool g_failed = false;
-DrawFn g_draw = nullptr;
+struct FrameCtx {
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12Resource*         rt = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+    ID3D12Resource*         vb = nullptr;
+    Vertex*                 vb_cpu = nullptr;
+};
+std::vector<FrameCtx> g_frames;
 
-std::vector<Vertex> g_verts;   // built each frame by the draw callback
-float g_w = 0, g_h = 0;
+bool   g_ready = false;
+bool   g_failed = false;
+DrawFn g_draw = nullptr;
+std::vector<Vertex> g_verts;
 
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 PresentFn g_present_orig = nullptr;
 
-// ---------------------------------------------------------------------------
-// The command queue is not reachable from the swap chain in D3D12, so it is
-// captured from ID3D12CommandQueue::ExecuteCommandLists. That is the one place
-// a vtable hook is genuinely required; everything else comes to us.
-// ---------------------------------------------------------------------------
 using ExecFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT,
                                         ID3D12CommandList* const*);
 ExecFn g_exec_orig = nullptr;
+
+// ---------------------------------------------------------------------------
+const char kShader[] = R"(
+cbuffer C : register(b0) { float2 inv_size; float2 pad; };
+Texture2D    tex : register(t0);
+SamplerState smp : register(s0);
+struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
+struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
+VSOut VSMain(VSIn i) {
+    VSOut o;
+    o.pos = float4(i.pos.x * inv_size.x * 2.0 - 1.0,
+                   1.0 - i.pos.y * inv_size.y * 2.0, 0, 1);
+    o.uv = i.uv; o.col = i.col;
+    return o;
+}
+float4 PSMain(VSOut i) : SV_TARGET {
+    if (i.uv.x < 0) return i.col;
+    float a = tex.Sample(smp, i.uv).a;
+    return float4(i.col.rgb, i.col.a * a);
+}
+)";
+
+bool patch_vtable(void* obj, int index, void* fn, void** out_orig) {
+    if (!obj) return false;
+    void** vtbl = *(void***)obj;
+    DWORD old = 0;
+    if (!VirtualProtect(&vtbl[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *out_orig = vtbl[index];
+    vtbl[index] = fn;
+    VirtualProtect(&vtbl[index], sizeof(void*), old, &old);
+    return true;
+}
 
 void STDMETHODCALLTYPE hooked_exec(ID3D12CommandQueue* q, UINT n,
                                    ID3D12CommandList* const* lists) {
@@ -98,50 +142,334 @@ void STDMETHODCALLTYPE hooked_exec(ID3D12CommandQueue* q, UINT n,
     g_exec_orig(q, n, lists);
 }
 
-// --- vtable patching --------------------------------------------------------
-bool patch_vtable(void* obj, int index, void* fn, void** out_orig) {
-    if (!obj) return false;
-    void** vtbl = *(void***)obj;
-    DWORD old = 0;
-    if (!VirtualProtect(&vtbl[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
-    *out_orig = vtbl[index];
-    vtbl[index] = fn;
-    VirtualProtect(&vtbl[index], sizeof(void*), old, &old);
+// --- font atlas -------------------------------------------------------------
+//
+// Rasterised once with GDI into a 32bpp DIB, then uploaded as R8 alpha. Using
+// the OS rasteriser keeps this file free of embedded font data and gives
+// properly hinted glyphs at the size we actually draw.
+bool build_font_atlas(std::vector<uint8_t>* out) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return false;
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = kAtlasW;
+    bi.bmiHeader.biHeight = -kAtlasH;   // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp) { DeleteDC(dc); return false; }
+    HGDIOBJ oldbmp = SelectObject(dc, bmp);
+    memset(bits, 0, (size_t)kAtlasW * kAtlasH * 4);
+
+    HFONT font = CreateFontW(-(int)kFontPx, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE,
+                             FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    if (!font) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ oldfont = SelectObject(dc, font);
+    SetTextColor(dc, RGB(255, 255, 255));
+    SetBkMode(dc, TRANSPARENT);
+
+    for (int i = 0; i < kNumChars; i++) {
+        wchar_t ch = (wchar_t)(kFirstChar + i);
+        int cx = (i % kGlyphCols) * kCell;
+        int cy = (i / kGlyphCols) * kCell;
+        TextOutW(dc, cx + 1, cy + 1, &ch, 1);
+
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, &ch, 1, &sz);
+        g_glyphs[i].u0 = (float)cx / kAtlasW;
+        g_glyphs[i].v0 = (float)cy / kAtlasH;
+        g_glyphs[i].u1 = (float)(cx + kCell) / kAtlasW;
+        g_glyphs[i].v1 = (float)(cy + kCell) / kAtlasH;
+        g_glyphs[i].w  = (float)sz.cx + 1.0f;
+    }
+
+    // GDI drew white-on-black; use any channel as coverage.
+    out->resize((size_t)kAtlasW * kAtlasH);
+    const uint8_t* src = (const uint8_t*)bits;
+    for (size_t i = 0; i < out->size(); i++) (*out)[i] = src[i * 4];
+
+    SelectObject(dc, oldfont);
+    if (font != GetStockObject(DEFAULT_GUI_FONT)) DeleteObject(font);
+    SelectObject(dc, oldbmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
     return true;
 }
 
-// --- shaders ----------------------------------------------------------------
-// Compiled at runtime with D3DCompile from d3dcompiler_47.dll, which the game
-// already ships next to its executable, so there is no extra dependency and
-// no precompiled blobs to keep in sync.
-const char kShaderSrc[] = R"(
-cbuffer C : register(b0) { float2 inv_size; };
-Texture2D    tex : register(t0);
-SamplerState smp : register(s0);
-struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
-struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; float4 col : COLOR; };
-VSOut VSMain(VSIn i) {
-    VSOut o;
-    // pixels -> clip space, y down
-    o.pos = float4(i.pos.x * inv_size.x * 2.0 - 1.0,
-                   1.0 - i.pos.y * inv_size.y * 2.0, 0, 1);
-    o.uv = i.uv; o.col = i.col;
-    return o;
+bool upload_font(const std::vector<uint8_t>& pixels) {
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = kAtlasW;
+    rd.Height = kAtlasH;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = DXGI_FORMAT_R8_UNORM;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                              D3D12_RESOURCE_STATE_COPY_DEST,
+                                              nullptr, IID_PPV_ARGS(&g_font_tex))))
+        return false;
+
+    const UINT row_pitch = (kAtlasW + 255) & ~255u;
+    const UINT upload_size = row_pitch * kAtlasH;
+
+    ID3D12Resource* upload = nullptr;
+    D3D12_HEAP_PROPERTIES uhp{};
+    uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC urd{};
+    urd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    urd.Width = upload_size;
+    urd.Height = 1;
+    urd.DepthOrArraySize = 1;
+    urd.MipLevels = 1;
+    urd.Format = DXGI_FORMAT_UNKNOWN;
+    urd.SampleDesc.Count = 1;
+    urd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(g_dev->CreateCommittedResource(&uhp, D3D12_HEAP_FLAG_NONE, &urd,
+                                              D3D12_RESOURCE_STATE_GENERIC_READ,
+                                              nullptr, IID_PPV_ARGS(&upload))))
+        return false;
+
+    uint8_t* dst = nullptr;
+    D3D12_RANGE none{0, 0};
+    upload->Map(0, &none, (void**)&dst);
+    for (int y = 0; y < kAtlasH; y++)
+        memcpy(dst + (size_t)y * row_pitch, &pixels[(size_t)y * kAtlasW], kAtlasW);
+    upload->Unmap(0, nullptr);
+
+    // One-shot copy on a private allocator/list, fenced so we can release the
+    // staging buffer before returning.
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* cl = nullptr;
+    g_dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc));
+    g_dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr,
+                             IID_PPV_ARGS(&cl));
+
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = upload;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    src.PlacedFootprint.Footprint.Width = kAtlasW;
+    src.PlacedFootprint.Footprint.Height = kAtlasH;
+    src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.RowPitch = row_pitch;
+
+    D3D12_TEXTURE_COPY_LOCATION dstl{};
+    dstl.pResource = g_font_tex;
+    dstl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstl.SubresourceIndex = 0;
+
+    cl->CopyTextureRegion(&dstl, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = g_font_tex;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    cl->ResourceBarrier(1, &b);
+    cl->Close();
+
+    ID3D12CommandList* lists[] = {cl};
+    g_queue->ExecuteCommandLists(1, lists);
+
+    ID3D12Fence* fence = nullptr;
+    g_dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_queue->Signal(fence, 1);
+    fence->SetEventOnCompletion(1, ev);
+    WaitForSingleObject(ev, 5000);
+    CloseHandle(ev);
+    fence->Release();
+
+    cl->Release();
+    alloc->Release();
+    upload->Release();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = DXGI_FORMAT_R8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    g_dev->CreateShaderResourceView(g_font_tex, &sd,
+                                    g_srv_heap->GetCPUDescriptorHandleForHeapStart());
+    return true;
 }
-float4 PSMain(VSOut i) : SV_TARGET {
-    if (i.uv.x < 0) return i.col;              // untextured quad
-    return tex.Sample(smp, i.uv) * i.col;
+
+bool create_pipeline(IDXGISwapChain* sc) {
+    DXGI_SWAP_CHAIN_DESC scd{};
+    sc->GetDesc(&scd);
+    const UINT nframes = scd.BufferCount ? scd.BufferCount : 2;
+
+    // descriptor heaps
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};
+    rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rh.NumDescriptors = nframes;
+    if (FAILED(g_dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&g_rtv_heap)))) return false;
+    g_rtv_stride = g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};
+    sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sh.NumDescriptors = 1;
+    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(g_dev->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&g_srv_heap)))) return false;
+
+    // root signature: inline constants + one SRV table + static sampler
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+
+    D3D12_ROOT_PARAMETER params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.Num32BitValues = 4;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp{};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 2;
+    rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &samp;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ID3DBlob* sig = nullptr;
+    ID3DBlob* err = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &sig, &err))) {
+        if (err) err->Release();
+        return false;
+    }
+    HRESULT hr = g_dev->CreateRootSignature(0, sig->GetBufferPointer(),
+                                            sig->GetBufferSize(),
+                                            IID_PPV_ARGS(&g_root));
+    sig->Release();
+    if (FAILED(hr)) return false;
+
+    // shaders
+    ID3DBlob* vs = nullptr;
+    ID3DBlob* ps = nullptr;
+    if (FAILED(D3DCompile(kShader, sizeof(kShader) - 1, nullptr, nullptr, nullptr,
+                          "VSMain", "vs_5_0", 0, 0, &vs, &err))) {
+        if (err) { host_log("overlay: VS compile failed: %s",
+                            (const char*)err->GetBufferPointer()); err->Release(); }
+        return false;
+    }
+    if (FAILED(D3DCompile(kShader, sizeof(kShader) - 1, nullptr, nullptr, nullptr,
+                          "PSMain", "ps_5_0", 0, 0, &ps, &err))) {
+        if (err) { host_log("overlay: PS compile failed: %s",
+                            (const char*)err->GetBufferPointer()); err->Release(); }
+        vs->Release();
+        return false;
+    }
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = g_root;
+    pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pd.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    pd.InputLayout = {layout, 3};
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = scd.BufferDesc.Format;
+    pd.SampleDesc.Count = 1;
+    pd.SampleMask = UINT_MAX;
+
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = FALSE;
+
+    auto& rt0 = pd.BlendState.RenderTarget[0];
+    rt0.BlendEnable = TRUE;
+    rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rt0.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    rt0.BlendOp = D3D12_BLEND_OP_ADD;
+    rt0.SrcBlendAlpha = D3D12_BLEND_ONE;
+    rt0.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    hr = g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_pso));
+    vs->Release();
+    ps->Release();
+    if (FAILED(hr)) return false;
+
+    // per-frame resources
+    g_frames.resize(nframes);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < nframes; i++) {
+        auto& f = g_frames[i];
+        if (FAILED(g_dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                 IID_PPV_ARGS(&f.alloc))))
+            return false;
+        if (FAILED(sc->GetBuffer(i, IID_PPV_ARGS(&f.rt)))) return false;
+        f.rtv = rtv;
+        g_dev->CreateRenderTargetView(f.rt, nullptr, f.rtv);
+        rtv.ptr += g_rtv_stride;
+
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC vd{};
+        vd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vd.Width = sizeof(Vertex) * kMaxVerts;
+        vd.Height = 1;
+        vd.DepthOrArraySize = 1;
+        vd.MipLevels = 1;
+        vd.Format = DXGI_FORMAT_UNKNOWN;
+        vd.SampleDesc.Count = 1;
+        vd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &vd,
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                  nullptr, IID_PPV_ARGS(&f.vb))))
+            return false;
+        D3D12_RANGE none{0, 0};
+        f.vb->Map(0, &none, (void**)&f.vb_cpu);
+    }
+
+    if (FAILED(g_dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                        g_frames[0].alloc, g_pso,
+                                        IID_PPV_ARGS(&g_cmd))))
+        return false;
+    g_cmd->Close();
+
+    std::vector<uint8_t> atlas;
+    if (!build_font_atlas(&atlas)) { host_log("overlay: font atlas failed"); return false; }
+    if (!upload_font(atlas)) { host_log("overlay: font upload failed"); return false; }
+
+    host_log("overlay: pipeline ready (%u frames, %ux%u, fmt=%d)", nframes,
+             scd.BufferDesc.Width, scd.BufferDesc.Height, (int)scd.BufferDesc.Format);
+    return true;
 }
-)";
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Draw API - appends geometry; nothing is submitted until Present.
-// ---------------------------------------------------------------------------
+// --- draw API ---------------------------------------------------------------
 
 static void push_quad(float x, float y, float w, float h, float u0, float v0,
                       float u1, float v1, Color c) {
+    if (g_verts.size() + 6 > kMaxVerts) return;
     const Vertex a{x,     y,     u0, v0, c.r, c.g, c.b, c.a};
     const Vertex b{x + w, y,     u1, v0, c.r, c.g, c.b, c.a};
     const Vertex d{x,     y + h, u0, v1, c.r, c.g, c.b, c.a};
@@ -161,25 +489,122 @@ void draw_rect_outline(float x, float y, float w, float h, float t, Color c) {
     draw_rect(x + w - t, y + t, t, h - 2 * t, c);
 }
 
+void draw_text(float x, float y, float size, Color c, const char* text) {
+    if (!text) return;
+    const float scale = size / kFontPx;
+    float pen = x;
+    for (const char* p = text; *p; ++p) {
+        unsigned char ch = (unsigned char)*p;
+        if (ch < kFirstChar || ch > kLastChar) { pen += size * 0.4f; continue; }
+        const Glyph& gl = g_glyphs[ch - kFirstChar];
+        push_quad(pen, y, kCell * scale, kCell * scale, gl.u0, gl.v0, gl.u1, gl.v1, c);
+        pen += gl.w * scale;
+    }
+}
+
+float measure_text(float size, const char* text) {
+    if (!text) return 0;
+    const float scale = size / kFontPx;
+    float w = 0;
+    for (const char* p = text; *p; ++p) {
+        unsigned char ch = (unsigned char)*p;
+        if (ch < kFirstChar || ch > kLastChar) { w += size * 0.4f; continue; }
+        w += g_glyphs[ch - kFirstChar].w * scale;
+    }
+    return w;
+}
+
 bool overlay_ready() { return g_ready; }
 void overlay_set_draw(DrawFn fn) { g_draw = fn; }
 
-// ---------------------------------------------------------------------------
-// Present hook
-// ---------------------------------------------------------------------------
+// --- Present ----------------------------------------------------------------
 
 namespace {
 
 HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT interval,
                                          UINT flags) {
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
-        host_log("overlay: first Present seen; queue=%s",
-                 g_queue ? "captured" : "not yet");
+    if (g_failed || !g_draw) return g_present_orig(sc, interval, flags);
+
+    if (!g_ready) {
+        // Wait until the queue has been seen; without it nothing can be
+        // submitted, and guessing is how overlays corrupt a device.
+        if (!g_queue) return g_present_orig(sc, interval, flags);
+        IDXGISwapChain3* sc3 = nullptr;
+        if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) {
+            g_failed = true;
+            host_log("overlay: no IDXGISwapChain3");
+            return g_present_orig(sc, interval, flags);
+        }
+        sc3->Release();
+        if (!create_pipeline(sc)) {
+            g_failed = true;
+            host_log("overlay: pipeline init failed - staying passive");
+            return g_present_orig(sc, interval, flags);
+        }
+        g_ready = true;
     }
-    // Rendering is wired up in the next step; for now the hook proves the
-    // seam and stays a pure pass-through so it cannot destabilise the game.
+
+    IDXGISwapChain3* sc3 = nullptr;
+    if (FAILED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) {
+        return g_present_orig(sc, interval, flags);
+    }
+    const UINT idx = sc3->GetCurrentBackBufferIndex();
+    sc3->Release();
+    if (idx >= g_frames.size()) return g_present_orig(sc, interval, flags);
+
+    DXGI_SWAP_CHAIN_DESC scd{};
+    sc->GetDesc(&scd);
+    const float w = (float)scd.BufferDesc.Width;
+    const float h = (float)scd.BufferDesc.Height;
+
+    g_verts.clear();
+    g_draw(w, h);
+    if (g_verts.empty()) return g_present_orig(sc, interval, flags);
+
+    auto& f = g_frames[idx];
+    memcpy(f.vb_cpu, g_verts.data(), g_verts.size() * sizeof(Vertex));
+
+    f.alloc->Reset();
+    g_cmd->Reset(f.alloc, g_pso);
+
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = f.rt;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    g_cmd->ResourceBarrier(1, &b);
+
+    g_cmd->OMSetRenderTargets(1, &f.rtv, FALSE, nullptr);
+    g_cmd->SetGraphicsRootSignature(g_root);
+    ID3D12DescriptorHeap* heaps[] = {g_srv_heap};
+    g_cmd->SetDescriptorHeaps(1, heaps);
+    const float consts[4] = {1.0f / w, 1.0f / h, 0, 0};
+    g_cmd->SetGraphicsRoot32BitConstants(0, 4, consts, 0);
+    g_cmd->SetGraphicsRootDescriptorTable(
+        1, g_srv_heap->GetGPUDescriptorHandleForHeapStart());
+
+    D3D12_VIEWPORT vp{0, 0, w, h, 0, 1};
+    D3D12_RECT sr{0, 0, (LONG)w, (LONG)h};
+    g_cmd->RSSetViewports(1, &vp);
+    g_cmd->RSSetScissorRects(1, &sr);
+
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    vbv.BufferLocation = f.vb->GetGPUVirtualAddress();
+    vbv.SizeInBytes = (UINT)(g_verts.size() * sizeof(Vertex));
+    vbv.StrideInBytes = sizeof(Vertex);
+    g_cmd->IASetVertexBuffers(0, 1, &vbv);
+    g_cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_cmd->DrawInstanced((UINT)g_verts.size(), 1, 0, 0);
+
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    g_cmd->ResourceBarrier(1, &b);
+    g_cmd->Close();
+
+    ID3D12CommandList* lists[] = {g_cmd};
+    g_queue->ExecuteCommandLists(1, lists);
+
     return g_present_orig(sc, interval, flags);
 }
 
@@ -191,27 +616,34 @@ bool overlay_install() {
     IDXGISwapChain* sc = dxgi_swapchain();
     if (!sc) return false;
 
-    // Present is vtable slot 8 on IDXGISwapChain
-    // (IUnknown 0-2, IDXGIObject 3-6, IDXGIDeviceSubObject 7, Present 8).
+    ID3D12Device* dev = nullptr;
+    if (FAILED(sc->GetDevice(IID_PPV_ARGS(&dev))) || !dev) {
+        host_log("overlay: swap chain is not D3D12 - overlay disabled");
+        g_failed = true;
+        return false;
+    }
+    g_dev = dev;
+
+    // ExecuteCommandLists is slot 10 on ID3D12CommandQueue. Hooked through a
+    // throwaway queue so we can reach the vtable; every queue shares it.
+    ID3D12CommandQueue* probe = nullptr;
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (SUCCEEDED(g_dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&probe))) && probe) {
+        if (patch_vtable(probe, 10, (void*)&hooked_exec, (void**)&g_exec_orig))
+            host_log("overlay: ExecuteCommandLists hooked");
+        probe->Release();
+    }
+
     if (!patch_vtable(sc, 8, (void*)&hooked_present, (void**)&g_present_orig)) {
         host_log("overlay: failed to hook Present");
         g_failed = true;
         return false;
     }
     host_log("overlay: Present hooked on swap chain %p", (void*)sc);
-
-    // Capture the queue via ExecuteCommandLists (vtable slot 10 on
-    // ID3D12CommandQueue) if a device is reachable from the swap chain.
-    ID3D12Device* dev = nullptr;
-    if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D12Device), (void**)&dev)) && dev) {
-        g_dev = dev;
-        host_log("overlay: D3D12 device %p", (void*)dev);
-    }
     return true;
 }
 
-void overlay_shutdown() {
-    g_ready = false;
-}
+void overlay_shutdown() { g_ready = false; }
 
 }  // namespace fmk

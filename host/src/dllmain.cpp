@@ -157,6 +157,52 @@ void log_caller(const char* api, void* ret_addr) {
 
 volatile LONG g_stop = 0;
 
+// Snapshot published by the worker for the render thread to read. The draw
+// callback runs inside Present on the game's render thread and must never walk
+// the game heap - it only ever reads these plain values.
+struct Snapshot {
+    volatile LONG ready = 0;
+    int mounts = 0, gliders = 0, pets = 0, gears = 0, toys = 0, emotes = 0;
+    int bank_slots = 0;
+};
+Snapshot g_snap;
+
+// First light: proves the whole chain - memory read on the worker, published
+// to the render thread, drawn into the game's swap chain. Replaced by the
+// ported mods once this is confirmed on screen.
+void draw_overlay(float w, float h) {
+    if (!InterlockedCompareExchange(&g_snap.ready, 0, 0)) return;
+
+    const fmk::Color bg{0.05f, 0.06f, 0.09f, 0.82f};
+    const fmk::Color edge{0.35f, 0.75f, 1.0f, 0.9f};
+    const fmk::Color label{0.75f, 0.78f, 0.85f, 1.0f};
+    const fmk::Color value{1.0f, 1.0f, 1.0f, 1.0f};
+
+    const float pad = 10.0f;
+    const float bw = 230.0f, bh = 132.0f;
+    const float x = 24.0f, y = h - bh - 24.0f;
+
+    fmk::draw_rect(x, y, bw, bh, bg);
+    fmk::draw_rect_outline(x, y, bw, bh, 1.5f, edge);
+
+    fmk::draw_text(x + pad, y + pad, 15.0f, edge, "Collection");
+
+    struct Row { const char* name; int n; };
+    const Row rows[] = {
+        {"Mounts", g_snap.mounts},   {"Gliders", g_snap.gliders},
+        {"Pets", g_snap.pets},       {"Appearances", g_snap.gears},
+    };
+    float ry = y + pad + 24.0f;
+    for (const auto& r : rows) {
+        char buf[32];
+        sprintf_s(buf, "%d", r.n);
+        fmk::draw_text(x + pad, ry, 14.0f, label, r.name);
+        fmk::draw_text(x + bw - pad - fmk::measure_text(14.0f, buf), ry, 14.0f,
+                       value, buf);
+        ry += 20.0f;
+    }
+}
+
 // Refuse to walk pointers unless the running game is the build the offsets
 // were generated from. A patched game with stale offsets is exactly how a
 // reader turns into a crash.
@@ -230,6 +276,7 @@ DWORD WINAPI worker(LPVOID) {
         // chain. Doing it from here keeps DllMain and the render thread clean.
         if (!overlay_tried && fmk::dxgi_swapchain()) {
             overlay_tried = true;
+            fmk::overlay_set_draw(&draw_overlay);
             fmk::overlay_install();
         }
         if (fmk::reader_locate_hero(false)) {
@@ -255,6 +302,17 @@ DWORD WINAPI worker(LPVOID) {
                              c.bank_slots);
                     fmk::write_collection_json(c);
                 }
+                // Publish counts for the render thread. Scalars only, written
+                // before the ready flag, so the draw callback never touches
+                // game memory or a container being mutated underneath it.
+                g_snap.mounts  = (int)c.mounts.size();
+                g_snap.gliders = (int)c.gliders.size();
+                g_snap.pets    = (int)c.pets.size();
+                g_snap.gears   = (int)c.gears.size();
+                g_snap.toys    = (int)c.toys.size();
+                g_snap.emotes  = (int)c.emotes.size();
+                g_snap.bank_slots = c.bank_slots;
+                InterlockedExchange(&g_snap.ready, 1);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }
