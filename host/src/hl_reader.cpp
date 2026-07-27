@@ -20,6 +20,8 @@
 #include "offsets.gen.h"
 
 #include <algorithm>
+#include <stdio.h>
+#include <share.h>
 
 namespace fmk {
 
@@ -156,6 +158,39 @@ bool reader_read_collection(Collection* out) {
     out->bank_slots = read_i32(ap, off::st_player_AccountProgress::bankNbSlots);
     out->valid = true;
     return true;
+}
+
+void write_collection_json(const Collection& c) {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return;
+    slash[1] = 0;
+    wcsncat_s(path, MAX_PATH, L"farever-collection.json", _TRUNCATE);
+
+    FILE* f = _wfsopen(path, L"w", _SH_DENYNO);
+    if (!f) return;
+
+    auto list = [&](const char* name, const std::vector<std::string>& v, bool last) {
+        fprintf(f, "  \"%s\": [", name);
+        for (size_t i = 0; i < v.size(); i++) {
+            fprintf(f, "%s\n    \"%s\"", i ? "," : "", v[i].c_str());
+        }
+        fprintf(f, "%s]%s\n", v.empty() ? "" : "\n  ", last ? "" : ",");
+    };
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"bankSlots\": %d,\n", c.bank_slots);
+    list("mounts", c.mounts, false);
+    list("gliders", c.gliders, false);
+    list("pets", c.pets, false);
+    list("gears", c.gears, false);
+    list("toys", c.toys, false);
+    list("emotes", c.emotes, true);
+    fprintf(f, "}\n");
+    fclose(f);
+    host_log("collection: wrote farever-collection.json");
 }
 
 bool reader_read_unit_state(UnitState* out) {

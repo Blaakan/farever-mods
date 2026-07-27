@@ -36,4 +36,9 @@ void* reader_hero();
 bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);
 
+// Writes the collection next to the game as farever-collection.json. Until
+// the mods are ported onto this host, that file is the deliverable: it is the
+// complete account collection, in a form anything can read.
+void write_collection_json(const Collection& c);
+
 }  // namespace fmk

@@ -239,20 +239,21 @@ DWORD WINAPI worker(LPVOID) {
             }
             fmk::Collection c;
             if (fmk::reader_read_collection(&c) && c.valid) {
-                log_line("collection: mounts=%zu gliders=%zu pets=%zu gears=%zu "
-                         "toys=%zu emotes=%zu bankSlots=%d",
-                         c.mounts.size(), c.gliders.size(), c.pets.size(),
-                         c.gears.size(), c.toys.size(), c.emotes.size(),
-                         c.bank_slots);
-                size_t shown = 0;
-                for (const auto& m : c.mounts) {
-                    log_line("  mount  %s", m.c_str());
-                    if (++shown >= 10) break;
-                }
-                shown = 0;
-                for (const auto& g : c.gliders) {
-                    log_line("  glider %s", g.c_str());
-                    if (++shown >= 10) break;
+                // Only speak when something actually changed. The collection
+                // is near-static, so re-dumping it every cycle is noise that
+                // buries the lines that matter.
+                static size_t prev_sig = 0;
+                size_t sig = c.mounts.size() * 1000003 + c.gliders.size() * 10007 +
+                             c.pets.size() * 101 + c.gears.size() * 7 +
+                             c.toys.size() + c.emotes.size() * 31;
+                if (sig != prev_sig) {
+                    prev_sig = sig;
+                    log_line("collection: mounts=%zu gliders=%zu pets=%zu "
+                             "gears=%zu toys=%zu emotes=%zu bankSlots=%d",
+                             c.mounts.size(), c.gliders.size(), c.pets.size(),
+                             c.gears.size(), c.toys.size(), c.emotes.size(),
+                             c.bank_slots);
+                    fmk::write_collection_json(c);
                 }
             } else {
                 log_line("collection: hero found but collection walk failed");
