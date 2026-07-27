@@ -107,6 +107,35 @@ std::string read_hx_string(const void* str_obj) {
     return read_utf16(bytes, (size_t)len);
 }
 
+bool read_virtual_fields(const void* vobj, std::vector<VirtualField>* out) {
+    out->clear();
+    if (!vobj) return false;
+    void* type = read_ptr(vobj, 0);
+    if (!type) return false;
+    if (read_i32(type, hlrt::type_kind) != hlrt::HVIRTUAL) return false;
+
+    void* tv = read_ptr(type, hlrt::type_obj);   // same union slot
+    if (!tv) return false;
+    void* fields = read_ptr(tv, hlrt::vtype_fields);
+    int32_t n = read_i32(tv, hlrt::vtype_nfields);
+    if (!fields || n <= 0 || n > 64) return false;
+
+    // With value == null the field storage is inline, as an array of pointers
+    // immediately after the vvirtual header.
+    const uint8_t* vfields = (const uint8_t*)vobj + hlrt::vvirtual_data;
+
+    for (int32_t i = 0; i < n; i++) {
+        const uint8_t* f = (const uint8_t*)fields + (size_t)i * hlrt::vfield_stride;
+        VirtualField vf;
+        vf.name = read_utf16(read_ptr(f, hlrt::vfield_name), 64);
+        void* ft = read_ptr(f, hlrt::vfield_type);
+        vf.kind = ft ? read_i32(ft, hlrt::type_kind) : -1;
+        vf.value_ptr = read_ptr(vfields, (uint32_t)(i * 8));
+        out->push_back(std::move(vf));
+    }
+    return true;
+}
+
 bool read_proxy_array(const void* proxy, void** out_elems, int32_t* out_count) {
     *out_elems = nullptr;
     *out_count = 0;

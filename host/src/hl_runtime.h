@@ -44,8 +44,34 @@ constexpr uint32_t varray_size    = 0x10;
 constexpr uint32_t varray_data    = 0x18;   // elements start here
 
 constexpr int      HOBJ           = 11;
+constexpr int      HVIRTUAL       = 15;
 constexpr int      HSTRUCT        = 21;
+
+// hl_type_virtual, reached through hl_type+0x08:
+//   hl_obj_field *fields;  +0x00
+//   int nfields;           +0x08
+//   int dataSize;          +0x0C
+//   int *indexes;          +0x10
+// hl_obj_field is { const uchar *name; hl_type *t; int hashed_name; } = 24B.
+// A vvirtual is { hl_type *t; vdynamic *value; vvirtual *next; } = 24B, and
+// when `value` is null the fields live inline: hl_vfields(v) = v + 24 is an
+// array of pointers to each field's storage.
+constexpr uint32_t vtype_fields   = 0x00;
+constexpr uint32_t vtype_nfields  = 0x08;
+constexpr uint32_t vfield_stride  = 24;
+constexpr uint32_t vfield_name    = 0x00;
+constexpr uint32_t vfield_type    = 0x08;
+constexpr uint32_t vvirtual_value = 0x08;
+constexpr uint32_t vvirtual_data  = 24;
 }  // namespace hlrt
+
+// Describes a HVIRTUAL's field table, for decoding structural values.
+struct VirtualField {
+    std::string name;
+    int32_t kind = -1;
+    void*   value_ptr = nullptr;   // storage for this field on a given instance
+};
+bool read_virtual_fields(const void* vobj, std::vector<VirtualField>* out);
 
 // --- validated reads --------------------------------------------------------
 //

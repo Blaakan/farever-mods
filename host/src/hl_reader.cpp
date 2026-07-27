@@ -249,18 +249,27 @@ void read_item_array(void* array_obj, const char* source,
                 // Report the raw type kind. obj_class_name only accepts
                 // HOBJ/HSTRUCT and returns "" for anything else, which hides
                 // the actual shape - the elements are clearly *something*.
-                void* ty = read_ptr(e, 0);
-                int32_t kind = ty ? read_i32(ty, hlrt::type_kind) : -1;
-                void* tobj = ty ? read_ptr(ty, hlrt::type_obj) : nullptr;
-                std::string nm;
-                if (tobj) nm = read_utf16(read_ptr(tobj, hlrt::obj_name), 64);
-                // If it is a dynamic wrapper the real payload sits at +8.
-                void* inner = read_ptr(e, 8);
-                std::string icls = obj_class_name(inner);
-                host_log("items[%s]:   elem[%d]=%p type=%p kind=%d name=%s "
-                         "inner=%p innerCls=%s",
-                         source, i, e, ty, kind, nm.empty() ? "?" : nm.c_str(),
-                         inner, icls.empty() ? "?" : icls.c_str());
+                // Elements are HVIRTUAL (kind 15): Haxe structural values, not
+                // class instances. Enumerate the field table so the shape is
+                // named rather than guessed at.
+                std::vector<VirtualField> vf;
+                if (read_virtual_fields(e, &vf)) {
+                    std::string desc;
+                    for (size_t k = 0; k < vf.size() && k < 10; k++) {
+                        if (!desc.empty()) desc += ", ";
+                        desc += vf[k].name + ":k" + std::to_string(vf[k].kind);
+                        // Name whatever an object-typed field points at.
+                        if (vf[k].kind == hlrt::HOBJ && vf[k].value_ptr) {
+                            void* v = read_ptr(vf[k].value_ptr, 0);
+                            std::string c = obj_class_name(v);
+                            if (!c.empty()) desc += "=" + c;
+                        }
+                    }
+                    host_log("items[%s]:   elem[%d] virtual{%s}", source, i,
+                             desc.c_str());
+                } else {
+                    host_log("items[%s]:   elem[%d]=%p not decodable", source, i, e);
+                }
             }
         }
     }
