@@ -246,8 +246,21 @@ void read_item_array(void* array_obj, const char* source,
         } else if (e) {
             rejected++;
             if (g_item_diag && rejected <= 3) {
-                host_log("items[%s]:   elem[%d]=%p cls=%s (rejected)", source, i,
-                         e, obj_class_name(e).c_str());
+                // Report the raw type kind. obj_class_name only accepts
+                // HOBJ/HSTRUCT and returns "" for anything else, which hides
+                // the actual shape - the elements are clearly *something*.
+                void* ty = read_ptr(e, 0);
+                int32_t kind = ty ? read_i32(ty, hlrt::type_kind) : -1;
+                void* tobj = ty ? read_ptr(ty, hlrt::type_obj) : nullptr;
+                std::string nm;
+                if (tobj) nm = read_utf16(read_ptr(tobj, hlrt::obj_name), 64);
+                // If it is a dynamic wrapper the real payload sits at +8.
+                void* inner = read_ptr(e, 8);
+                std::string icls = obj_class_name(inner);
+                host_log("items[%s]:   elem[%d]=%p type=%p kind=%d name=%s "
+                         "inner=%p innerCls=%s",
+                         source, i, e, ty, kind, nm.empty() ? "?" : nm.c_str(),
+                         inner, icls.empty() ? "?" : icls.c_str());
             }
         }
     }
