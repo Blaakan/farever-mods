@@ -236,14 +236,15 @@ void nav_draw(float screen_w, float screen_h) {
         _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
         if (fresh) {
             format_to_locked(*t, where, sizeof(where));
-            // Bearings measured like the compass, atan2(east, north). The
-            // facing vector for rotationZ is (cos rz, sin rz) in world axes
-            // - the Heaps convention of an angle from +x. If the arrow
-            // reads mirrored or offset in game, this pair of lines is the
-            // whole calibration surface.
+            // Bearings measured like the compass, atan2(east, north); the
+            // facing bearing comes from rotationZ. These two lines are the
+            // calibration surface, settled empirically: the compass labels
+            // verified the world axes, and the first arrow build read
+            // mirrored (a target ahead-left rendered ahead-right), so the
+            // relative angle is facing-minus-target, not the reverse.
             const double target_b = atan2(t->x - g_hx, t->y - g_hy);
             const double facing_b = atan2(cos(g_rz), sin(g_rz));
-            rel = target_b - facing_b;
+            rel = facing_b - target_b;
         } else {
             _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
         }
