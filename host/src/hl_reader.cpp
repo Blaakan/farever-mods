@@ -171,6 +171,110 @@ bool reader_read_collection(Collection* out) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Items
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A HashLink enum value is { hl_type* t; int index; ... }, so the constructor
+// index sits right after the type pointer. Rarity is stored as such an enum.
+int32_t read_enum_index(void* enum_obj) {
+    if (!enum_obj) return -1;
+    return read_i32(enum_obj, 8);
+}
+
+bool read_item(void* obj, const char* source, Item* out) {
+    if (!obj) return false;
+    std::string cls = obj_class_name(obj);
+    if (cls.empty()) return false;
+
+    void* kind_str = read_ptr(obj, off::st_item_Gear::kind);
+    std::string kind = read_hx_string(kind_str);
+    if (kind.empty()) return false;
+
+    out->kind = kind;
+    out->cls = cls;
+    out->source = source;
+    out->level = read_i32(obj, off::st_item_Gear::level);
+    out->upgrade = read_i32(obj, off::st_item_Gear::upgradeLevel);
+
+    // Only gear carries rarity; consumables and materials share the Item base
+    // but not that field, so reading it off them would be garbage.
+    out->rarity = -1;
+    if (cls.rfind("st.item.", 0) == 0) {
+        void* r = read_ptr(obj, off::st_item_Weapon::rarity);
+        if (r) out->rarity = read_enum_index(r);
+    }
+
+    // Uninitialised slots report absurd values; clamp rather than propagate.
+    if (out->level < 0 || out->level > 999) out->level = 0;
+    if (out->upgrade < 0 || out->upgrade > 99) out->upgrade = 0;
+    if (out->rarity < 0 || out->rarity > 16) out->rarity = -1;
+    return true;
+}
+
+// Walks an hl.types.ArrayObj of item objects.
+void read_item_array(void* array_obj, const char* source,
+                     std::vector<Item>* out) {
+    if (!array_obj) return;
+    int32_t len = read_i32(array_obj, off::hl_types_ArrayBase::length);
+    if (len <= 0 || len > 4096) return;
+    void* varr = read_ptr(array_obj, off::hl_types_ArrayObj::array);
+    if (!varr) return;
+    int32_t cap = read_i32(varr, hlrt::varray_size);
+    if (cap < len) len = cap;
+
+    void* elems = (uint8_t*)varr + hlrt::varray_data;
+    for (int32_t i = 0; i < len; i++) {
+        void* e = read_ptr(elems, (uint32_t)(i * 8));
+        Item it;
+        if (read_item(e, source, &it)) out->push_back(std::move(it));
+    }
+}
+
+// st.Inventory / st.Equipment both hold their items in `content`.
+void read_inventory(void* inv, const char* source, std::vector<Item>* out) {
+    if (!inv) return;
+    void* content = read_ptr(inv, off::st_Inventory::content);
+    read_item_array(content, source, out);
+}
+
+}  // namespace
+
+bool reader_read_inventories(Inventories* out) {
+    *out = {};
+    void* hero = reader_hero();
+    if (!hero) return false;
+
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* ap = read_ptr(player, off::st_Player::accountProgress);
+    if (!obj_is(ap, "st.player.AccountProgress")) return false;
+
+    // Account-wide: the bank is shared by every character, so anything here
+    // counts as owned regardless of who deposited it.
+    read_item_array(read_ptr(ap, off::st_player_AccountProgress::bank),
+                    "bank", &out->bank);
+    read_item_array(read_ptr(ap, off::st_player_AccountProgress::bankEquipment),
+                    "bankEquipment", &out->bank_equipment);
+    out->bank_slots = read_i32(ap, off::st_player_AccountProgress::bankNbSlots);
+
+    // Character-scoped: only the logged-in character exists in this process.
+    out->character = read_hx_string(read_ptr(player, off::st_Player::name));
+
+    void* loadout = read_ptr(hero, off::ent_Hero::loadout);
+    if (obj_is(loadout, "st.Loadout")) {
+        read_inventory(read_ptr(loadout, off::st_Loadout::equipment),
+                       "equipped", &out->equipped);
+        read_inventory(read_ptr(loadout, off::st_Loadout::inventory),
+                       "bags", &out->bags);
+    }
+
+    out->valid = true;
+    return true;
+}
+
 void write_collection_json(const Collection& c) {
     wchar_t path[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -202,6 +306,56 @@ void write_collection_json(const Collection& c) {
     fprintf(f, "}\n");
     fclose(f);
     host_log("collection: wrote farever-collection.json");
+}
+
+void write_inventory_json(const Inventories& inv, const std::string& character) {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return;
+    slash[1] = 0;
+
+    // Character names come from the game; keep the filename to safe chars.
+    std::string safe;
+    for (char c : character) {
+        if (isalnum((unsigned char)c) || c == '_' || c == '-') safe.push_back(c);
+    }
+    if (safe.empty()) safe = "unknown";
+    std::wstring wname(safe.begin(), safe.end());
+    wcsncat_s(path, MAX_PATH, L"farever-inventory-", _TRUNCATE);
+    wcsncat_s(path, MAX_PATH, wname.c_str(), _TRUNCATE);
+    wcsncat_s(path, MAX_PATH, L".json", _TRUNCATE);
+
+    FILE* f = _wfsopen(path, L"w", _SH_DENYNO);
+    if (!f) return;
+
+    auto emit = [&](const char* name, const std::vector<Item>& v, bool last) {
+        fprintf(f, "  \"%s\": [", name);
+        for (size_t i = 0; i < v.size(); i++) {
+            const Item& it = v[i];
+            fprintf(f,
+                    "%s\n    {\"kind\":\"%s\",\"level\":%d,\"upgrade\":%d,"
+                    "\"rarity\":%d,\"class\":\"%s\"}",
+                    i ? "," : "", it.kind.c_str(), it.level, it.upgrade,
+                    it.rarity, it.cls.c_str());
+        }
+        fprintf(f, "%s]%s\n", v.empty() ? "" : "\n  ", last ? "" : ",");
+    };
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"character\": \"%s\",\n", safe.c_str());
+    fprintf(f, "  \"bankSlots\": %d,\n", inv.bank_slots);
+    emit("bank", inv.bank, false);
+    emit("bankEquipment", inv.bank_equipment, false);
+    emit("equipped", inv.equipped, false);
+    emit("bags", inv.bags, true);
+    fprintf(f, "}\n");
+    fclose(f);
+
+    host_log("inventory: %s bank=%zu bankEq=%zu equipped=%zu bags=%zu",
+             safe.c_str(), inv.bank.size(), inv.bank_equipment.size(),
+             inv.equipped.size(), inv.bags.size());
 }
 
 bool reader_read_unit_state(UnitState* out) {

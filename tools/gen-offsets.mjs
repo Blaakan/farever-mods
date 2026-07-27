@@ -55,10 +55,17 @@ const types = JSON.parse(readFileSync(typesPath, 'utf8'));
 const WANT = [
   ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand', 'loadout']],
   ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin']],
-  ['st.Player', ['accountProgress', 'progress']],
+  ['st.Player', ['accountProgress', 'progress', 'name']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],
   ['hxbit.ArrayProxyData', ['array']],
+  // Ownership beyond the collection: bank, bags and equipped gear.
+  ['st.Loadout', ['equipment', 'appearance', 'inventory']],
+  ['st.Inventory', ['content', 'baseSize', 'addSize']],
+  // Item identity and quality. kind/level/upgradeLevel are on the Gear base;
+  // rarity is declared on Weapon.
+  ['st.item.Gear', ['kind', 'level', 'upgradeLevel', 'slots']],
+  ['st.item.Weapon', ['rarity']],
   // Containers the decoder walks. ArrayDyn wraps an ArrayBase (in practice an
   // ArrayObj); ArrayObj's `array` is a native varray whose elements start
   // immediately after the varray header.

@@ -28,6 +28,33 @@ struct UnitState {
     bool in_combat = false;
 };
 
+// A single owned item. `rarity` is the enum constructor index read straight
+// off the object; the game's ordering is expected to run
+// common/uncommon/rare/epic/legendary, but that mapping is unverified until
+// it is checked against real inventories, so the raw index is reported.
+struct Item {
+    std::string kind;
+    int32_t level = 0;
+    int32_t upgrade = 0;
+    int32_t rarity = -1;      // -1 when the item carries no rarity field
+    std::string cls;          // runtime class, e.g. st.item.Weapon
+    std::string source;       // bank / bankEquipment / equipped / bags
+};
+
+// Everything the tracker needs to call a weapon or trinket "owned": the
+// account bank plus, for the character currently logged in, their equipped
+// gear and bags. Other characters' bags are not in this process at all, so
+// those are accumulated across sessions by the layer above.
+struct Inventories {
+    bool valid = false;
+    std::vector<Item> bank;
+    std::vector<Item> bank_equipment;
+    std::vector<Item> equipped;
+    std::vector<Item> bags;
+    std::string character;
+    int32_t bank_slots = 0;
+};
+
 // Finds the local Hero. Cheap when the cached pointer still validates;
 // falls back to a memory scan when it does not (first call, zone change).
 bool reader_locate_hero(bool force_rescan);
@@ -35,10 +62,17 @@ void* reader_hero();
 
 bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);
+bool reader_read_inventories(Inventories* out);
 
 // Writes the collection next to the game as farever-collection.json. Until
 // the mods are ported onto this host, that file is the deliverable: it is the
 // complete account collection, in a form anything can read.
 void write_collection_json(const Collection& c);
+
+// Writes farever-inventory-<character>.json next to the game. One file per
+// character: the account bank repeats in each, but bags and equipped gear are
+// character-scoped and offline characters are not in this process, so the
+// union across files is how "owned on any character" gets answered.
+void write_inventory_json(const Inventories& inv, const std::string& character);
 
 }  // namespace fmk

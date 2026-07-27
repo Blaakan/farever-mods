@@ -37,6 +37,7 @@ namespace st_Player {
     constexpr uint32_t SIZEOF = 385;
     constexpr uint32_t accountProgress = 0xe0;  // OBJ : st.player.AccountProgress
     constexpr uint32_t progress = 0xf0;  // OBJ : st.player.Progress
+    constexpr uint32_t name = 0xc0;  // OBJ : String
 }  // namespace st_Player
 
 // st.player.AccountProgress  (sizeof=208, extends st.DBState)
@@ -64,6 +65,37 @@ namespace hxbit_ArrayProxyData {
     constexpr uint32_t SIZEOF = 48;
     constexpr uint32_t array = 0x28;  // OBJ : hl.types.ArrayDyn
 }  // namespace hxbit_ArrayProxyData
+
+// st.Loadout  (sizeof=208, extends st.DBBaseState)
+namespace st_Loadout {
+    constexpr uint32_t SIZEOF = 208;
+    constexpr uint32_t equipment = 0x78;  // OBJ : st.Equipment
+    constexpr uint32_t appearance = 0x80;  // OBJ : st.Inventory
+    constexpr uint32_t inventory = 0x88;  // OBJ : st.Inventory
+}  // namespace st_Loadout
+
+// st.Inventory  (sizeof=160, extends st.DBBaseState)
+namespace st_Inventory {
+    constexpr uint32_t SIZEOF = 160;
+    constexpr uint32_t content = 0x78;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t baseSize = 0x80;  // I32
+    constexpr uint32_t addSize = 0x84;  // I32
+}  // namespace st_Inventory
+
+// st.item.Gear  (sizeof=160, extends st.Item)
+namespace st_item_Gear {
+    constexpr uint32_t SIZEOF = 160;
+    constexpr uint32_t kind = 0x70;  // OBJ : String
+    constexpr uint32_t level = 0x90;  // I32
+    constexpr uint32_t upgradeLevel = 0x94;  // I32
+    constexpr uint32_t slots = 0x98;  // OBJ : hxbit.ArrayProxyData
+}  // namespace st_item_Gear
+
+// st.item.Weapon  (sizeof=176, extends st.item.Gear)
+namespace st_item_Weapon {
+    constexpr uint32_t SIZEOF = 176;
+    constexpr uint32_t rarity = 0xa0;  // OBJ : String
+}  // namespace st_item_Weapon
 
 // hl.types.ArrayDyn  (sizeof=17, extends hl.types.ArrayAccess)
 namespace hl_types_ArrayDyn {

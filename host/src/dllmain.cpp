@@ -319,6 +319,23 @@ DWORD WINAPI worker(LPVOID) {
                 g_snap.emotes  = (int)c.emotes.size();
                 g_snap.bank_slots = c.bank_slots;
                 InterlockedExchange(&g_snap.ready, 1);
+
+                // Bank, bags and equipped gear: what "owned" means for
+                // weapons and trinkets. Written per character, since only the
+                // logged-in one is in this process.
+                fmk::Inventories inv;
+                if (fmk::reader_read_inventories(&inv) && inv.valid) {
+                    static std::string prev_who;
+                    static size_t prev_isig = 0;
+                    size_t isig = inv.bank.size() * 1000003 +
+                                  inv.bank_equipment.size() * 10007 +
+                                  inv.equipped.size() * 101 + inv.bags.size();
+                    if (isig != prev_isig || inv.character != prev_who) {
+                        prev_isig = isig;
+                        prev_who = inv.character;
+                        fmk::write_inventory_json(inv, inv.character);
+                    }
+                }
             } else {
                 log_line("collection: hero found but collection walk failed");
             }
