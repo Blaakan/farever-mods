@@ -31,6 +31,8 @@ namespace {
 
 void* g_hero_type = nullptr;
 void* g_hero      = nullptr;
+void* g_app_type  = nullptr;
+void* g_app       = nullptr;
 
 // Collection entries are Haxe values of an unknown-at-compile-time shape:
 // a String, a boxed enum, or a CDB-backed object. Try the shapes we know, in
@@ -89,6 +91,21 @@ bool reader_locate_hero(bool force_rescan) {
         host_log("reader: ent.Hero type at %p", g_hero_type);
     }
     if (!force_rescan && g_hero && obj_is(g_hero, "ent.Hero")) return true;
+
+    // Fast path: GameApp holds the live hero. Once the app has been found,
+    // a zone change costs a pointer read instead of an 8GB sweep - the
+    // scan below only runs before the app is known, or if that field ever
+    // stops validating.
+    if (g_app && obj_is(g_app, "GameApp")) {
+        void* h = read_ptr(g_app, off::GameApp::hero);
+        if (obj_is(h, "ent.Hero")) {
+            void* player = read_ptr(h, off::ent_Hero::player);
+            if (obj_is(player, "st.Player")) {
+                g_hero = h;
+                return true;
+            }
+        }
+    }
 
     // A rescan is ~8GB of memory traffic. The Hero pointer goes stale exactly
     // when the game is loading or changing zone - the worst possible moment to
@@ -446,6 +463,43 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
     host_log("inventory: %s bank=%zu bankEq=%zu equipped=%zu bags=%zu",
              safe.c_str(), inv.bank.size(), inv.bank_equipment.size(),
              inv.equipped.size(), inv.bags.size());
+}
+
+// GameApp is the application singleton: one instance, holding the game
+// camera (and the hero, which a later version could use to skip the hero
+// scan entirely). Validated during the scan by both of those fields, since
+// most qwords matching a type pointer are metadata rather than instances.
+bool reader_locate_app(bool force_rescan) {
+    if (!g_app_type) {
+        g_app_type = find_type_by_name("GameApp");
+        if (!g_app_type) return false;
+    }
+    if (!force_rescan && g_app && obj_is(g_app, "GameApp")) return true;
+
+    g_app = find_instance_of_type_where(
+        g_app_type,
+        [](void* cand, void*) -> bool {
+            return obj_is(read_ptr(cand, off::GameApp::gameCamera),
+                          "client.GameCamera") &&
+                   obj_is(read_ptr(cand, off::GameApp::hero), "ent.Hero");
+        },
+        nullptr);
+
+    if (g_app) host_log("reader: GameApp %p", g_app);
+    else host_log("reader: GameApp not found - arrow stays hero-relative");
+    return g_app != nullptr;
+}
+
+bool reader_read_camera(double* x, double* y, double* z, double* cur_distance,
+                        double* cur_direction) {
+    if (!g_app || !obj_is(g_app, "GameApp")) return false;
+    void* cam = read_ptr(g_app, off::GameApp::gameCamera);
+    if (!obj_is(cam, "client.GameCamera")) return false;
+    return read(cam, off::h3d_scene_Object::x, x) &&
+           read(cam, off::h3d_scene_Object::y, y) &&
+           read(cam, off::h3d_scene_Object::z, z) &&
+           read(cam, off::client_BaseCamera::curDistance, cur_distance) &&
+           read(cam, off::client_BaseCamera::curDirection, cur_direction);
 }
 
 bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z) {

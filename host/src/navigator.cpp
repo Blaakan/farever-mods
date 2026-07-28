@@ -39,6 +39,10 @@ double g_rz = 0;                      // facing, radians
 DWORD  g_pos_tick = 0;
 constexpr DWORD kPosFreshMs = 5000;
 
+// Camera pose, same cadence. g_cam_ok says the sanity check passed.
+bool   g_cam_valid = false;
+double g_cx = 0, g_cy = 0, g_cz = 0, g_cam_dist = 0;
+
 std::wstring g_ini_path;
 volatile LONG g_dirty = 0;
 
@@ -64,14 +68,24 @@ const NavTarget* nearest_locked(const NavTarget* targets, int count) {
     return best;
 }
 
-// +y = north, +x = east (the POI table's axes as the minimap renders them).
-// If the compass reads mirrored in game, this one table is the fix.
 const char* kCompass[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+
+// Compass bearing of a world-space offset: 0 = north, clockwise positive.
+//
+// **North is -y.** The game's own data says so: averaging the POI positions
+// of the zones it names North and South puts CrimsonIsland_North at y=-743
+// against South at y=-420, and Krisomal_North at y=1001 against South at
+// y=1237. Both pairs agree. x is east either way, which is why an east/west
+// readout looked right while north and south were quietly swapped.
+//
+// Everything angular in this file goes through here, so the arrow and the
+// compass label can never disagree.
+double bearing(double dx, double dy) { return atan2(dx, -dy); }
 
 void format_to_locked(const NavTarget& t, char* out, int out_len) {
     const double dx = t.x - g_hx, dy = t.y - g_hy;
     const double dist = sqrt(dx * dx + dy * dy);
-    double ang = atan2(dx, dy) * 180.0 / 3.14159265358979;   // 0 = N, 90 = E
+    double ang = bearing(dx, dy) * 180.0 / 3.14159265358979;
     if (ang < 0) ang += 360.0;
     const char* dir = kCompass[(int)((ang + 22.5) / 45.0) & 7];
     if (dist >= 1000.0)
@@ -174,6 +188,32 @@ void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z) {
     }
 }
 
+void nav_set_camera(bool valid, double x, double y, double z,
+                    double cur_distance) {
+    if (!g_cs_init) return;
+    Lock lk;
+    g_cam_valid = false;
+    if (!valid || !g_pos_valid) return;
+
+    // Trust the reading only if the camera really sits where a camera would:
+    // roughly `cur_distance` away from the hero, and far enough off in the
+    // horizontal plane for a bearing to mean anything.
+    const double dx = x - g_hx, dy = y - g_hy, dz = z - g_hz;
+    const double d3 = sqrt(dx * dx + dy * dy + dz * dz);
+    const double dh = sqrt(dx * dx + dy * dy);
+    const bool plausible =
+        d3 > 0.5 && d3 < 200.0 && dh > 0.3 &&
+        (cur_distance <= 0.0 ||
+         fabs(d3 - cur_distance) < (cur_distance * 0.5 + 3.0));
+    if (!plausible) return;
+
+    g_cx = x;
+    g_cy = y;
+    g_cz = z;
+    g_cam_dist = cur_distance;
+    g_cam_valid = true;
+}
+
 bool nav_track(const char* key, const char* name, const NavTarget* targets,
                int count) {
     if (!g_cs_init || !key || count <= 0) return false;
@@ -223,8 +263,9 @@ void nav_draw(float screen_w, float screen_h) {
     if (!g_cs_init) return;
 
     char name[96], where[64], label[96];
-    bool have = false, fresh = false;
+    bool have = false, fresh = false, used_camera = false;
     double rel = 0;                   // radians clockwise from "dead ahead"
+    double diag_target_b = 0, diag_cam_d = 0, diag_rz = 0, diag_cam_dist = 0;
     {
         Lock lk;
         if (g_key.empty() || g_targets.empty()) return;
@@ -236,21 +277,50 @@ void nav_draw(float screen_w, float screen_h) {
         _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
         if (fresh) {
             format_to_locked(*t, where, sizeof(where));
-            // Bearings measured like the compass, atan2(east, north); the
-            // facing bearing comes from rotationZ. These two lines are the
-            // calibration surface, settled empirically: the compass labels
-            // verified the world axes, and the first arrow build read
-            // mirrored (a target ahead-left rendered ahead-right), so the
-            // relative angle is facing-minus-target, not the reverse.
-            const double target_b = atan2(t->x - g_hx, t->y - g_hy);
-            const double facing_b = atan2(cos(g_rz), sin(g_rz));
-            rel = facing_b - target_b;
+            // One convention for both paths: how far clockwise the target
+            // sits from whatever is currently "forward". The arrow rotates
+            // clockwise for positive, so right reads right.
+            const double target_b = bearing(t->x - g_hx, t->y - g_hy);
+            if (g_cam_valid) {
+                // What the screen faces is the direction from the camera to
+                // the hero - geometry, with no angle convention to guess.
+                rel = target_b - bearing(g_hx - g_cx, g_hy - g_cy);
+                used_camera = true;
+            } else {
+                // Fallback: the hero's own facing, whose vector is
+                // (cos rotationZ, sin rotationZ) in world axes. That is the
+                // same relation farever-minimap's own example nav_arrow.lua
+                // uses, and it reduces to the arrow behaviour already
+                // confirmed in game.
+                rel = target_b - bearing(cos(g_rz), sin(g_rz));
+            }
         } else {
             _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
         }
+        diag_target_b = fresh ? atan2(t->x - g_hx, t->y - g_hy) : 0;
+        diag_cam_d = g_cam_valid
+            ? sqrt((g_cx - g_hx) * (g_cx - g_hx) + (g_cy - g_hy) * (g_cy - g_hy) +
+                   (g_cz - g_hz) * (g_cz - g_hz))
+            : 0;
+        diag_rz = g_rz;
+        diag_cam_dist = g_cam_dist;
         have = true;
     }
     if (!have) return;
+
+    // One line whenever the source changes, outside the lock. If the arrow
+    // ever points wrongly, this says which path drew it and with what
+    // numbers - no guessing at a second attempt.
+    static int last_source = -1;
+    const int source = used_camera ? 1 : 0;
+    if (fresh && source != last_source) {
+        last_source = source;
+        host_log("nav: arrow from %s (targetBearing=%.1fdeg heroRotZ=%.1fdeg "
+                 "camDist=%.1f curDistance=%.1f rel=%.1fdeg)",
+                 used_camera ? "camera geometry" : "hero facing",
+                 diag_target_b * 57.2957795, diag_rz * 57.2957795, diag_cam_d,
+                 diag_cam_dist, rel * 57.2957795);
+    }
 
     char line[220];
     _snprintf_s(line, sizeof(line), _TRUNCATE, "%s  %s  (%s)", name, where,

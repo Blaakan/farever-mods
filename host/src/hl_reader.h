@@ -70,6 +70,20 @@ bool reader_read_inventories(Inventories* out);
 // 20Hz from the pose thread.
 bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z);
 
+// Locates GameApp, the application singleton, which owns the game camera.
+// One scan, cached and revalidated; call only after the hero is found, so
+// the scan happens in-world rather than during a loading screen.
+bool reader_locate_app(bool force_rescan);
+
+// The camera's world position, and the orbit distance it believes it is at.
+// The navigator turns these into a view bearing geometrically: the screen
+// looks from the camera toward the hero. `cur_distance` is the game's own
+// value, used to sanity-check that the position we read is really the
+// camera's - a mismatch means the field is not what we think it is, and the
+// navigator falls back to the hero's facing rather than pointing wrongly.
+bool reader_read_camera(double* x, double* y, double* z, double* cur_distance,
+                        double* cur_direction);
+
 // Writes the collection next to the game as farever-collection.json. Until
 // the mods are ported onto this host, that file is the deliverable: it is the
 // complete account collection, in a form anything can read.

@@ -41,6 +41,34 @@ namespace ent_GameObject {
     constexpr uint32_t rotationZ = 0xc8;  // F64
 }  // namespace ent_GameObject
 
+// GameApp  (sizeof=320, extends App)
+namespace GameApp {
+    constexpr uint32_t SIZEOF = 320;
+    constexpr uint32_t gameCamera = 0xb0;  // OBJ : client.GameCamera
+    constexpr uint32_t camera = 0xa8;  // OBJ : client.BaseCamera
+    constexpr uint32_t hero = 0xd0;  // OBJ : ent.Hero
+    constexpr uint32_t world = 0x98;  // OBJ : world.World
+}  // namespace GameApp
+
+// client.BaseCamera  (sizeof=304, extends h3d.scene.Object)
+namespace client_BaseCamera {
+    constexpr uint32_t SIZEOF = 304;
+    constexpr uint32_t direction = 0xd0;  // F64
+    constexpr uint32_t curDirection = 0x100;  // F64
+    constexpr uint32_t pitch = 0xd8;  // F64
+    constexpr uint32_t curPitch = 0xf8;  // F64
+    constexpr uint32_t curDistance = 0x108;  // F64
+    constexpr uint32_t enabled = 0xe8;  // BOOL
+}  // namespace client_BaseCamera
+
+// h3d.scene.Object  (sizeof=160)
+namespace h3d_scene_Object {
+    constexpr uint32_t SIZEOF = 160;
+    constexpr uint32_t x = 0x30;  // F64
+    constexpr uint32_t y = 0x38;  // F64
+    constexpr uint32_t z = 0x40;  // F64
+}  // namespace h3d_scene_Object
+
 // st.Player  (sizeof=385, extends st.State)
 namespace st_Player {
     constexpr uint32_t SIZEOF = 385;

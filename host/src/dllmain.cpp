@@ -185,10 +185,19 @@ void worker_sleep(int seconds) {
 DWORD WINAPI pose_worker(LPVOID) {
     while (!g_stop) {
         double x = 0, y = 0, z = 0, rz = 0;
-        if (fmk::reader_read_hero_pose(&x, &y, &z, &rz))
+        if (fmk::reader_read_hero_pose(&x, &y, &z, &rz)) {
             fmk::nav_set_hero_pose(true, x, y, z, rz);
-        else
+            // Hero first: the camera check needs a hero position to
+            // measure against.
+            double cx = 0, cy = 0, cz = 0, cdist = 0, cdir = 0;
+            if (fmk::reader_read_camera(&cx, &cy, &cz, &cdist, &cdir))
+                fmk::nav_set_camera(true, cx, cy, cz, cdist);
+            else
+                fmk::nav_set_camera(false, 0, 0, 0, 0);
+        } else {
             fmk::nav_set_hero_pose(false, 0, 0, 0, 0);
+            fmk::nav_set_camera(false, 0, 0, 0, 0);
+        }
         Sleep(50);
     }
     return 0;
@@ -276,6 +285,8 @@ DWORD WINAPI worker(LPVOID) {
     bool overlay_tried = false;
     bool ui_ready = false;
     bool input_ready = false;
+    bool app_found = false;
+    int  app_tries = 0;
     while (!g_stop) {
         // Install the render hook once the game has actually made a swap
         // chain. Doing it from here keeps DllMain and the render thread clean.
@@ -302,6 +313,14 @@ DWORD WINAPI worker(LPVOID) {
             if (!reported) {
                 log_line("reader: hero located at %p", fmk::reader_hero());
                 reported = true;
+            }
+            // The camera lives off GameApp, which costs a scan to find, so
+            // do it once the game is demonstrably in-world (hero found) and
+            // give up after a few attempts - the navigator degrades to the
+            // hero's facing rather than rescanning forever.
+            if (!app_found && app_tries < 3) {
+                app_tries++;
+                app_found = fmk::reader_locate_app(false);
             }
             fmk::Collection c;
             fmk::Inventories inv;

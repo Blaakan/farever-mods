@@ -220,10 +220,29 @@ Sources with a fixed place - vault chests, dungeon bosses, merchants - carry
 world coordinates (from the POI table farever-minimap ships). The tooltip
 shows the distance and compass direction to the nearest one, and **clicking
 the item** toggles tracking: a small pill at the top of the screen keeps
-showing *name, distance, direction* - plus an arrow that rotates with your
-facing (`ent.GameObject.rotationZ`, sampled at 20Hz) - while you travel,
-atlas open or not. Click again (or track something else) to stop. The
-tracked target survives restarts.
+showing *name, distance, direction* and an arrow, while you travel, atlas
+open or not. Click again (or track something else) to stop. The tracked
+target survives restarts.
+
+**The arrow is camera-relative**, like the game's own map marker
+(`ui.win.map.PlayerMarker` holds both a camera and a hero for exactly that
+reason). It is derived as geometry rather than from an angle: a camera is
+an `h3d.scene.Object`, so it carries a world position, and what the screen
+faces is simply the direction from the camera to the hero. That sidesteps
+the question of where a `direction` field's zero is and which way it
+winds. The reading is cross-checked against the camera's own `curDistance`
+- if the camera does not sit that far from the hero, the field is not what
+we think it is and the arrow falls back to the hero's facing
+(`ent.GameObject.rotationZ`). Both are sampled at 20Hz by a dedicated pose
+thread; `farever-modkit.log` names which path drew the arrow.
+
+**North is `-y`.** Not a guess: averaging POI positions for the zones the
+game itself names North and South puts `Z3_CrimsonIsland_North` at y=-743
+against `_South` at y=-420, and `Z2_Krisomal_North` at y=1001 against
+`_South` at y=1237. Both pairs agree, and x is east either way - which is
+why an east/west readout looked correct while north and south were quietly
+swapped. `navigator.cpp`'s `bearing()` is the single place that encodes
+this, so the compass label and the arrow cannot disagree.
 
 The navigator is its own module (`navigator.cpp`) with a tiny interface, so
 any future mod on this host can request tracking the same way the atlas

@@ -57,6 +57,17 @@ const WANT = [
   ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin']],
   // World position and facing, for the loot tracker's distance/arrow readout.
   ['ent.GameObject', ['posx', 'posy', 'posz', 'rotationZ']],
+  // The application singleton: reaches the camera, and holds the hero too.
+  ['GameApp', ['gameCamera', 'camera', 'hero', 'world']],
+  // Camera orientation. `direction` is where the camera is heading,
+  // `curDirection` the smoothed value actually rendered - the game's own map
+  // marker (ui.win.map.PlayerMarker) holds a camera for exactly this reason.
+  ['client.BaseCamera', ['direction', 'curDirection', 'pitch', 'curPitch',
+                         'curDistance', 'enabled']],
+  // A camera is a scene object, so it carries its own world position. That
+  // turns "which way is the screen facing" into geometry (camera -> hero)
+  // instead of a guess at an angle's zero and sign.
+  ['h3d.scene.Object', ['x', 'y', 'z']],
   ['st.Player', ['accountProgress', 'progress', 'name']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],
