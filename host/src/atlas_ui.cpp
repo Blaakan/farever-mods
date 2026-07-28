@@ -745,9 +745,12 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     } else if (e.cat == kCreaturesCat) {
         // The bestiary counts encounters, not possessions.
         if (owned)
-            sprintf_s(status, "Encountered - codex progress %d", owned->total);
+            _snprintf_s(status, sizeof(status), _TRUNCATE,
+                        "Encountered - %d killed, codex rank %d",
+                        owned->total, owned->max_level);
         else
-            sprintf_s(status, "Not yet encountered");
+            _snprintf_s(status, sizeof(status), _TRUNCATE,
+                        "Not yet encountered");
         draw_text(tx + pad, yy, small_sz,
                   owned ? Color{0.45f, 0.85f, 0.45f, 1.0f} : kTextDim, status);
     } else if (owned) {
@@ -898,8 +901,7 @@ void scan_jobs_json(const std::string& text, const std::string& who,
 }
 
 void atlas_ui_update(const Collection& c, const Inventories& inv,
-                     const std::vector<std::pair<std::string, int32_t>>&
-                         unit_progress,
+                     const std::vector<UnitProgress>& unit_progress,
                      const std::vector<JobState>& jobs) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
@@ -962,11 +964,12 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
 
     // The bestiary: an entry in the codex map means encountered, and the
     // value is how far along that creature's progress stands.
-    for (const auto& kv : unit_progress) {
-        if (!g_entry_by_id[kCreaturesCat].count(kv.first)) continue;
-        Owned& o = snap->byId[kCreaturesCat][kv.first];
+    for (const auto& up : unit_progress) {
+        if (!g_entry_by_id[kCreaturesCat].count(up.unit)) continue;
+        Owned& o = snap->byId[kCreaturesCat][up.unit];
         o.unlocked = true;
-        o.total = kv.second > 0 ? kv.second : 1;
+        o.total = up.kills;
+        o.max_level = up.rank;      // the codex rank, reused for display
     }
 
     // Offline characters: their bags/equipped only exist in the JSON files
@@ -1253,6 +1256,8 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         std::vector<std::string> tags;
         for (int i = g_cat_begin[tab]; i < g_cat_begin[tab + 1]; i++) {
             for (const auto& t : g_entries[i].tags) {
+                // `craft:` is a lookup key, not something to filter on.
+                if (t.compare(0, 6, "craft:") == 0) continue;
                 if (std::find(tags.begin(), tags.end(), t) == tags.end())
                     tags.push_back(t);
             }

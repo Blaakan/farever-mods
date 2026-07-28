@@ -432,10 +432,15 @@ void nav_draw(float screen_w, float screen_h) {
 
     // Placement: persisted, defaulting to just under the top edge, centred -
     // where a waypoint arrow is expected before anyone moves it.
+    // The saved position is the ARROW's centre, not the frame's corner.
+    // Distance text changes width constantly - "980m NE" to "1.02km NE" -
+    // and anchoring the corner made the arrow slide left and right as it
+    // did. Anchoring the arrow instead lets the frame grow around it.
     const LONG saved_x = InterlockedCompareExchange(&g_nav_x, 0, 0);
     const LONG saved_y = InterlockedCompareExchange(&g_nav_y, 0, 0);
-    float x = (saved_x == kUnplaced) ? (screen_w - w) * 0.5f : (float)saved_x;
+    float anchor_x = (saved_x == kUnplaced) ? screen_w * 0.5f : (float)saved_x;
     float y = (saved_y == kUnplaced) ? 64.0f : (float)saved_y;
+    float x = anchor_x - w * 0.5f;
 
     // Dragging is only possible while the atlas window is open. That keeps
     // the frame from ever swallowing a click during normal play, and the
@@ -471,7 +476,8 @@ void nav_draw(float screen_w, float screen_h) {
     if (y < 0) y = 0;
     if (x > screen_w - w) x = screen_w - w;
     if (y > screen_h - h) y = screen_h - h;
-    InterlockedExchange(&g_nav_x, (LONG)x);
+    anchor_x = x + w * 0.5f;
+    InterlockedExchange(&g_nav_x, (LONG)anchor_x);
     InterlockedExchange(&g_nav_y, (LONG)y);
 
     g_last_rect[0] = x;

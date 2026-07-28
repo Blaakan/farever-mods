@@ -118,6 +118,11 @@ const CLASS_CODES = new Map([
 ]);
 const ARMOUR_SLOTS = new Set(['Chest', 'Legs', 'Feet', 'Head', 'Hands',
                               'Waist', 'Back', 'Shoulders']);
+// The aptitude each class carries, read off the four player-class units.
+const APTITUDE_CLASS = new Map([
+  ['Fighter', 'Warrior'], ['Assassin', 'Rogue'],
+  ['Wizard', 'Mage'], ['Cleric', 'Priest'],
+]);
 const TRINKET_LABEL = new Map([
   ['GearTrinket', 'Trinket'], ['GearNeck', 'Necklace'], ['GearFinger', 'Ring'],
 ]);
@@ -147,13 +152,24 @@ function tagsFor(item, category) {
     case 'trinkets':
       tags.push(`type:${TRINKET_LABEL.get(item.type) || item.type}`);
       break;
-    case 'weapons':  tags.push(`type:${item.type}`); break;
+    case 'weapons': {
+      // Who can wield it, not what shape it is. The link is `aptitudes`:
+      // each player class has exactly one (Warrior=Fighter, Rogue=Assassin,
+      // Mage=Wizard, Priest=Cleric) and a weapon lists the ones it serves.
+      for (const a of item.aptitudes || []) {
+        const cls = APTITUDE_CLASS.get(a.ref);
+        if (cls) tags.push(`class:${cls}`);
+      }
+      if (!tags.length) tags.push('class:Any');
+      break;
+    }
     case 'recipes': {
       // Which job can use it, and the craft the game will record as known.
       const craft = craftByRecipe.get(item.id);
       if (craft) {
         if (craft.job) tags.push(`job:${craft.job}`);
-        if (craft.level) tags.push(`tier:Level ${craft.level}`);
+        // The craft id is what the game records as known; it is carried for
+        // the lookup, not offered as a filter (the UI hides it).
         tags.push(`craft:${craft.item}`);
       } else {
         tags.push('job:Unknown');

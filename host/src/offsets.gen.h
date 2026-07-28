@@ -133,6 +133,13 @@ namespace hxbit_MapData {
     constexpr uint32_t map = 0x28;  // VIRTUAL
 }  // namespace hxbit_MapData
 
+// hxbit.ObjProxy_OkillCount_Int_rank_Int  (sizeof=48)
+namespace hxbit_ObjProxy_OkillCount_Int_rank_Int {
+    constexpr uint32_t SIZEOF = 48;
+    constexpr uint32_t killCount = 0x14;  // I32
+    constexpr uint32_t rank = 0x18;  // I32
+}  // namespace hxbit_ObjProxy_OkillCount_Int_rank_Int
+
 // haxe.ds.StringMap  (sizeof=24)
 namespace haxe_ds_StringMap {
     constexpr uint32_t SIZEOF = 24;

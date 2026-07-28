@@ -34,18 +34,56 @@ bool page_ok(const MEMORY_BASIC_INFORMATION& mbi) {
 
 }  // namespace
 
+// VirtualQuery is a syscall, and a full read cycle asks it tens of
+// thousands of times - fine every thirty seconds, far too much every
+// second. Successful lookups are cached: a walk stays inside a handful of
+// heap regions, so the cache answers nearly every call after the first.
+//
+// The cache cannot make a read less safe. It only ever admits an address
+// into memcpy, which runs under SEH, and the check it skips was already a
+// moment-in-time answer - the region could be freed between the query and
+// the copy either way. mem_flush_cache() bounds how stale an entry can get;
+// the worker calls it once per cycle.
+namespace {
+constexpr int kRegionCacheSize = 32;
+struct CachedRegion {
+    uintptr_t base = 0, end = 0;
+};
+CachedRegion g_region_cache[kRegionCacheSize];
+int g_region_next = 0;
+
+bool cached_ok(uintptr_t a, uintptr_t end) {
+    for (const auto& r : g_region_cache)
+        if (r.end && a >= r.base && end <= r.end) return true;
+    return false;
+}
+
+void cache_region(uintptr_t base, uintptr_t end) {
+    g_region_cache[g_region_next] = {base, end};
+    g_region_next = (g_region_next + 1) % kRegionCacheSize;
+}
+}  // namespace
+
+void mem_flush_cache() {
+    for (auto& r : g_region_cache) r = {};
+    g_region_next = 0;
+}
+
 bool mem_readable(const void* addr, size_t len) {
     uintptr_t a = (uintptr_t)addr;
     if (a < kMinUserAddr || a > kMaxUserAddr) return false;
     if (len == 0 || len > (1u << 20)) return false;
 
     uintptr_t end = a + len;
+    if (cached_ok(a, end)) return true;
+
     while (a < end) {
         MEMORY_BASIC_INFORMATION mbi{};
         if (VirtualQuery((LPCVOID)a, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
         if (!page_ok(mbi)) return false;
         uintptr_t region_end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         if (region_end <= a) return false;  // no forward progress
+        cache_region((uintptr_t)mbi.BaseAddress, region_end);
         a = region_end;
     }
     return true;

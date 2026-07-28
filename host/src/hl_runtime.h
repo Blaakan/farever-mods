@@ -119,6 +119,11 @@ bool read_virtual_fields(const void* vobj, std::vector<VirtualField>* out);
 bool mem_readable(const void* addr, size_t len);
 bool mem_read(const void* addr, void* out, size_t len);
 
+// Drops the cached region lookups behind mem_readable. Call once at the top
+// of a read cycle: within a cycle the cache makes the walk cheap, and
+// flushing between cycles keeps it from outliving the layout it describes.
+void mem_flush_cache();
+
 template <typename T>
 inline bool read(const void* base, uint32_t off, T* out) {
     if (!base) return false;

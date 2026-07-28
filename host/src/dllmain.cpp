@@ -350,6 +350,11 @@ DWORD WINAPI worker(LPVOID) {
                 log_line("reader: hero located at %p", fmk::reader_hero());
                 reported = true;
             }
+            // Region lookups are cached for the length of one cycle; drop
+            // them first so a cycle never trusts last cycle's layout.
+            fmk::mem_flush_cache();
+            const DWORD cycle_start = GetTickCount();
+
             fmk::Collection c;
             fmk::Inventories inv;
             if (fmk::reader_read_collection(&c) && c.valid) {
@@ -389,7 +394,7 @@ DWORD WINAPI worker(LPVOID) {
                 // The bestiary, read from the codex map. Failing here is not
                 // fatal to the rest: the creatures page simply shows nothing
                 // encountered.
-                std::vector<std::pair<std::string, int32_t>> units;
+                std::vector<fmk::UnitProgress> units;
                 fmk::reader_read_unit_progress(&units);
 
                 // Crafting jobs, for which recipes this character knows.
@@ -402,8 +407,22 @@ DWORD WINAPI worker(LPVOID) {
             } else {
                 log_line("collection: hero found but collection walk failed");
             }
-            // Steady state: this host does not need to re-read often.
-            worker_sleep(30);
+
+            // How long a cycle costs, once, so the polling interval below is
+            // a measured choice rather than a hopeful one.
+            static bool timed = false;
+            if (!timed) {
+                timed = true;
+                log_line("reader: full cycle took %lums",
+                         GetTickCount() - cycle_start);
+            }
+
+            // Poll often enough that picking something up, catching a
+            // critter or killing a mob shows up while you are still looking
+            // at the window. True event hooks would mean patching the game's
+            // own code, which this host does not do - it only ever reads -
+            // so a short poll is the honest way to feel immediate.
+            worker_sleep(2);
         } else {
             reported = false;
             // No hero: the main menu, a loading screen, or between

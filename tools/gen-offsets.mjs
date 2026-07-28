@@ -92,6 +92,9 @@ const WANT = [
   ['st.player.Progress', ['counters', 'unitsProgress', 'itemProgress',
                           'zones', 'achievements', 'pets']],
   ['hxbit.MapData', ['map']],
+  // The value in the codex map: not a bare count but a small record, whose
+  // class name spells out its own shape.
+  ['hxbit.ObjProxy_OkillCount_Int_rank_Int', ['killCount', 'rank']],
   ['haxe.ds.StringMap', ['h']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],

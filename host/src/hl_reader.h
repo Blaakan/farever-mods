@@ -78,10 +78,16 @@ struct JobState {
 // another character on the same account knows different recipes.
 bool reader_read_jobs(std::vector<JobState>* out);
 
-// Codex progress per creature: unit id -> the number the game tracks for it
-// (kill count / progress points). A creature absent from the map has never
-// been encountered. Empty when the walk cannot be trusted.
-bool reader_read_unit_progress(std::vector<std::pair<std::string, int32_t>>* out);
+// What the codex records for one creature. A creature absent from the map
+// has never been encountered at all.
+struct UnitProgress {
+    std::string unit;
+    int32_t kills = 0;
+    int32_t rank = 0;
+};
+
+// Codex progress per creature. Empty when the walk cannot be trusted.
+bool reader_read_unit_progress(std::vector<UnitProgress>* out);
 
 bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);

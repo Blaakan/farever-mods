@@ -239,8 +239,7 @@ bool reader_read_jobs(std::vector<JobState>* out) {
     return true;
 }
 
-bool reader_read_unit_progress(
-    std::vector<std::pair<std::string, int32_t>>* out) {
+bool reader_read_unit_progress(std::vector<UnitProgress>* out) {
     out->clear();
     void* hero = reader_hero();
     if (!hero) return false;
@@ -267,9 +266,19 @@ bool reader_read_unit_progress(
     std::vector<MapEntry> entries;
     if (!read_string_map(map, &entries)) return false;
 
+    // The value is a record, not a number: the class name reads
+    // ObjProxy_OkillCount_Int_rank_Int, which is the shape spelled out.
+    namespace prog = off::hxbit_ObjProxy_OkillCount_Int_rank_Int;
     out->reserve(entries.size());
-    for (const auto& e : entries)
-        out->push_back({e.key, dyn_as_int(e.value, 0)});
+    for (const auto& e : entries) {
+        UnitProgress up;
+        up.unit = e.key;
+        up.kills = read_i32(e.value, prog::killCount);
+        up.rank = read_i32(e.value, prog::rank);
+        if (up.kills < 0 || up.kills > 1000000) up.kills = 0;
+        if (up.rank < 0 || up.rank > 100) up.rank = 0;
+        out->push_back(std::move(up));
+    }
 
     // One line the first time through. The value type is a generic's erased
     // parameter, so the only way to learn what these numbers mean is to look
@@ -281,19 +290,19 @@ bool reader_read_unit_progress(
         once = false;
         std::string sample;
         int32_t nonzero = 0;
-        for (const auto& kv : *out) if (kv.second) nonzero++;
+        for (const auto& up : *out) if (up.kills) nonzero++;
         for (size_t i = 0; i < entries.size() && i < 3; i++) {
             void* v = entries[i].value;
             void* t = v ? read_ptr(v, 0) : nullptr;
             char one[160];
-            _snprintf_s(one, sizeof(one), _TRUNCATE, " %s=%d(kind %d,%s)",
-                        entries[i].key.c_str(), (*out)[i].second,
-                        t ? read_i32(t, hlrt::type_kind) : -1,
-                        v ? obj_class_name(v).c_str() : "<null>");
+            _snprintf_s(one, sizeof(one), _TRUNCATE, " %s=%dkills/rank%d",
+                        entries[i].key.c_str(), (*out)[i].kills,
+                        (*out)[i].rank);
+            (void)t;
             sample += one;
         }
-        host_log("codex: %zu units, %d with a non-zero value:%s", out->size(),
-                 nonzero, sample.c_str());
+        host_log("codex: %zu units encountered, %d with kills:%s",
+                 out->size(), nonzero, sample.c_str());
     }
     return true;
 }

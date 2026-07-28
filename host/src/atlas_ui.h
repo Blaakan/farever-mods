@@ -29,8 +29,7 @@ bool atlas_ui_init();
 // draw side reads. `unit_progress` is the codex: unit id -> the count the
 // game tracks for it, absent meaning never encountered.
 void atlas_ui_update(const Collection& c, const Inventories& inv,
-                     const std::vector<std::pair<std::string, int32_t>>&
-                         unit_progress,
+                     const std::vector<UnitProgress>& unit_progress,
                      const std::vector<JobState>& jobs);
 
 // Pose thread: whether a character is actually in the world. Going false
