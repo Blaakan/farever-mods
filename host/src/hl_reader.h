@@ -75,14 +75,14 @@ bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z);
 // the scan happens in-world rather than during a loading screen.
 bool reader_locate_app(bool force_rescan);
 
-// The camera's world position, and the orbit distance it believes it is at.
-// The navigator turns these into a view bearing geometrically: the screen
-// looks from the camera toward the hero. `cur_distance` is the game's own
-// value, used to sanity-check that the position we read is really the
-// camera's - a mismatch means the field is not what we think it is, and the
-// navigator falls back to the hero's facing rather than pointing wrongly.
-bool reader_read_camera(double* x, double* y, double* z, double* cur_distance,
-                        double* cur_direction);
+// Where the render camera sits and what it looks at, in world space:
+// GameApp.gameCamera -> BaseCamera.scene -> Scene.camera -> h3d.Camera's
+// own pos/target vectors. The screen's forward direction is target minus
+// pos, which needs no angle convention and no hero. Six validated qword
+// reads behind a five-link pointer walk; any broken link returns false and
+// the navigator falls back to the hero's facing.
+bool reader_read_camera(double* px, double* py, double* pz,
+                        double* tx, double* ty, double* tz);
 
 // Writes the collection next to the game as farever-collection.json. Until
 // the mods are ported onto this host, that file is the deliverable: it is the

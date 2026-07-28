@@ -59,15 +59,29 @@ namespace client_BaseCamera {
     constexpr uint32_t curPitch = 0xf8;  // F64
     constexpr uint32_t curDistance = 0x108;  // F64
     constexpr uint32_t enabled = 0xe8;  // BOOL
+    constexpr uint32_t scene = 0x118;  // OBJ : h3d.scene.Scene
 }  // namespace client_BaseCamera
 
-// h3d.scene.Object  (sizeof=160)
-namespace h3d_scene_Object {
-    constexpr uint32_t SIZEOF = 160;
-    constexpr uint32_t x = 0x30;  // F64
-    constexpr uint32_t y = 0x38;  // F64
-    constexpr uint32_t z = 0x40;  // F64
-}  // namespace h3d_scene_Object
+// h3d.scene.Scene  (sizeof=288, extends h3d.scene.Object)
+namespace h3d_scene_Scene {
+    constexpr uint32_t SIZEOF = 288;
+    constexpr uint32_t camera = 0xa0;  // OBJ : h3d.Camera
+}  // namespace h3d_scene_Scene
+
+// h3d.Camera  (sizeof=204)
+namespace h3d_Camera {
+    constexpr uint32_t SIZEOF = 204;
+    constexpr uint32_t pos = 0x58;  // OBJ : h3d.VectorImpl
+    constexpr uint32_t target = 0x68;  // OBJ : h3d.VectorImpl
+}  // namespace h3d_Camera
+
+// h3d.VectorImpl  (sizeof=32)
+namespace h3d_VectorImpl {
+    constexpr uint32_t SIZEOF = 32;
+    constexpr uint32_t x = 0x8;  // F64
+    constexpr uint32_t y = 0x10;  // F64
+    constexpr uint32_t z = 0x18;  // F64
+}  // namespace h3d_VectorImpl
 
 // st.Player  (sizeof=385, extends st.State)
 namespace st_Player {

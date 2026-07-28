@@ -187,16 +187,16 @@ DWORD WINAPI pose_worker(LPVOID) {
         double x = 0, y = 0, z = 0, rz = 0;
         if (fmk::reader_read_hero_pose(&x, &y, &z, &rz)) {
             fmk::nav_set_hero_pose(true, x, y, z, rz);
-            // Hero first: the camera check needs a hero position to
-            // measure against.
-            double cx = 0, cy = 0, cz = 0, cdist = 0, cdir = 0;
-            if (fmk::reader_read_camera(&cx, &cy, &cz, &cdist, &cdir))
-                fmk::nav_set_camera(true, cx, cy, cz, cdist);
+            // Hero first: the camera's diagnostic distance measures against
+            // it, though the view vector itself stands alone.
+            double px = 0, py = 0, pz = 0, tx = 0, ty = 0, tz = 0;
+            if (fmk::reader_read_camera(&px, &py, &pz, &tx, &ty, &tz))
+                fmk::nav_set_camera(true, px, py, pz, tx, ty, tz);
             else
-                fmk::nav_set_camera(false, 0, 0, 0, 0);
+                fmk::nav_set_camera(false, 0, 0, 0, 0, 0, 0);
         } else {
             fmk::nav_set_hero_pose(false, 0, 0, 0, 0);
-            fmk::nav_set_camera(false, 0, 0, 0, 0);
+            fmk::nav_set_camera(false, 0, 0, 0, 0, 0, 0);
         }
         Sleep(50);
     }

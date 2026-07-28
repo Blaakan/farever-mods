@@ -29,14 +29,13 @@ void nav_tick();                                  // persist when dirty
 // pose thread.
 void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z);
 
-// The camera's world position plus the orbit distance the game thinks it is
-// at. The navigator prefers this: the screen looks from the camera toward
-// the hero, so the forward bearing is geometry rather than a guess at an
-// angle's convention. `cur_distance` is the cross-check - if the position
-// does not sit that far from the hero, the field is not what we think and
-// the arrow reverts to the hero's facing.
-void nav_set_camera(bool valid, double x, double y, double z,
-                    double cur_distance);
+// Where the render camera sits and what it looks at. The navigator prefers
+// this: the screen's forward direction is target minus pos, which is the
+// definition of where the view points - no angle convention to guess. Only
+// the horizontal part is used, so looking down at a steep pitch still gives
+// a stable bearing.
+void nav_set_camera(bool valid, double px, double py, double pz,
+                    double tx, double ty, double tz);
 
 // Any thread with a UI (render thread in practice).
 // `key` identifies the tracked thing (e.g. "mounts/Mount_Wolf_05") so a

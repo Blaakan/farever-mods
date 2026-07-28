@@ -63,11 +63,17 @@ const WANT = [
   // `curDirection` the smoothed value actually rendered - the game's own map
   // marker (ui.win.map.PlayerMarker) holds a camera for exactly this reason.
   ['client.BaseCamera', ['direction', 'curDirection', 'pitch', 'curPitch',
-                         'curDistance', 'enabled']],
-  // A camera is a scene object, so it carries its own world position. That
-  // turns "which way is the screen facing" into geometry (camera -> hero)
-  // instead of a guess at an angle's zero and sign.
-  ['h3d.scene.Object', ['x', 'y', 'z']],
+                         'curDistance', 'enabled', 'scene']],
+  // The render camera itself, reached through the controller's scene. Its
+  // pos and target ARE where the view sits and what it looks at, so the
+  // screen's forward direction is target-minus-pos - no angle convention to
+  // guess at, and no dependence on the hero. (The controller's own
+  // h3d.scene.Object x/y/z are not the camera's world position: they read
+  // as origin in game, which is what sent the first attempt to the
+  // fallback path.)
+  ['h3d.scene.Scene', ['camera']],
+  ['h3d.Camera', ['pos', 'target']],
+  ['h3d.VectorImpl', ['x', 'y', 'z']],
   ['st.Player', ['accountProgress', 'progress', 'name']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],

@@ -490,16 +490,48 @@ bool reader_locate_app(bool force_rescan) {
     return g_app != nullptr;
 }
 
-bool reader_read_camera(double* x, double* y, double* z, double* cur_distance,
-                        double* cur_direction) {
-    if (!g_app || !obj_is(g_app, "GameApp")) return false;
-    void* cam = read_ptr(g_app, off::GameApp::gameCamera);
-    if (!obj_is(cam, "client.GameCamera")) return false;
-    return read(cam, off::h3d_scene_Object::x, x) &&
-           read(cam, off::h3d_scene_Object::y, y) &&
-           read(cam, off::h3d_scene_Object::z, z) &&
-           read(cam, off::client_BaseCamera::curDistance, cur_distance) &&
-           read(cam, off::client_BaseCamera::curDirection, cur_direction);
+bool reader_read_camera(double* px, double* py, double* pz,
+                        double* tx, double* ty, double* tz) {
+    // This walk is five links deep, and a silent failure here is
+    // indistinguishable from "no camera" at the UI - it just quietly draws
+    // a hero-relative arrow. Name the broken link, once.
+    static bool diag = true;
+    auto fail = [&](const char* where, void* p) {
+        if (diag) {
+            diag = false;
+            std::string cls = obj_class_name(p);
+            host_log("camera: walk stopped at %s (%p is %s)", where, p,
+                     cls.empty() ? "<not an object>" : cls.c_str());
+        }
+        return false;
+    };
+
+    if (!g_app || !obj_is(g_app, "GameApp")) return fail("GameApp", g_app);
+    void* ctrl = read_ptr(g_app, off::GameApp::gameCamera);
+    if (!obj_is(ctrl, "client.GameCamera")) return fail("gameCamera", ctrl);
+
+    // The controller is not the camera: it drives the scene's h3d.Camera,
+    // and only that object knows where the view actually is.
+    void* scene = read_ptr(ctrl, off::client_BaseCamera::scene);
+    if (!obj_is(scene, "h3d.scene.Scene")) return fail("BaseCamera.scene", scene);
+    void* cam = read_ptr(scene, off::h3d_scene_Scene::camera);
+    if (!obj_is(cam, "h3d.Camera")) return fail("Scene.camera", cam);
+
+    void* pos = read_ptr(cam, off::h3d_Camera::pos);
+    void* target = read_ptr(cam, off::h3d_Camera::target);
+    if (!pos || !target) return fail("Camera.pos/target", pos ? target : pos);
+
+    if (diag) {
+        diag = false;
+        host_log("camera: view chain resolved (h3d.Camera %p)", cam);
+    }
+
+    return read(pos, off::h3d_VectorImpl::x, px) &&
+           read(pos, off::h3d_VectorImpl::y, py) &&
+           read(pos, off::h3d_VectorImpl::z, pz) &&
+           read(target, off::h3d_VectorImpl::x, tx) &&
+           read(target, off::h3d_VectorImpl::y, ty) &&
+           read(target, off::h3d_VectorImpl::z, tz);
 }
 
 bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z) {

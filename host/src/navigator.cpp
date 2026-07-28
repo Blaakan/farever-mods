@@ -39,9 +39,11 @@ double g_rz = 0;                      // facing, radians
 DWORD  g_pos_tick = 0;
 constexpr DWORD kPosFreshMs = 5000;
 
-// Camera pose, same cadence. g_cam_ok says the sanity check passed.
+// Camera view, same cadence. g_cam_valid says the sanity check passed;
+// g_view_* is the horizontal direction the screen faces.
 bool   g_cam_valid = false;
-double g_cx = 0, g_cy = 0, g_cz = 0, g_cam_dist = 0;
+double g_view_dx = 0, g_view_dy = 0;
+double g_cam_dist = 0;      // camera-to-hero distance, diagnostics only
 
 std::wstring g_ini_path;
 volatile LONG g_dirty = 0;
@@ -188,29 +190,27 @@ void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z) {
     }
 }
 
-void nav_set_camera(bool valid, double x, double y, double z,
-                    double cur_distance) {
+void nav_set_camera(bool valid, double px, double py, double pz,
+                    double tx, double ty, double tz) {
     if (!g_cs_init) return;
     Lock lk;
     g_cam_valid = false;
-    if (!valid || !g_pos_valid) return;
+    if (!valid) return;
 
-    // Trust the reading only if the camera really sits where a camera would:
-    // roughly `cur_distance` away from the hero, and far enough off in the
-    // horizontal plane for a bearing to mean anything.
-    const double dx = x - g_hx, dy = y - g_hy, dz = z - g_hz;
-    const double d3 = sqrt(dx * dx + dy * dy + dz * dz);
-    const double dh = sqrt(dx * dx + dy * dy);
-    const bool plausible =
-        d3 > 0.5 && d3 < 200.0 && dh > 0.3 &&
-        (cur_distance <= 0.0 ||
-         fabs(d3 - cur_distance) < (cur_distance * 0.5 + 3.0));
-    if (!plausible) return;
+    // The view vector, flattened. A near-vertical view has no meaningful
+    // horizontal bearing, so require some length before trusting it.
+    const double vx = tx - px, vy = ty - py;
+    if (sqrt(vx * vx + vy * vy) < 0.05) return;
 
-    g_cx = x;
-    g_cy = y;
-    g_cz = z;
-    g_cam_dist = cur_distance;
+    g_view_dx = vx;
+    g_view_dy = vy;
+    (void)pz;
+    (void)tz;
+    // Diagnostics: how far the camera sits from the hero. Not a gate - the
+    // view vector stands on its own - but a wrong object shows up here.
+    g_cam_dist = g_pos_valid
+        ? sqrt((px - g_hx) * (px - g_hx) + (py - g_hy) * (py - g_hy))
+        : 0.0;
     g_cam_valid = true;
 }
 
@@ -282,9 +282,8 @@ void nav_draw(float screen_w, float screen_h) {
             // clockwise for positive, so right reads right.
             const double target_b = bearing(t->x - g_hx, t->y - g_hy);
             if (g_cam_valid) {
-                // What the screen faces is the direction from the camera to
-                // the hero - geometry, with no angle convention to guess.
-                rel = target_b - bearing(g_hx - g_cx, g_hy - g_cy);
+                // The screen faces along the camera's own view vector.
+                rel = target_b - bearing(g_view_dx, g_view_dy);
                 used_camera = true;
             } else {
                 // Fallback: the hero's own facing, whose vector is
@@ -297,11 +296,8 @@ void nav_draw(float screen_w, float screen_h) {
         } else {
             _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
         }
-        diag_target_b = fresh ? atan2(t->x - g_hx, t->y - g_hy) : 0;
-        diag_cam_d = g_cam_valid
-            ? sqrt((g_cx - g_hx) * (g_cx - g_hx) + (g_cy - g_hy) * (g_cy - g_hy) +
-                   (g_cz - g_hz) * (g_cz - g_hz))
-            : 0;
+        diag_target_b = fresh ? bearing(t->x - g_hx, t->y - g_hy) : 0;
+        diag_cam_d = g_cam_valid ? bearing(g_view_dx, g_view_dy) : 0;
         diag_rz = g_rz;
         diag_cam_dist = g_cam_dist;
         have = true;
@@ -315,11 +311,11 @@ void nav_draw(float screen_w, float screen_h) {
     const int source = used_camera ? 1 : 0;
     if (fresh && source != last_source) {
         last_source = source;
-        host_log("nav: arrow from %s (targetBearing=%.1fdeg heroRotZ=%.1fdeg "
-                 "camDist=%.1f curDistance=%.1f rel=%.1fdeg)",
-                 used_camera ? "camera geometry" : "hero facing",
-                 diag_target_b * 57.2957795, diag_rz * 57.2957795, diag_cam_d,
-                 diag_cam_dist, rel * 57.2957795);
+        host_log("nav: arrow from %s (targetBearing=%.1fdeg viewBearing=%.1fdeg "
+                 "heroRotZ=%.1fdeg camToHero=%.1f rel=%.1fdeg)",
+                 used_camera ? "camera view vector" : "hero facing",
+                 diag_target_b * 57.2957795, diag_cam_d * 57.2957795,
+                 diag_rz * 57.2957795, diag_cam_dist, rel * 57.2957795);
     }
 
     char line[220];
