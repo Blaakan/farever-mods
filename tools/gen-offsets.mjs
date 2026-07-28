@@ -59,6 +59,9 @@ const WANT = [
   ['ent.GameObject', ['posx', 'posy', 'posz', 'rotationZ']],
   // The application singleton: reaches the camera, and holds the hero too.
   ['GameApp', ['gameCamera', 'camera', 'hero', 'world']],
+  // `$App` is the class-value object holding App's statics, and `inst` is
+  // the singleton itself - the whole reason startup needs no instance scan.
+  ['$App', ['inst']],
   // Camera orientation. `direction` is where the camera is heading,
   // `curDirection` the smoothed value actually rendered - the game's own map
   // marker (ui.win.map.PlayerMarker) holds a camera for exactly this reason.

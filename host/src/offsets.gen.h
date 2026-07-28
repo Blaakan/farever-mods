@@ -50,6 +50,12 @@ namespace GameApp {
     constexpr uint32_t world = 0x98;  // OBJ : world.World
 }  // namespace GameApp
 
+// $App  (sizeof=88, extends hl.Class)
+namespace _App {
+    constexpr uint32_t SIZEOF = 88;
+    constexpr uint32_t inst = 0x30;  // OBJ : App
+}  // namespace _App
+
 // client.BaseCamera  (sizeof=304, extends h3d.scene.Object)
 namespace client_BaseCamera {
     constexpr uint32_t SIZEOF = 304;

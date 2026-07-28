@@ -160,6 +160,10 @@ void log_caller(const char* api, void* ret_addr) {
 
 volatile LONG g_stop = 0;
 
+// Set when the world state flips, so the worker stops waiting out its
+// 30-second cycle and re-reads as soon as a character is in play.
+volatile LONG g_world_changed = 0;
+
 // The host composes its modules' draw callbacks; each module stays unaware
 // of the others. The navigator draws first so the atlas window stacks above
 // its pill.
@@ -175,17 +179,30 @@ void worker_sleep(int seconds) {
         Sleep(1000);
         fmk::atlas_ui_tick();
         fmk::nav_tick();
+        // Entering or leaving the world cuts the wait short, so stepping
+        // into the world refreshes the atlas at once instead of showing
+        // nothing until the cycle happens to come round.
+        if (InterlockedExchange(&g_world_changed, 0)) return;
     }
 }
 
-// The navigator's arrow rotates with the hero; at the worker's cadence it
-// would visibly lag every camera turn. This thread does nothing but four
-// validated qword reads every 50ms - it never scans, never walks arrays,
-// and reuses whatever hero pointer the worker last validated.
+// The navigator's arrow rotates with the camera; at the worker's cadence it
+// would visibly lag every turn. This thread does nothing but a handful of
+// validated qword reads every 50ms - it never scans and never walks arrays.
+// It doubles as the liveness check: GameApp.hero going null is how logging
+// out, a character swap or the main menu is noticed within a frame or two.
+
 DWORD WINAPI pose_worker(LPVOID) {
+    bool prev_in_world = false;
     while (!g_stop) {
         double x = 0, y = 0, z = 0, rz = 0;
-        if (fmk::reader_read_hero_pose(&x, &y, &z, &rz)) {
+        const bool in_world = fmk::reader_read_hero_pose(&x, &y, &z, &rz);
+        if (in_world != prev_in_world) {
+            prev_in_world = in_world;
+            fmk::atlas_ui_set_in_world(in_world);
+            InterlockedExchange(&g_world_changed, 1);
+        }
+        if (in_world) {
             fmk::nav_set_hero_pose(true, x, y, z, rz);
             // Hero first: the camera's diagnostic distance measures against
             // it, though the view vector itself stands alone.
@@ -259,11 +276,12 @@ bool verify_build() {
 DWORD WINAPI worker(LPVOID) {
     log_line("worker: started");
 
-    // Let the game get through its own startup before we touch anything.
-    // 20s is enough for the renderer to exist; the reader retries on its own
-    // until a character is actually in the world, so waiting longer here only
-    // delays the overlay appearing.
-    for (int i = 0; i < 20 && !g_stop; i++) Sleep(1000);
+    // Let the game get through the earliest part of its own startup. This
+    // used to be 20s, from when finding anything meant a memory sweep that
+    // was wasted if the game was not ready. GameApp now comes from a static
+    // and exists from application start - long before the main menu - so
+    // there is nothing to wait for beyond the HashLink runtime being up.
+    for (int i = 0; i < 6 && !g_stop; i++) Sleep(1000);
     if (g_stop) return 0;
 
     const bool build_ok = verify_build();
@@ -309,18 +327,23 @@ DWORD WINAPI worker(LPVOID) {
         if (ui_ready && !input_ready) {
             input_ready = fmk::input_install(fmk::overlay_game_hwnd());
         }
+        // GameApp first, and it is the only thing worth searching for: it
+        // exists from application start, holds the hero and the camera, and
+        // is reached through App.inst rather than by scanning. Everything
+        // downstream is then a pointer walk - including finding the hero
+        // again after a zone change or a character swap.
+        if (!app_found && app_tries < 20) {
+            app_tries++;
+            app_found = fmk::reader_locate_app(false);
+            if (!app_found) {
+                worker_sleep(3);   // still loading; try again shortly
+                continue;
+            }
+        }
         if (fmk::reader_locate_hero(false)) {
             if (!reported) {
                 log_line("reader: hero located at %p", fmk::reader_hero());
                 reported = true;
-            }
-            // The camera lives off GameApp, which costs a scan to find, so
-            // do it once the game is demonstrably in-world (hero found) and
-            // give up after a few attempts - the navigator degrades to the
-            // hero's facing rather than rescanning forever.
-            if (!app_found && app_tries < 3) {
-                app_tries++;
-                app_found = fmk::reader_locate_app(false);
             }
             fmk::Collection c;
             fmk::Inventories inv;
@@ -368,12 +391,13 @@ DWORD WINAPI worker(LPVOID) {
             worker_sleep(30);
         } else {
             reported = false;
-            // Back off on repeated failure. A full scan is ~40s of memory
-            // traffic; retrying it every 10s while the player sits at a
-            // loading screen is pure waste and floods the log.
-            static int misses = 0;
-            if (misses < 30) misses++;
-            worker_sleep(10 + misses * 10);   // 20s .. 5min
+            // No hero: the main menu, a loading screen, or between
+            // characters. This used to back off to five minutes because
+            // every retry was a ~40s memory sweep; now it is a single
+            // pointer read off GameApp, so it can simply check again
+            // shortly - and the pose thread cuts even this short the
+            // moment a character is actually in the world.
+            worker_sleep(5);
         }
     }
     return 0;

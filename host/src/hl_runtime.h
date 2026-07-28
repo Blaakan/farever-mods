@@ -39,6 +39,11 @@ constexpr uint32_t type_kind      = 0x00;
 constexpr uint32_t type_obj       = 0x08;   // hl_type_obj* when kind == HOBJ
 constexpr uint32_t obj_name       = 0x10;   // const uchar* (UTF-16)
 constexpr uint32_t obj_super      = 0x18;
+// hl_type_obj continues: fields +0x20, proto +0x28, bindings +0x30, then
+// global_value - a void** to the slot holding the class value. A Haxe
+// class's static vars are fields of that object, which is how a singleton
+// like App.inst is reachable without scanning memory for the instance.
+constexpr uint32_t obj_global     = 0x38;
 
 constexpr uint32_t varray_size    = 0x10;
 constexpr uint32_t varray_data    = 0x18;   // elements start here

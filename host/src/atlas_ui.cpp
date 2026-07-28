@@ -138,6 +138,7 @@ volatile LONG g_tab = 0;
 
 // --- render-thread state ----------------------------------------------------
 
+volatile LONG g_in_world = 0;
 float g_scroll[kCats]{};
 bool  g_dragging = false;
 float g_drag_dx = 0, g_drag_dy = 0;
@@ -734,6 +735,20 @@ void atlas_ui_update(const Collection& c, const Inventories& inv) {
     LeaveCriticalSection(&g_own_cs);
 }
 
+void atlas_ui_set_in_world(bool in_world) {
+    const LONG was = InterlockedExchange(&g_in_world, in_world ? 1 : 0);
+    if (was && !in_world) {
+        // Leaving the world: the snapshot describes a character who is no
+        // longer loaded, so drop it rather than show it to the next one.
+        if (g_own_cs_init) {
+            EnterCriticalSection(&g_own_cs);
+            g_own.reset();
+            LeaveCriticalSection(&g_own_cs);
+        }
+        input_set_visible(false);
+    }
+}
+
 void atlas_ui_tick() {
     if (!InterlockedCompareExchange(&g_layout_dirty, 0, 0)) return;
     InterlockedExchange(&g_layout_dirty, 0);
@@ -750,6 +765,14 @@ void atlas_ui_tick() {
 
 void atlas_ui_draw(float screen_w, float screen_h) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
+
+    // Nothing of ours belongs on screen at the main menu or a loading
+    // screen - not the window, not even the hint.
+    if (!InterlockedCompareExchange(&g_in_world, 0, 0)) {
+        input_set_ui_rect(0, 0, 0, 0);
+        g_dragging = false;
+        return;
+    }
 
     InputState in;
     input_get(&in);

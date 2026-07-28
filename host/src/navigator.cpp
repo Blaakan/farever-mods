@@ -392,7 +392,10 @@ void nav_draw(float screen_w, float screen_h) {
         have = true;
         }
     }
-    if (!have) {
+    // No tracked target, or no live hero to measure from (main menu, logout,
+    // loading): draw nothing at all rather than a frame frozen on the last
+    // position it knew.
+    if (!have || !fresh) {
         nav_clear_frame();
         return;
     }
@@ -488,13 +491,7 @@ void nav_draw(float screen_w, float screen_h) {
     const float cx = x + w * 0.5f;
     float yy = y + pad;
 
-    if (fresh) {
-        draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
-    } else {
-        // No fix on the hero yet: show the arrow greyed and pointing up
-        // rather than pointing somewhere untrue.
-        draw_arrow_3d(cx, yy + kArrowR, kArrowR * 0.9f, 0);
-    }
+    draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
     yy += kArrowR * 2.1f + 6;
 
     draw_text(cx - dist_w * 0.5f, yy, kDistSz, {1.0f, 1.0f, 1.0f, 1.0f}, where);

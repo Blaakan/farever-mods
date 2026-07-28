@@ -69,6 +69,31 @@ strongest argument for finishing stage 2, and the offsets above mean it is
 generation, not reverse-engineering: re-run the scan after a patch and the
 addresses regenerate.
 
+### Startup: one lookup, no instance sweep
+
+`GameApp` is the root of everything the host reads - it holds the hero, the
+camera and the account progress - and it is reached **without scanning for
+it**. `App.inst` is a Haxe static, and a class's statics are fields of the
+class-value object that `hl_type_obj.global_value` points at, so:
+
+```
+find_type_by_name("GameApp")     the one search that remains
+  +0x08 hl_type_obj
+    +0x18 super          -> App's hl_type
+      +0x08 hl_type_obj
+        +0x38 global_value -> $App  (the statics object)
+          +0x30 inst       -> the GameApp instance
+```
+
+Four dereferences instead of a pass over ~8 GB of private memory. Because
+`GameApp` exists from application start, the host is ready before the main
+menu finishes loading, and the hero is then just `GameApp.hero` - which also
+means a zone change or a character swap costs nothing, and that logging out
+is noticed immediately (the field goes null). Earlier builds scanned for
+`ent.Hero` directly, which meant repeating a full sweep every time the
+player was not yet in the world: about two and a half minutes before the
+first useful frame.
+
 ### The complete read path
 
 `ent.Hero.player` at `+0x4b8` closes the chain, and it starts from the Hero —

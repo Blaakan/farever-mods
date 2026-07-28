@@ -160,6 +160,21 @@ bool reader_locate_hero(bool force_rescan) {
 }
 
 void* reader_hero() {
+    // GameApp is authoritative about whether a hero exists at all. At the
+    // main menu, during logout, and between characters it nulls this field,
+    // whereas a cached pointer can keep validating against memory the game
+    // has simply stopped using - which is how a stale collection lingered
+    // on screen after logging out. Reading it here also means a character
+    // swap is picked up immediately, with no rescan.
+    if (g_app && obj_is(g_app, "GameApp")) {
+        void* h = read_ptr(g_app, off::GameApp::hero);
+        if (!obj_is(h, "ent.Hero")) {
+            g_hero = nullptr;
+            return nullptr;
+        }
+        g_hero = h;
+        return h;
+    }
     // One local load: the pose thread calls this at 20Hz while the worker
     // may rewrite g_hero during a rescan, and three separate loads of a
     // racing pointer could validate one value and return another.
@@ -469,6 +484,30 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
 // camera (and the hero, which a later version could use to skip the hero
 // scan entirely). Validated during the scan by both of those fields, since
 // most qwords matching a type pointer are metadata rather than instances.
+// The singleton without a memory sweep: `inst` is a static of App, and a
+// Haxe class's statics are fields of the class-value object that
+// hl_type_obj.global_value points at. GameApp's type carries its
+// superclass, so one type lookup reaches App's statics and the instance
+// falls out as a pointer read.
+//
+// This is what makes startup quick. Scanning for the instance is a full
+// pass over ~8GB of private memory; this is four dereferences.
+void* find_app_via_statics() {
+    if (!g_app_type) return nullptr;
+    void* tobj = read_ptr(g_app_type, hlrt::type_obj);
+    if (!tobj) return nullptr;
+    void* super = read_ptr(tobj, hlrt::obj_super);        // hl_type* of App
+    if (!super) return nullptr;
+    void* super_obj = read_ptr(super, hlrt::type_obj);
+    if (!super_obj) return nullptr;
+    void* slot = read_ptr(super_obj, hlrt::obj_global);   // void** global
+    if (!slot) return nullptr;
+    void* statics = read_ptr(slot, 0);                    // the $App object
+    if (!statics) return nullptr;
+    void* inst = read_ptr(statics, off::_App::inst);
+    return obj_is(inst, "GameApp") ? inst : nullptr;
+}
+
 bool reader_locate_app(bool force_rescan) {
     if (!g_app_type) {
         g_app_type = find_type_by_name("GameApp");
@@ -476,17 +515,25 @@ bool reader_locate_app(bool force_rescan) {
     }
     if (!force_rescan && g_app && obj_is(g_app, "GameApp")) return true;
 
+    g_app = find_app_via_statics();
+    if (g_app) {
+        host_log("reader: GameApp %p (via App.inst)", g_app);
+        return true;
+    }
+
+    // Fallback for a build where that walk does not hold: find the instance
+    // the slow way, validated by two of its own fields.
+    host_log("reader: App.inst walk failed - scanning for GameApp");
     g_app = find_instance_of_type_where(
         g_app_type,
         [](void* cand, void*) -> bool {
             return obj_is(read_ptr(cand, off::GameApp::gameCamera),
-                          "client.GameCamera") &&
-                   obj_is(read_ptr(cand, off::GameApp::hero), "ent.Hero");
+                          "client.GameCamera");
         },
         nullptr);
 
-    if (g_app) host_log("reader: GameApp %p", g_app);
-    else host_log("reader: GameApp not found - arrow stays hero-relative");
+    if (g_app) host_log("reader: GameApp %p (scanned)", g_app);
+    else host_log("reader: GameApp not found");
     return g_app != nullptr;
 }
 

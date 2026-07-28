@@ -25,6 +25,11 @@ bool atlas_ui_init();
 // draw side reads.
 void atlas_ui_update(const Collection& c, const Inventories& inv);
 
+// Pose thread: whether a character is actually in the world. Going false
+// (main menu, logout, character select) drops the ownership snapshot and
+// hides the window, so nothing from the last session lingers on screen.
+void atlas_ui_set_in_world(bool in_world);
+
 // Worker thread, about once a second: persists layout when it changed.
 void atlas_ui_tick();
 
