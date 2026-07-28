@@ -44,6 +44,7 @@ volatile LONG g_click_x = 0, g_click_y = 0;
 volatile LONG g_wheel_raw = 0;      // accumulated wheel delta (not detents)
 volatile LONG g_visible = 0;
 volatile LONG g_rect[4] = {0, 0, 0, 0};   // x, y, w, h
+volatile LONG g_aux[4] = {0, 0, 0, 0};    // the navigator's frame
 volatile LONG g_rect_tick = 0;            // GetTickCount of the last publish
 
 // Latches so the second half of a swallowed press/key never leaks.
@@ -52,9 +53,13 @@ volatile LONG g_mbtn_held = 0;
 volatile LONG g_xbtn_held = 0;
 volatile LONG g_esc_held = 0;
 
+bool in_rect(const volatile LONG* r, int x, int y) {
+    const LONG rx = r[0], ry = r[1], rw = r[2], rh = r[3];
+    return rw > 0 && rh > 0 && x >= rx && y >= ry && x < rx + rw && y < ry + rh;
+}
+
 bool in_ui_rect(int x, int y) {
-    const LONG rx = g_rect[0], ry = g_rect[1], rw = g_rect[2], rh = g_rect[3];
-    return x >= rx && y >= ry && x < rx + rw && y < ry + rh;
+    return in_rect(g_rect, x, y) || in_rect(g_aux, x, y);
 }
 
 // Visible AND the render thread is actually drawing the window. The rect is
@@ -233,7 +238,7 @@ void input_uninstall() {
     // g_orig stays set: the window thread may still be inside hook_proc.
 }
 
-void input_get(InputState* out) {
+void input_peek(InputState* out) {
     // Counter before payload, mirroring the writer's payload-then-counter
     // order: a click that lands mid-snapshot is seen next frame with its
     // payload complete, never this frame with the payload missing.
@@ -243,12 +248,17 @@ void input_get(InputState* out) {
     out->lbutton = InterlockedCompareExchange(&g_lbutton, 0, 0) != 0;
     out->mouse_x = InterlockedCompareExchange(&g_mouse_x, 0, 0);
     out->mouse_y = InterlockedCompareExchange(&g_mouse_y, 0, 0);
+    out->wheel = 0;
+    out->visible = InterlockedCompareExchange(&g_visible, 0, 0) != 0;
+}
+
+void input_get(InputState* out) {
+    input_peek(out);
     // Consume whole detents, keep the fractional remainder accumulating.
     const LONG raw = InterlockedExchange(&g_wheel_raw, 0);
     const LONG rem = raw % WHEEL_DELTA;
     if (rem) InterlockedAdd(&g_wheel_raw, rem);
     out->wheel = raw / WHEEL_DELTA;
-    out->visible = InterlockedCompareExchange(&g_visible, 0, 0) != 0;
 }
 
 void input_set_visible(bool v) {
@@ -261,6 +271,15 @@ void input_set_ui_rect(int x, int y, int w, int h) {
     InterlockedExchange(&g_rect[2], w);
     InterlockedExchange(&g_rect[3], h);
     InterlockedExchange(&g_rect_tick, (LONG)GetTickCount());
+}
+
+bool input_in_main_rect(int x, int y) { return in_rect(g_rect, x, y); }
+
+void input_set_aux_rect(int x, int y, int w, int h) {
+    InterlockedExchange(&g_aux[0], x);
+    InterlockedExchange(&g_aux[1], y);
+    InterlockedExchange(&g_aux[2], w);
+    InterlockedExchange(&g_aux[3], h);
 }
 
 }  // namespace fmk

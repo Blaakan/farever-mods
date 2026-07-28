@@ -52,8 +52,9 @@ bool nav_is_tracked(const char* key);
 bool nav_format_distance(const NavTarget* targets, int count,
                          char* out, int out_len);
 
-// Render thread: the HUD pill. Draw after the game frame, before the atlas
-// window so the window stacks above it.
+// Render thread: the waypoint frame. Draw before the atlas window so the
+// window stacks above it.
 void nav_draw(float screen_w, float screen_h);
+
 
 }  // namespace fmk

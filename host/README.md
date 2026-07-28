@@ -219,10 +219,18 @@ vaults, merchants — inverted from the game's own CastleDB).
 Sources with a fixed place - vault chests, dungeon bosses, merchants - carry
 world coordinates (from the POI table farever-minimap ships). The tooltip
 shows the distance and compass direction to the nearest one, and **clicking
-the item** toggles tracking: a small pill at the top of the screen keeps
-showing *name, distance, direction* and an arrow, while you travel, atlas
-open or not. Click again (or track something else) to stop. The tracked
-target survives restarts.
+the item** toggles tracking: a TomTom-style waypoint frame appears - a
+shaded arrow with the distance, the item and the destination stacked under
+it - and keeps pointing while you travel, atlas open or not. Click again
+(or track something else) to stop. The tracked target survives restarts.
+
+The frame is frameless over the world, the way a waypoint arrow should be.
+**Open the atlas (F8) to move it**: a border appears while the window is
+open, and you can drag the frame anywhere; its position persists. Tying
+dragging to the atlas being open means the frame never swallows a click
+during normal play. The arrow itself is two shaded facets split down a
+centre crease, which reads as three-dimensional without a mesh, a texture
+or a light.
 
 **The arrow is camera-relative**, like the game's own map marker
 (`ui.win.map.PlayerMarker` holds both a camera and a hero for exactly that

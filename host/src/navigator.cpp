@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "input.h"
 #include "navigator.h"
 #include "overlay.h"
 
@@ -47,6 +48,18 @@ double g_cam_dist = 0;      // camera-to-hero distance, diagnostics only
 
 std::wstring g_ini_path;
 volatile LONG g_dirty = 0;
+
+// Frame placement, persisted. INT_MIN means "never placed" - the first draw
+// centres it near the top, where a waypoint arrow is expected.
+constexpr LONG kUnplaced = (LONG)0x80000000;
+volatile LONG g_nav_x = kUnplaced, g_nav_y = kUnplaced;
+volatile LONG g_layout_dirty = 0;
+
+// Render-thread drag state.
+bool  g_dragging = false;
+float g_drag_dx = 0, g_drag_dy = 0;
+int   g_seen_clicks = 0;
+float g_last_rect[4] = {0, 0, 0, 0};
 
 struct Lock {
     Lock() { EnterCriticalSection(&g_cs); }
@@ -126,6 +139,11 @@ void nav_init() {
                                  nullptr))
             dst[0] = 0;
     };
+    g_nav_x = GetPrivateProfileIntW(L"navigator", L"x", kUnplaced,
+                                    g_ini_path.c_str());
+    g_nav_y = GetPrivateProfileIntW(L"navigator", L"y", kUnplaced,
+                                    g_ini_path.c_str());
+
     get(L"key", key, sizeof(key));
     if (!key[0]) return;
     get(L"name", name, sizeof(name));
@@ -175,6 +193,14 @@ void nav_tick() {
     put(L"key", key);
     put(L"name", name);
     put(L"targets", ser);
+
+    if (InterlockedExchange(&g_layout_dirty, 0)) {
+        wchar_t buf[32];
+        swprintf_s(buf, L"%d", (int)InterlockedCompareExchange(&g_nav_x, 0, 0));
+        WritePrivateProfileStringW(L"navigator", L"x", buf, g_ini_path.c_str());
+        swprintf_s(buf, L"%d", (int)InterlockedCompareExchange(&g_nav_y, 0, 0));
+        WritePrivateProfileStringW(L"navigator", L"y", buf, g_ini_path.c_str());
+    }
 }
 
 void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z) {
@@ -258,9 +284,72 @@ bool nav_format_distance(const NavTarget* targets, int count, char* out,
     return true;
 }
 
+// A chunky dart, drawn as two facets split down its centre line so the
+// lighter left and darker right catch the eye as a crease - the same trick
+// that makes TomTom's arrow read as three-dimensional without a mesh, a
+// texture or a light. `a` rotates it clockwise; 0 points straight up.
+static void draw_arrow_3d(float cx, float cy, float r, double a) {
+    const float s = (float)sin(a), c = (float)cos(a);
+    // Screen y grows downward, so this matrix turns clockwise on screen.
+    auto rot = [&](float x, float y, float* ox, float* oy) {
+        *ox = cx + (x * c - y * s) * r;
+        *oy = cy + (x * s + y * c) * r;
+    };
+
+    // Local outline, tip at the top, with a notched tail.
+    const float tip_x = 0.00f, tip_y = -1.00f;
+    const float lw_x = -0.78f, lw_y = 0.62f;
+    const float rw_x = 0.78f, rw_y = 0.62f;
+    const float nt_x = 0.00f, nt_y = 0.22f;    // tail notch
+    const float md_x = 0.00f, md_y = -0.10f;   // crease waist
+
+    struct P { float x, y; };
+    auto build = [&](float scale, float ox, float oy, P out[5]) {
+        const float pts[5][2] = {{tip_x, tip_y}, {lw_x, lw_y}, {rw_x, rw_y},
+                                 {nt_x, nt_y}, {md_x, md_y}};
+        for (int i = 0; i < 5; i++) {
+            float x, y;
+            rot(pts[i][0] * scale, pts[i][1] * scale, &x, &y);
+            out[i] = {x + ox, y + oy};
+        }
+    };
+
+    P o[5], p[5];
+    build(1.16f, 0, 1.5f, o);      // shadow: slightly larger, nudged down
+    build(1.00f, 0, 0, p);
+
+    const Color shadow{0.02f, 0.03f, 0.05f, 0.55f};
+    draw_triangle(o[0].x, o[0].y, o[1].x, o[1].y, o[3].x, o[3].y, shadow);
+    draw_triangle(o[0].x, o[0].y, o[3].x, o[3].y, o[2].x, o[2].y, shadow);
+
+    // Left facet catches the light, right facet falls away.
+    const Color lit{1.00f, 0.86f, 0.46f, 1.0f};
+    const Color dim{0.78f, 0.55f, 0.14f, 1.0f};
+    draw_triangle(p[0].x, p[0].y, p[1].x, p[1].y, p[4].x, p[4].y, lit);
+    draw_triangle(p[1].x, p[1].y, p[3].x, p[3].y, p[4].x, p[4].y, lit);
+    draw_triangle(p[0].x, p[0].y, p[4].x, p[4].y, p[2].x, p[2].y, dim);
+    draw_triangle(p[2].x, p[2].y, p[4].x, p[4].y, p[3].x, p[3].y, dim);
+}
+
+// Nothing tracked, or nothing drawn: the frame must stop claiming screen
+// space, or it goes on swallowing clicks in an area showing nothing.
+void nav_clear_frame() {
+    g_last_rect[2] = 0;
+    g_last_rect[3] = 0;
+    g_dragging = false;
+    input_set_aux_rect(0, 0, 0, 0);
+}
+
 void nav_draw(float screen_w, float screen_h) {
-    (void)screen_h;
     if (!g_cs_init) return;
+
+    // Sample input before any early exit, so the click counter stays in step
+    // even on frames that draw nothing - otherwise the click that starts a
+    // track would be seen as new here on the next frame and grab a drag.
+    InputState in;
+    input_peek(&in);
+    const bool clicked = in.clicks != g_seen_clicks;
+    g_seen_clicks = in.clicks;
 
     char name[96], where[64], label[96];
     bool have = false, fresh = false, used_camera = false;
@@ -268,31 +357,31 @@ void nav_draw(float screen_w, float screen_h) {
     double diag_target_b = 0, diag_cam_d = 0, diag_rz = 0, diag_cam_dist = 0;
     {
         Lock lk;
-        if (g_key.empty() || g_targets.empty()) return;
-        _snprintf_s(name, sizeof(name), _TRUNCATE, "%s", g_name.c_str());
-        fresh = pos_fresh_locked();
-        const NavTarget* t = fresh
-            ? nearest_locked(g_targets.data(), (int)g_targets.size())
-            : &g_targets[0];
-        _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
-        if (fresh) {
-            format_to_locked(*t, where, sizeof(where));
-            // One convention for both paths: how far clockwise the target
-            // sits from whatever is currently "forward". The arrow rotates
-            // clockwise for positive, so right reads right.
-            const double target_b = bearing(t->x - g_hx, t->y - g_hy);
-            if (g_cam_valid) {
-                // The screen faces along the camera's own view vector.
-                rel = target_b - bearing(g_view_dx, g_view_dy);
-                used_camera = true;
-            } else {
-                // Fallback: the hero's own facing, whose vector is
-                // (cos rotationZ, sin rotationZ) in world axes. That is the
-                // same relation farever-minimap's own example nav_arrow.lua
-                // uses, and it reduces to the arrow behaviour already
-                // confirmed in game.
-                rel = target_b - bearing(cos(g_rz), sin(g_rz));
-            }
+        if (!g_key.empty() && !g_targets.empty()) {
+            _snprintf_s(name, sizeof(name), _TRUNCATE, "%s", g_name.c_str());
+            fresh = pos_fresh_locked();
+            const NavTarget* t = fresh
+                ? nearest_locked(g_targets.data(), (int)g_targets.size())
+                : &g_targets[0];
+            _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
+            if (fresh) {
+                format_to_locked(*t, where, sizeof(where));
+                // One convention for both paths: how far clockwise the target
+                // sits from whatever is currently "forward". The arrow rotates
+                // clockwise for positive, so right reads right.
+                const double target_b = bearing(t->x - g_hx, t->y - g_hy);
+                if (g_cam_valid) {
+                    // The screen faces along the camera's own view vector.
+                    rel = target_b - bearing(g_view_dx, g_view_dy);
+                    used_camera = true;
+                } else {
+                    // Fallback: the hero's own facing, whose vector is
+                    // (cos rotationZ, sin rotationZ) in world axes. That is the
+                    // same relation farever-minimap's own example nav_arrow.lua
+                    // uses, and it reduces to the arrow behaviour already
+                    // confirmed in game.
+                    rel = target_b - bearing(cos(g_rz), sin(g_rz));
+        }
         } else {
             _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
         }
@@ -301,8 +390,12 @@ void nav_draw(float screen_w, float screen_h) {
         diag_rz = g_rz;
         diag_cam_dist = g_cam_dist;
         have = true;
+        }
     }
-    if (!have) return;
+    if (!have) {
+        nav_clear_frame();
+        return;
+    }
 
     // One line whenever the source changes, outside the lock. If the arrow
     // ever points wrongly, this says which path drew it and with what
@@ -318,35 +411,98 @@ void nav_draw(float screen_w, float screen_h) {
                  diag_rz * 57.2957795, diag_cam_dist, rel * 57.2957795);
     }
 
-    char line[220];
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "%s  %s  (%s)", name, where,
-                label);
-    const float size = 14;
-    const float tw = measure_text(size, line);
+    // --- layout: arrow above, distance under it, then what and where ------
+    const float kArrowR = 34;
+    const float kDistSz = 22, kNameSz = 14, kLabelSz = 12;
     const float pad = 10;
-    const float arrow_w = fresh ? 24.0f : 0.0f;
-    const float w = tw + 2 * pad + arrow_w;
-    const float h = 26;
-    const float x = (screen_w - w) * 0.5f;
-    const float y = 14;
 
-    draw_rect(x, y, w, h, {0.05f, 0.06f, 0.09f, 0.85f});
-    draw_rect_outline(x, y, w, h, 1.0f, {0.35f, 0.75f, 1.0f, 0.7f});
+    const float dist_w = measure_text(kDistSz, where);
+    const float name_w = measure_text(kNameSz, name);
+    const float label_w = measure_text(kLabelSz, label);
+    float w = dist_w;
+    if (name_w > w) w = name_w;
+    if (label_w > w) w = label_w;
+    if (kArrowR * 2.4f > w) w = kArrowR * 2.4f;
+    w += 2 * pad;
+    const float h = pad + kArrowR * 2.1f + 6 + kDistSz + 4 + kNameSz + 3 +
+                    kLabelSz + pad;
+
+    // Placement: persisted, defaulting to just under the top edge, centred -
+    // where a waypoint arrow is expected before anyone moves it.
+    const LONG saved_x = InterlockedCompareExchange(&g_nav_x, 0, 0);
+    const LONG saved_y = InterlockedCompareExchange(&g_nav_y, 0, 0);
+    float x = (saved_x == kUnplaced) ? (screen_w - w) * 0.5f : (float)saved_x;
+    float y = (saved_y == kUnplaced) ? 64.0f : (float)saved_y;
+
+    // Dragging is only possible while the atlas window is open. That keeps
+    // the frame from ever swallowing a click during normal play, and the
+    // visible border doubles as the cue that it can be moved right now.
+    const bool movable = in.visible;
+
+    if (movable) {
+        // Yield anything the atlas window is covering: it draws on top, so
+        // it must receive the click too.
+        const bool hit = clicked && in.click_x >= x && in.click_x < x + w &&
+                         in.click_y >= y && in.click_y < y + h &&
+                         !input_in_main_rect(in.click_x, in.click_y);
+        if (hit) {
+            g_dragging = true;
+            g_drag_dx = in.click_x - x;
+            g_drag_dy = in.click_y - y;
+        }
+        if (g_dragging) {
+            if (in.lbutton) {
+                x = in.mouse_x - g_drag_dx;
+                y = in.mouse_y - g_drag_dy;
+            } else {
+                g_dragging = false;
+                InterlockedExchange(&g_layout_dirty, 1);
+                InterlockedExchange(&g_dirty, 1);
+            }
+        }
+    } else {
+        g_dragging = false;
+    }
+
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > screen_w - w) x = screen_w - w;
+    if (y > screen_h - h) y = screen_h - h;
+    InterlockedExchange(&g_nav_x, (LONG)x);
+    InterlockedExchange(&g_nav_y, (LONG)y);
+
+    g_last_rect[0] = x;
+    g_last_rect[1] = y;
+    g_last_rect[2] = w;
+    g_last_rect[3] = h;
+    input_set_aux_rect(movable ? (int)x : 0, movable ? (int)y : 0,
+                       movable ? (int)w : 0, movable ? (int)h : 0);
+
+    // Frameless while playing, like TomTom - only the arrow and its text
+    // sit over the world. The panel appears when it can be dragged.
+    if (movable) {
+        draw_rect(x, y, w, h, {0.05f, 0.06f, 0.09f, 0.80f});
+        draw_rect_outline(x, y, w, h, 1.0f, {0.35f, 0.75f, 1.0f, 0.8f});
+    }
+
+    const float cx = x + w * 0.5f;
+    float yy = y + pad;
 
     if (fresh) {
-        // Arrow rotated by `rel`: 0 = straight up = dead ahead. Screen y
-        // grows downward, so "up" is (sin, -cos).
-        const float cx = x + pad + 7, cy = y + h * 0.5f;
-        const float s = (float)sin(rel), c = (float)cos(rel);
-        const float dx = s, dy = -c;          // forward
-        const float px = c, py = s;           // right-hand perpendicular
-        draw_triangle(cx + dx * 10, cy + dy * 10,
-                      cx - dx * 5 + px * 6, cy - dy * 5 + py * 6,
-                      cx - dx * 5 - px * 6, cy - dy * 5 - py * 6,
-                      {1.0f, 0.78f, 0.30f, 1.0f});
+        draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
+    } else {
+        // No fix on the hero yet: show the arrow greyed and pointing up
+        // rather than pointing somewhere untrue.
+        draw_arrow_3d(cx, yy + kArrowR, kArrowR * 0.9f, 0);
     }
-    draw_text(x + pad + arrow_w, y + 4, size, {0.92f, 0.93f, 0.96f, 1.0f},
-              line);
+    yy += kArrowR * 2.1f + 6;
+
+    draw_text(cx - dist_w * 0.5f, yy, kDistSz, {1.0f, 1.0f, 1.0f, 1.0f}, where);
+    yy += kDistSz + 4;
+    draw_text(cx - name_w * 0.5f, yy, kNameSz, {0.86f, 0.89f, 0.95f, 1.0f}, name);
+    yy += kNameSz + 3;
+    draw_text(cx - label_w * 0.5f, yy, kLabelSz, {0.55f, 0.60f, 0.70f, 1.0f},
+              label);
 }
 
 }  // namespace fmk
