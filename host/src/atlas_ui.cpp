@@ -332,10 +332,14 @@ bool load_tsv(const std::wstring& path) {
         for (int i = g_cat_begin[c]; i < g_cat_begin[c + 1]; i++)
             g_entry_by_id[c][g_entries[i].id] = i;
 
-    host_log("atlas_ui: %zu entries (%d/%d/%d/%d/%d/%d)", g_entries.size(),
-             g_cat_begin[1] - g_cat_begin[0], g_cat_begin[2] - g_cat_begin[1],
-             g_cat_begin[3] - g_cat_begin[2], g_cat_begin[4] - g_cat_begin[3],
-             g_cat_begin[5] - g_cat_begin[4], g_cat_begin[6] - g_cat_begin[5]);
+    std::string counts;
+    for (int c = 0; c < kCats; c++) {
+        char one[32];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s=%d", counts.empty() ? "" : " ",
+                    kCatTsv[c], g_cat_begin[c + 1] - g_cat_begin[c]);
+        counts += one;
+    }
+    host_log("atlas_ui: %zu entries (%s)", g_entries.size(), counts.c_str());
     return true;
 }
 

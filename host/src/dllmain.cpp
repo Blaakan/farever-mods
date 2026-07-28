@@ -332,11 +332,16 @@ DWORD WINAPI worker(LPVOID) {
         // is reached through App.inst rather than by scanning. Everything
         // downstream is then a pointer walk - including finding the hero
         // again after a zone change or a character swap.
-        if (!app_found && app_tries < 20) {
+        if (!app_found && app_tries < 40) {
             app_tries++;
-            app_found = fmk::reader_locate_app(false);
+            // App.inst is null until the game builds its application, which
+            // happens well before the main menu but not instantly. Keep to
+            // the free path for the first half-minute or so; only then pay
+            // for a sweep.
+            const bool allow_scan = app_tries > 10;
+            app_found = fmk::reader_locate_app(allow_scan);
             if (!app_found) {
-                worker_sleep(3);   // still loading; try again shortly
+                worker_sleep(3);
                 continue;
             }
         }

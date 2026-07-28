@@ -76,10 +76,12 @@ bool reader_read_inventories(Inventories* out);
 // 20Hz from the pose thread.
 bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z);
 
-// Locates GameApp, the application singleton, which owns the game camera.
-// One scan, cached and revalidated; call only after the hero is found, so
-// the scan happens in-world rather than during a loading screen.
-bool reader_locate_app(bool force_rescan);
+// Locates GameApp, the application singleton, which owns the game camera
+// and the hero. Cheap when it works: App.inst is a static, so no scan is
+// involved. `allow_scan` permits the ~8GB fallback sweep - pass false while
+// the game is still starting, since App.inst is simply not set yet and
+// waiting a moment costs nothing.
+bool reader_locate_app(bool allow_scan);
 
 // Where the render camera sits and what it looks at, in world space:
 // GameApp.gameCamera -> BaseCamera.scene -> Scene.camera -> h3d.Camera's

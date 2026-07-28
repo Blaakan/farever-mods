@@ -214,16 +214,29 @@ bool reader_read_unit_progress(
     for (const auto& e : entries)
         out->push_back({e.key, dyn_as_int(e.value, 0)});
 
-    // One line the first time through: the value type is a generic's erased
-    // parameter, so the only way to know whether these are kill counts or
-    // state codes is to look at what actually came back.
+    // One line the first time through. The value type is a generic's erased
+    // parameter, so the only way to learn what these numbers mean is to look
+    // at what came back - including the runtime tag, which separates "the
+    // count really is zero" from "this is not an int and the decoder is
+    // handing back its fallback".
     static bool once = true;
-    if (once && !out->empty()) {
+    if (once && !entries.empty()) {
         once = false;
-        host_log("codex: %zu units with progress, e.g. %s=%d %s=%d",
-                 out->size(), (*out)[0].first.c_str(), (*out)[0].second,
-                 out->size() > 1 ? (*out)[1].first.c_str() : "",
-                 out->size() > 1 ? (*out)[1].second : 0);
+        std::string sample;
+        int32_t nonzero = 0;
+        for (const auto& kv : *out) if (kv.second) nonzero++;
+        for (size_t i = 0; i < entries.size() && i < 3; i++) {
+            void* v = entries[i].value;
+            void* t = v ? read_ptr(v, 0) : nullptr;
+            char one[160];
+            _snprintf_s(one, sizeof(one), _TRUNCATE, " %s=%d(kind %d,%s)",
+                        entries[i].key.c_str(), (*out)[i].second,
+                        t ? read_i32(t, hlrt::type_kind) : -1,
+                        v ? obj_class_name(v).c_str() : "<null>");
+            sample += one;
+        }
+        host_log("codex: %zu units, %d with a non-zero value:%s", out->size(),
+                 nonzero, sample.c_str());
     }
     return true;
 }
@@ -540,36 +553,52 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
 // pass over ~8GB of private memory; this is four dereferences.
 void* find_app_via_statics() {
     if (!g_app_type) return nullptr;
+
+    // GameApp's own statics do not hold `inst` - it is declared on App, the
+    // superclass - so the walk steps up one level first.
     void* tobj = read_ptr(g_app_type, hlrt::type_obj);
-    if (!tobj) return nullptr;
-    void* super = read_ptr(tobj, hlrt::obj_super);        // hl_type* of App
-    if (!super) return nullptr;
-    void* super_obj = read_ptr(super, hlrt::type_obj);
-    if (!super_obj) return nullptr;
-    void* slot = read_ptr(super_obj, hlrt::obj_global);   // void** global
-    if (!slot) return nullptr;
-    void* statics = read_ptr(slot, 0);                    // the $App object
-    if (!statics) return nullptr;
-    void* inst = read_ptr(statics, off::_App::inst);
-    return obj_is(inst, "GameApp") ? inst : nullptr;
+    void* super = tobj ? read_ptr(tobj, hlrt::obj_super) : nullptr;
+    void* super_obj = super ? read_ptr(super, hlrt::type_obj) : nullptr;
+    void* slot = super_obj ? read_ptr(super_obj, hlrt::obj_global) : nullptr;
+    void* statics = slot ? read_ptr(slot, 0) : nullptr;
+    void* inst = statics ? read_ptr(statics, off::_App::inst) : nullptr;
+    if (obj_is(inst, "GameApp")) return inst;
+
+    // Name the link that broke rather than silently falling back to a scan
+    // that costs ~8GB of reads. Logged once; a null `inst` early on is
+    // simply the game not having built its App yet, which is why the caller
+    // retries before giving up on this path.
+    static bool diag = true;
+    if (diag) {
+        diag = false;
+        host_log("app: statics walk - super=%s global=%p statics=%s inst=%s",
+                 super ? obj_class_name_of_type(super).c_str() : "<null>",
+                 slot, statics ? obj_class_name(statics).c_str() : "<null>",
+                 inst ? obj_class_name(inst).c_str() : "<null>");
+    }
+    return nullptr;
 }
 
-bool reader_locate_app(bool force_rescan) {
+bool reader_locate_app(bool allow_scan) {
     if (!g_app_type) {
         g_app_type = find_type_by_name("GameApp");
         if (!g_app_type) return false;
     }
-    if (!force_rescan && g_app && obj_is(g_app, "GameApp")) return true;
+    if (g_app && obj_is(g_app, "GameApp")) return true;
 
     g_app = find_app_via_statics();
     if (g_app) {
         host_log("reader: GameApp %p (via App.inst)", g_app);
         return true;
     }
+    // App.inst is null until the game constructs its application object, so
+    // an early miss is expected; the caller keeps trying this cheap path
+    // before permitting the expensive one.
+    if (!allow_scan) return false;
 
     // Fallback for a build where that walk does not hold: find the instance
-    // the slow way, validated by two of its own fields.
-    host_log("reader: App.inst walk failed - scanning for GameApp");
+    // the slow way, validated by one of its own fields.
+    host_log("reader: App.inst still unavailable - scanning for GameApp");
     g_app = find_instance_of_type_where(
         g_app_type,
         [](void* cand, void*) -> bool {
