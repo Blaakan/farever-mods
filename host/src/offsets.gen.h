@@ -22,7 +22,26 @@ namespace ent_Hero {
     constexpr uint32_t autoTarget = 0x4d8;  // I64
     constexpr uint32_t weaponInHand = 0x538;  // OBJ : st.item.Weapon
     constexpr uint32_t loadout = 0x4c8;  // OBJ : st.Loadout
+    constexpr uint32_t specialization = 0x4c0;  // OBJ : st.player.HeroSpecialization
 }  // namespace ent_Hero
+
+// st.player.HeroSpecialization  (sizeof=192, extends st.DBBaseState)
+namespace st_player_HeroSpecialization {
+    constexpr uint32_t SIZEOF = 192;
+    constexpr uint32_t jobs = 0x78;  // OBJ : hxbit.ArrayProxyData
+    constexpr uint32_t talents = 0x80;  // OBJ : hxbit.MapData
+    constexpr uint32_t skillMasteries = 0x88;  // OBJ : hxbit.ArrayProxyData
+}  // namespace st_player_HeroSpecialization
+
+// hxbit.ObjProxy_3327ea72931d811ba796c031db6ffed0  (sizeof=80)
+namespace hxbit_ObjProxy_3327ea72931d811ba796c031db6ffed0 {
+    constexpr uint32_t SIZEOF = 80;
+    constexpr uint32_t job = 0x20;  // OBJ : String
+    constexpr uint32_t level = 0x38;  // I32
+    constexpr uint32_t knowledge = 0x28;  // F64
+    constexpr uint32_t learnedCrafts = 0x30;  // OBJ : hxbit.ArrayProxyData
+    constexpr uint32_t completedCrafts = 0x18;  // OBJ : hxbit.MapData
+}  // namespace hxbit_ObjProxy_3327ea72931d811ba796c031db6ffed0
 
 // ent.Unit  (sizeof=1208, extends ent.GameObject)
 namespace ent_Unit {

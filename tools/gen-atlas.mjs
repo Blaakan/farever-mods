@@ -148,7 +148,18 @@ function tagsFor(item, category) {
       tags.push(`type:${TRINKET_LABEL.get(item.type) || item.type}`);
       break;
     case 'weapons':  tags.push(`type:${item.type}`); break;
-    case 'recipes':
+    case 'recipes': {
+      // Which job can use it, and the craft the game will record as known.
+      const craft = craftByRecipe.get(item.id);
+      if (craft) {
+        if (craft.job) tags.push(`job:${craft.job}`);
+        if (craft.level) tags.push(`tier:Level ${craft.level}`);
+        tags.push(`craft:${craft.item}`);
+      } else {
+        tags.push('job:Unknown');
+      }
+      break;
+    }
     case 'consumables':
     case 'materials':
     case 'augments':
@@ -258,6 +269,14 @@ for (const c of crafts) {
   if (c.item) craftByItem.set(c.item, c);
 }
 
+// A recipe item teaches one craft, and the game records that craft by the
+// id of the item it PRODUCES - not by the recipe's own id. `unlockSource`
+// is the link: the craft row names the recipe that unlocks it.
+const craftByRecipe = new Map();
+for (const c of crafts) {
+  if (c.unlockSource && c.item) craftByRecipe.set(c.unlockSource, c);
+}
+
 // --- the world, parsed --------------------------------------------------
 //
 // One pass over the map prefabs yields everything positional the atlas
@@ -335,6 +354,15 @@ try {
 
 function acquisitionOf(itemId) {
   const parts = [];
+  // A recipe's own line is about what it teaches, not how it is made.
+  const taught = craftByRecipe.get(itemId);
+  if (taught) {
+    const made = itemById.get(taught.item);
+    parts.push(`Teaches: ${cleanText(made?.texts?.name || taught.item)}` +
+               `${taught.job ? ` (${taught.job}` : ''}` +
+               `${taught.job && taught.level ? ` lvl ${taught.level}` : ''}` +
+               `${taught.job ? ')' : ''}`);
+  }
   const craft = craftByItem.get(itemId);
   if (craft) {
     let s = `Craft: ${craft.job || '?'}${craft.level ? ` (lvl ${craft.level})` : ''}`;

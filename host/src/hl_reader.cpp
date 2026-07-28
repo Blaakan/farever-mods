@@ -182,6 +182,63 @@ void* reader_hero() {
     return (h && obj_is(h, "ent.Hero")) ? h : nullptr;
 }
 
+bool reader_read_jobs(std::vector<JobState>* out) {
+    out->clear();
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* spec = read_ptr(hero, off::ent_Hero::specialization);
+    if (!obj_is(spec, "st.player.HeroSpecialization")) return false;
+
+    void* jobs = read_ptr(spec, off::st_player_HeroSpecialization::jobs);
+    void* elems = nullptr;
+    int32_t count = 0;
+    if (!jobs || !read_proxy_array(jobs, &elems, &count)) return false;
+    if (count < 0 || count > 32) return false;
+
+    namespace job_off = off::hxbit_ObjProxy_3327ea72931d811ba796c031db6ffed0;
+    for (int32_t i = 0; i < count; i++) {
+        void* entry = read_ptr(elems, (uint32_t)(i * 8));
+        if (!entry) continue;
+
+        JobState js;
+        js.job = read_hx_string(read_ptr(entry, job_off::job));
+        // The job name is the identity check: the proxy's own class name is
+        // a hash of the structure's shape and would move with any patch to
+        // it, so validating against that would be brittle.
+        if (js.job.empty() || js.job.size() > 32) continue;
+        js.level = read_i32(entry, job_off::level);
+        read(entry, job_off::knowledge, &js.knowledge);
+        if (js.level < 0 || js.level > 200) js.level = 0;
+
+        void* learned = read_ptr(entry, job_off::learnedCrafts);
+        void* lelems = nullptr;
+        int32_t lcount = 0;
+        if (learned && read_proxy_array(learned, &lelems, &lcount) &&
+            lcount >= 0 && lcount <= 4096) {
+            js.learned.reserve((size_t)lcount);
+            for (int32_t k = 0; k < lcount; k++) {
+                std::string craft = read_hx_string(read_ptr(lelems, (uint32_t)(k * 8)));
+                if (!craft.empty()) js.learned.push_back(std::move(craft));
+            }
+        }
+        out->push_back(std::move(js));
+    }
+
+    static bool once = true;
+    if (once && !out->empty()) {
+        once = false;
+        std::string s;
+        for (const auto& j : *out) {
+            char one[96];
+            _snprintf_s(one, sizeof(one), _TRUNCATE, " %s(lv%d,%zu crafts)",
+                        j.job.c_str(), j.level, j.learned.size());
+            s += one;
+        }
+        host_log("jobs:%s", s.c_str());
+    }
+    return true;
+}
+
 bool reader_read_unit_progress(
     std::vector<std::pair<std::string, int32_t>>* out) {
     out->clear();

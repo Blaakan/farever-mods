@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -52,6 +53,7 @@ const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
 // slot (4..10), and the bestiary, whose progress comes from the codex
 // rather than from anything you carry (11).
 constexpr int kFirstItemCat = 4;
+constexpr int kRecipesCat = 8;
 constexpr int kCreaturesCat = 11;
 
 struct Entry {
@@ -108,6 +110,10 @@ struct OwnSnap {
     std::unordered_map<std::string, Owned> byId[kCats];
     int owned_count[kCats]{};
     std::string character;
+    // craft id -> the characters who know it. Recipes are learned per
+    // character, so "known" is a question of by whom.
+    std::unordered_map<std::string, std::set<std::string>> learned_by;
+    std::unordered_map<std::string, int> job_level;
 };
 
 // Aggregates always update, even when the per-stack list is full: the total,
@@ -187,6 +193,14 @@ void toggle_filter(int cat, const std::string& tag) {
 // A facet is the part before the colon. Selections inside one facet widen
 // the result (Chest or Legs); selections across facets narrow it (a Chest
 // piece that a Mage can wear).
+// The value of a tag with the given prefix, e.g. tag_value(e, "craft:").
+std::string tag_value(const Entry& e, const char* prefix) {
+    const size_t n = strlen(prefix);
+    for (const auto& t : e.tags)
+        if (t.compare(0, n, prefix) == 0) return t.substr(n);
+    return {};
+}
+
 std::string facet_of(const std::string& tag) {
     const size_t c = tag.find(':');
     return c == std::string::npos ? tag : tag.substr(0, c);
@@ -640,7 +654,8 @@ Color copy_color(const OwnedCopy& c, const Entry& e) {
 }
 
 void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
-                  float mx, float my, float screen_w, float screen_h) {
+                  const OwnSnap* snap, float mx, float my, float screen_w,
+                  float screen_h) {
     const float tw = 340;
     const float pad = 10;
     const float name_sz = 15, body_sz = 13, small_sz = 12;
@@ -703,8 +718,31 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     // stays rarity-free and each stack line carries its own. Collection
     // unlocks have no stack lines - for them the header keeps the rarity,
     // or hovering an owned mount would never name it.
-    char status[96];
-    if (e.cat == kCreaturesCat) {
+    char status[160];
+    if (e.cat == kRecipesCat) {
+        // Known by whom is the whole question for a recipe.
+        std::string who;
+        if (snap) {
+            const std::string craft = tag_value(e, "craft:");
+            auto f = craft.empty() ? snap->learned_by.end()
+                                   : snap->learned_by.find(craft);
+            if (f != snap->learned_by.end()) {
+                for (const auto& name : f->second) {
+                    if (!who.empty()) who += ", ";
+                    who += name;
+                }
+            }
+        }
+        if (!who.empty())
+            _snprintf_s(status, sizeof(status), _TRUNCATE, "Known by %s",
+                        who.c_str());
+        else
+            _snprintf_s(status, sizeof(status), _TRUNCATE,
+                        "Not learned by any character seen");
+        draw_text(tx + pad, yy, small_sz,
+                  who.empty() ? kTextDim : Color{0.45f, 0.85f, 0.45f, 1.0f},
+                  status);
+    } else if (e.cat == kCreaturesCat) {
         // The bestiary counts encounters, not possessions.
         if (owned)
             sprintf_s(status, "Encountered - codex progress %d", owned->total);
@@ -802,9 +840,67 @@ bool atlas_ui_init() {
     return true;
 }
 
+// Recipes are per-character, so the ones a character knows are written out
+// the way inventories are - that is how the atlas can say "known by Emsei"
+// while you are playing someone else.
+void write_jobs_json(const std::vector<JobState>& jobs,
+                     const std::string& character) {
+    if (jobs.empty() || character.empty()) return;
+    std::wstring path = exe_dir();
+    if (path.empty()) return;
+    std::string safe = sanitize_name(character);
+    if (safe.empty()) return;
+    path += L"farever-jobs-" + std::wstring(safe.begin(), safe.end()) + L".json";
+
+    std::string out = "{\n  \"character\": \"" + safe + "\",\n  \"jobs\": [";
+    for (size_t i = 0; i < jobs.size(); i++) {
+        char head[128];
+        _snprintf_s(head, sizeof(head), _TRUNCATE,
+                    "%s\n    {\"job\":\"%s\",\"level\":%d,\"learned\":[",
+                    i ? "," : "", jobs[i].job.c_str(), jobs[i].level);
+        out += head;
+        for (size_t k = 0; k < jobs[i].learned.size(); k++) {
+            if (k) out += ",";
+            out += "\"" + jobs[i].learned[k] + "\"";
+        }
+        out += "]}";
+    }
+    out += "\n  ]\n}\n";
+
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, out.data(), (DWORD)out.size(), &written, nullptr);
+    CloseHandle(f);
+}
+
+// Pulls "learned" lists out of a farever-jobs-*.json this host wrote.
+void scan_jobs_json(const std::string& text, const std::string& who,
+                    OwnSnap* snap) {
+    size_t pos = 0;
+    while ((pos = text.find("\"learned\":[", pos)) != std::string::npos) {
+        pos += 11;
+        const size_t end = text.find(']', pos);
+        if (end == std::string::npos) break;
+        size_t p = pos;
+        while (p < end) {
+            const size_t a = text.find('"', p);
+            if (a == std::string::npos || a > end) break;
+            const size_t b = text.find('"', a + 1);
+            if (b == std::string::npos || b > end) break;
+            snap->learned_by[text.substr(a + 1, b - a - 1)].insert(who);
+            p = b + 1;
+        }
+        pos = end;
+    }
+}
+
 void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<std::pair<std::string, int32_t>>&
-                         unit_progress) {
+                         unit_progress,
+                     const std::vector<JobState>& jobs) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
     auto snap = std::make_shared<OwnSnap>();
@@ -833,6 +929,37 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
         add_items(inv.bags, kBags, who);
     }
 
+    // Crafting: the live character's jobs, then every other character's as
+    // this host last saw them.
+    for (const auto& j : jobs) {
+        snap->job_level[j.job] = j.level;
+        for (const auto& craft : j.learned)
+            snap->learned_by[craft].insert(snap->character);
+    }
+    write_jobs_json(jobs, snap->character);
+    {
+        const std::string skip = sanitize_name(snap->character);
+        std::wstring dir = exe_dir();
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"farever-jobs-*.json").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                std::string text;
+                if (!read_file(dir + fd.cFileName, &text)) continue;
+                // farever-jobs-<name>.json
+                std::wstring wname(fd.cFileName);
+                std::string who(wname.begin(), wname.end());
+                const size_t dash = who.find("jobs-");
+                const size_t dot = who.rfind(".json");
+                if (dash == std::string::npos || dot == std::string::npos) continue;
+                who = who.substr(dash + 5, dot - dash - 5);
+                if (who == skip || who.empty()) continue;
+                scan_jobs_json(text, who, snap.get());
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
     // The bestiary: an entry in the codex map means encountered, and the
     // value is how far along that creature's progress stands.
     for (const auto& kv : unit_progress) {
@@ -855,6 +982,18 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
                 scan_inventory_json(text, skip, snap.get());
         } while (FindNextFileW(h, &fd));
         FindClose(h);
+    }
+
+    // A recipe counts as owned when the craft it teaches is known by
+    // someone - having the paper in a bag is not the point of the page.
+    for (int i = g_cat_begin[kRecipesCat]; i < g_cat_begin[kRecipesCat + 1]; i++) {
+        const Entry& e = g_entries[i];
+        const std::string craft = tag_value(e, "craft:");
+        if (craft.empty()) continue;
+        auto f = snap->learned_by.find(craft);
+        if (f == snap->learned_by.end() || f->second.empty()) continue;
+        Owned& o = snap->byId[kRecipesCat][e.id];
+        o.unlocked = true;
     }
 
     // Finalize aggregates, then count owned ids that exist in the database.
@@ -1277,7 +1416,7 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         char key[192];
         _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s", kCatTsv[e.cat],
                     e.id.c_str());
-        draw_tooltip(e, owned, key, (float)in.mouse_x, (float)in.mouse_y,
+        draw_tooltip(e, owned, key, own.get(), (float)in.mouse_x, (float)in.mouse_y,
                      screen_w, screen_h);
     }
 

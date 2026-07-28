@@ -62,6 +62,22 @@ struct Inventories {
 bool reader_locate_hero(bool force_rescan);
 void* reader_hero();
 
+// One crafting job as the logged-in character has it. `learned` holds craft
+// ids, which are the *produced* item ("HonedCopperPlate"), not the recipe
+// item that taught it. The list mixes crafts unlocked automatically by job
+// level with those learned from a recipe; telling them apart is the atlas
+// data's job, since only it knows which crafts are recipe-gated.
+struct JobState {
+    std::string job;
+    int32_t level = 0;
+    double knowledge = 0;
+    std::vector<std::string> learned;
+};
+
+// The crafting jobs of the character currently logged in. Per-character:
+// another character on the same account knows different recipes.
+bool reader_read_jobs(std::vector<JobState>* out);
+
 // Codex progress per creature: unit id -> the number the game tracks for it
 // (kill count / progress points). A creature absent from the map has never
 // been encountered. Empty when the walk cannot be trusted.

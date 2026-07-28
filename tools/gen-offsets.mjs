@@ -53,7 +53,16 @@ const types = JSON.parse(readFileSync(typesPath, 'utf8'));
 // a promise the reader depends on, and a missing one should fail the build
 // rather than surface as a wild pointer at runtime.
 const WANT = [
-  ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand', 'loadout']],
+  ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand',
+                'loadout', 'specialization']],
+  // Crafting. Jobs are per-character, and each carries the crafts that
+  // character knows. The proxy class name is a hash of the anonymous
+  // structure's shape, so a patch that changes a field of that struct
+  // renames the class - at which point this generator fails loudly rather
+  // than the reader walking a stale layout.
+  ['st.player.HeroSpecialization', ['jobs', 'talents', 'skillMasteries']],
+  ['hxbit.ObjProxy_3327ea72931d811ba796c031db6ffed0',
+   ['job', 'level', 'knowledge', 'learnedCrafts', 'completedCrafts']],
   ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin']],
   // World position and facing, for the loot tracker's distance/arrow readout.
   ['ent.GameObject', ['posx', 'posy', 'posz', 'rotationZ']],

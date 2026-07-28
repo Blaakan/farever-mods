@@ -392,9 +392,13 @@ DWORD WINAPI worker(LPVOID) {
                 std::vector<std::pair<std::string, int32_t>> units;
                 fmk::reader_read_unit_progress(&units);
 
+                // Crafting jobs, for which recipes this character knows.
+                std::vector<fmk::JobState> jobs;
+                fmk::reader_read_jobs(&jobs);
+
                 // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
-                fmk::atlas_ui_update(c, inv, units);
+                fmk::atlas_ui_update(c, inv, units, jobs);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }

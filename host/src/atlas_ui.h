@@ -30,7 +30,8 @@ bool atlas_ui_init();
 // game tracks for it, absent meaning never encountered.
 void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<std::pair<std::string, int32_t>>&
-                         unit_progress);
+                         unit_progress,
+                     const std::vector<JobState>& jobs);
 
 // Pose thread: whether a character is actually in the world. Going false
 // (main menu, logout, character select) drops the ownership snapshot and
