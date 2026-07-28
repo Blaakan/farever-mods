@@ -29,6 +29,7 @@
 #include "input.h"
 #include "navigator.h"
 #include "overlay.h"
+#include "routes.h"
 
 namespace fmk {
 
@@ -55,6 +56,13 @@ const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
 constexpr int kFirstItemCat = 4;
 constexpr int kRecipesCat = 8;
 constexpr int kCreaturesCat = 11;
+
+// One more tab than there are categories. Routes are not a collection of
+// anything the account owns, so they have no entries, no ownership and no
+// grid - the tab strip is simply the window's navigation, and the routes
+// page draws itself into the same content band (routes.cpp).
+constexpr int kRoutesTab = kCats;
+constexpr int kTabs = kCats + 1;
 
 struct Entry {
     std::string id, name, desc;
@@ -696,7 +704,8 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     th += copy_lines.size() * 16.0f;
     if (!desc_lines.empty()) th += 6 + desc_lines.size() * 16.0f;
     if (!acq_lines.empty()) th += 6 + 16 /*header*/ + acq_lines.size() * 16.0f;
-    if (!e.targets.empty()) th += 6 + 16 + (track_dist[0] ? 16.0f : 0);
+    // Two hint lines - track, and add-to-route - plus the live distance.
+    if (!e.targets.empty()) th += 6 + 16 + 16 + (track_dist[0] ? 16.0f : 0);
     th += 4 + 14 /*id line*/ + pad;
 
     float tx = mx + 18, ty = my + 18;
@@ -814,6 +823,9 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
                   tracked ? "Tracking - click to stop"
                           : "Click to track this location");
         yy += 16;
+        draw_text(tx + pad, yy, small_sz, {0.45f, 0.50f, 0.60f, 1.0f},
+                  "Ctrl+click: add to route   Shift: add first");
+        yy += 16;
     }
     yy += 4;
     draw_text(tx + pad, yy, 11, kTextFaint, e.id.c_str());
@@ -840,7 +852,7 @@ bool atlas_ui_init() {
     g_win_x = GetPrivateProfileIntW(L"atlas", L"x", 140, g_ini_path.c_str());
     g_win_y = GetPrivateProfileIntW(L"atlas", L"y", 110, g_ini_path.c_str());
     LONG tab = GetPrivateProfileIntW(L"atlas", L"tab", 0, g_ini_path.c_str());
-    g_tab = (tab >= 0 && tab < kCats) ? tab : 0;
+    g_tab = (tab >= 0 && tab < kTabs) ? tab : 0;
 
     g_ready_tick = GetTickCount();
     InterlockedExchange(&g_loaded, 1);
@@ -1130,7 +1142,7 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     input_set_ui_rect((int)wx, (int)wy, (int)win_w, (int)win_h);
 
     int tab = (int)InterlockedCompareExchange(&g_tab, 0, 0);
-    if (tab < 0 || tab >= kCats) tab = 0;
+    if (tab < 0 || tab >= kTabs) tab = 0;
 
     // --- chrome -------------------------------------------------------------
     draw_rect(wx, wy, win_w, win_h, kBg);
@@ -1167,18 +1179,22 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     // below starts wherever it ends.
     const float tab_row_h = kTabsH - 6;
     const float tab_area_w = win_w - 12;
-    char labels[kCats][64];
-    float tab_bx[kCats], tab_by[kCats], tab_bw[kCats];
+    char labels[kTabs][64];
+    float tab_bx[kTabs], tab_by[kTabs], tab_bw[kTabs];
     int tab_rows = 1;
     {
         float lx = 0, ly = 0;
-        for (int c = 0; c < kCats; c++) {
-            const int total = g_cat_begin[c + 1] - g_cat_begin[c];
-            if (own)
-                sprintf_s(labels[c], "%s %d/%d", kCatNames[c],
-                          own->owned_count[c], total);
-            else
-                sprintf_s(labels[c], "%s %d", kCatNames[c], total);
+        for (int c = 0; c < kTabs; c++) {
+            if (c == kRoutesTab) {
+                sprintf_s(labels[c], "Routes %d", routes_count());
+            } else {
+                const int total = g_cat_begin[c + 1] - g_cat_begin[c];
+                if (own)
+                    sprintf_s(labels[c], "%s %d/%d", kCatNames[c],
+                              own->owned_count[c], total);
+                else
+                    sprintf_s(labels[c], "%s %d", kCatNames[c], total);
+            }
             const float tw = measure_text(13, labels[c]) + 18;
             if (lx > 0 && lx + tw > tab_area_w) {
                 lx = 0;
@@ -1194,7 +1210,7 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     const float tabs_h = tab_rows * (tab_row_h + 3) + 4;
     const float tab_ox = wx + 6, tab_oy = wy + kTitleH + 2;
 
-    for (int c = 0; c < kCats; c++) {
+    for (int c = 0; c < kTabs; c++) {
         const float bx = tab_ox + tab_bx[c], by = tab_oy + tab_by[c];
         const float tw = tab_bw[c];
         const bool hot = in.mouse_x >= bx && in.mouse_x < bx + tw &&
@@ -1209,7 +1225,24 @@ void atlas_ui_draw(float screen_w, float screen_h) {
             tab = c;
             InterlockedExchange(&g_tab, c);
             save_layout_dirty();
+            // Whatever had the keyboard belonged to the page being left, and
+            // a field that keeps capture while off screen swallows movement
+            // keys with nothing on screen to explain why.
+            g_search_focus = false;
+            input_set_text_capture(false);
         }
+    }
+
+    // --- routes -------------------------------------------------------------
+    //
+    // Not a collection page: no grid, no search, no filters. It takes the
+    // whole content band and draws itself.
+    if (tab == kRoutesTab) {
+        const float rx = wx + kPad;
+        const float ry = wy + kTitleH + tabs_h + 4;
+        routes_draw(in, clicked, rx, ry, win_w - 2 * kPad,
+                    win_h - (kTitleH + tabs_h + 4) - kPad);
+        return;
     }
 
     // --- search box ---------------------------------------------------------
@@ -1406,15 +1439,22 @@ void atlas_ui_draw(float screen_w, float screen_h) {
                 hover.cell_y = y;
             }
 
-            // A click on a cell with known coordinates toggles the tracker.
+            // A click on a cell with known coordinates toggles the tracker;
+            // held modifiers add it to the route being followed instead, so
+            // a run can be assembled out of the atlas itself.
             if (clicked && !e.targets.empty() &&
                 in.click_x >= x && in.click_x < x + kIcon &&
                 in.click_y >= by0 && in.click_y < by1) {
-                char key[192];
-                _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
-                            kCatTsv[ecat], e.id.c_str());
-                nav_track(key, e.name.c_str(), e.targets.data(),
-                          (int)e.targets.size());
+                if (in.click_shift || in.click_ctrl) {
+                    nav_add(e.name.c_str(), e.targets.data(),
+                            (int)e.targets.size(), in.click_shift);
+                } else {
+                    char key[192];
+                    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
+                                kCatTsv[ecat], e.id.c_str());
+                    nav_track(key, e.name.c_str(), e.targets.data(),
+                              (int)e.targets.size());
+                }
             }
         }
     }
@@ -1448,6 +1488,39 @@ void atlas_ui_draw(float screen_w, float screen_h) {
                      screen_w, screen_h);
     }
 
+}
+
+// --- shared with other mods on this host ------------------------------------
+
+bool atlas_ui_lookup(const std::string& id, AtlasItemInfo* out) {
+    if (!out || !InterlockedCompareExchange(&g_loaded, 0, 0)) return false;
+    // The per-category id maps are built once at load and never touched
+    // again, so this needs no lock. An id can appear on more than one page
+    // (a recipe's produced item is also a Misc entry); the first hit wins,
+    // and the pages are in the order the tab strip shows them, so the more
+    // specific page is found first.
+    for (int c = 0; c < kCats; c++) {
+        auto f = g_entry_by_id[c].find(id);
+        if (f == g_entry_by_id[c].end()) continue;
+        const Entry& e = g_entries[f->second];
+        out->name = e.name;
+        out->rarity = e.rarity;
+        out->icon = e.icon;
+        return true;
+    }
+    return false;
+}
+
+void atlas_ui_draw_icon(int icon, float x, float y, float size, float alpha) {
+    if (g_atlas < 0 || icon < 0 || g_atlas_w < 64 || g_atlas_h < 64) return;
+    float u0, v0, u1, v1;
+    icon_uv(icon, &u0, &v0, &u1, &v1);
+    draw_image(g_atlas, x, y, size, size, u0, v0, u1, v1,
+               {1.0f, 1.0f, 1.0f, alpha});
+}
+
+Color atlas_ui_rarity_color(int rarity) {
+    return kRarity[rarity >= 0 && rarity <= 4 ? rarity : 0];
 }
 
 }  // namespace fmk

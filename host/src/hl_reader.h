@@ -93,6 +93,68 @@ bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);
 bool reader_read_inventories(Inventories* out);
 
+// One currency the character holds, e.g. {"Gold", 12045}.
+struct Currency {
+    std::string kind;
+    int64_t count = 0;
+};
+
+// Everything the Recent Loots feed compares against its last reading. There
+// is no loot event to hook - the host never calls into the game - so what a
+// feed of "you just picked this up" really is, is the difference between two
+// of these. Deliberately narrow so it can be polled several times a second:
+// the bags and the currency purse, not the bank, the codex or the collection.
+struct LootState {
+    bool valid = false;
+    int32_t level = 0;
+    int32_t exp = 0;
+    std::vector<Item> bags;
+    std::vector<Currency> currencies;
+};
+
+bool reader_read_loot_state(LootState* out);
+
+// The game's own map, read while it is open. Every marker on it carries its
+// world position in the same axes the navigator already works in, so turning
+// one into a waypoint needs no projection and no writes.
+//
+// The map's own `nearClickableMarker` looked like the obvious source and is
+// not: it belongs to the gamepad crosshair (`crosshair`, `crosshairCheckbox`,
+// a `showCrosshair` static) and stays null with a mouse. `mouseCursor` is
+// likewise part of the debug readout. What does work is the marker list plus
+// each marker's own screen position.
+
+struct MapPin {
+    double x = 0, y = 0, z = 0;
+    std::string label;
+};
+
+struct MapState {
+    bool open = false;      // the map window is in the UI's open-window list
+    // The player's own pins. Placing one is a perfectly good way to say
+    // "take me there", so the navigator mirrors them.
+    std::vector<MapPin> pins;
+    // Diagnostics, logged on every open and close. If a mechanism here ever
+    // stops working, one line says which of these went empty.
+    void* window = nullptr;
+    bool visible = false;
+    bool parented = false;
+    int markers = 0;
+    int scene_w = 0, scene_h = 0;   // against the swap chain, this is the
+                                    // scale the hit test has to undo
+    void* mouse_cursor = nullptr;
+    void* near_clickable = nullptr;
+};
+
+bool reader_read_map_state(MapState* out);
+
+// The marker nearest a point on screen, for turning a click into a waypoint.
+// `client_*` are swap-chain pixels - the space the mouse arrives in - which
+// this maps onto the UI scene's own units before comparing. Returns false
+// when the map is closed or nothing is within reach of that point.
+bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
+                     MapPin* out);
+
 // World position and facing of the local hero, for the navigator's distance
 // and arrow readout. Cheap (four validated qword reads), safe to call at
 // 20Hz from the pose thread.

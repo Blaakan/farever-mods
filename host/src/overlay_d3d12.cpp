@@ -105,6 +105,7 @@ DXGI_FORMAT  g_rt_format = DXGI_FORMAT_UNKNOWN;
 bool   g_ready = false;
 bool   g_failed = false;
 DrawFn g_draw = nullptr;
+volatile LONG g_frame_w = 0, g_frame_h = 0;
 std::vector<Vertex> g_verts;
 
 // Quads are batched into runs that share a texture, so mixing text, panels
@@ -717,6 +718,15 @@ int overlay_load_atlas(const char* path) {
 bool overlay_ready() { return g_ready; }
 void overlay_set_draw(DrawFn fn) { g_draw = fn; }
 
+bool overlay_frame_size(float* w, float* h) {
+    const LONG fw = InterlockedCompareExchange(&g_frame_w, 0, 0);
+    const LONG fh = InterlockedCompareExchange(&g_frame_h, 0, 0);
+    if (fw <= 0 || fh <= 0) return false;
+    if (w) *w = (float)fw;
+    if (h) *h = (float)fh;
+    return true;
+}
+
 // --- Present ----------------------------------------------------------------
 
 namespace {
@@ -791,6 +801,11 @@ HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT interval,
     sc->GetDesc(&scd);
     const float w = (float)scd.BufferDesc.Width;
     const float h = (float)scd.BufferDesc.Height;
+    // Published for threads that are not the render thread: the map hit test
+    // needs it to map the game's UI scene onto the pixels the mouse is
+    // reported in, and it runs on the pose thread.
+    InterlockedExchange(&g_frame_w, (LONG)w);
+    InterlockedExchange(&g_frame_h, (LONG)h);
 
     g_verts.clear();
     g_segs.clear();

@@ -67,7 +67,30 @@ const WANT = [
   // World position and facing, for the loot tracker's distance/arrow readout.
   ['ent.GameObject', ['posx', 'posy', 'posz', 'rotationZ']],
   // The application singleton: reaches the camera, and holds the hero too.
-  ['GameApp', ['gameCamera', 'camera', 'hero', 'world']],
+  ['GameApp', ['gameCamera', 'camera', 'hero', 'world', 'gui']],
+  // The game's own map, read while it is open so a click on a POI can become
+  // a waypoint. `windows` is the short list of window instances the UI holds;
+  // finding the map means walking it for the right class, not scanning
+  // memory. `visible` is h2d.Object's, so it says whether the map is up.
+  ['ui.GameUI', ['windows', 'root', 's2d']],
+  // The 2D scene the whole UI lives in. Its width/height are the units
+  // markers report their screen position in, which is not the same as the
+  // pixels the mouse arrives in when the UI is scaled - so the ratio between
+  // this and the swap chain's size is what maps one onto the other.
+  ['h2d.Scene', ['width', 'height']],
+  // `visible` alone is not "on screen": a closed window can keep the flag and
+  // its last hit-test result, and acting on that would drop a waypoint at
+  // whatever the player last hovered, days ago. Heaps detaches a closed
+  // window from the scene, so `parent` going null is the second signal.
+  ['ui.win.MapWindow', ['mouseCursor', 'nearClickableMarker', 'pinMarkers',
+                        'markers', 'visible', 'parent', 'zoom']],
+  // A marker's worldPos is a world-space vector - the same space the
+  // navigator already works in - so no projection maths is involved at all.
+  // absX/absY are the marker's own place on screen, which is what makes a
+  // hit test possible at all: the mouse and the marker can be compared
+  // directly and the map's zoom and panning never enter into it.
+  ['ui.win.map.MapMarker', ['worldPos', 'visible', 'name', 'absX', 'absY']],
+  ['ui.win.map.TextMarker', ['desc']],
   // `$App` is the class-value object holding App's statics, and `inst` is
   // the singleton itself - the whole reason startup needs no instance scan.
   ['$App', ['inst']],
@@ -86,7 +109,12 @@ const WANT = [
   ['h3d.scene.Scene', ['camera']],
   ['h3d.Camera', ['pos', 'target']],
   ['h3d.VectorImpl', ['x', 'y', 'z']],
-  ['st.Player', ['accountProgress', 'progress', 'name']],
+  ['st.Player', ['accountProgress', 'progress', 'name', 'heroData']],
+  // What the Recent Loots feed watches. There is no loot event to hook - the
+  // host never calls into the game - so the feed is a diff of these between
+  // polls: experience and level tick up, `currencies` gains entries, and
+  // `inventory` is the same list the atlas already reads for the bags.
+  ['st.player.HeroData', ['level', 'exp', 'currencies', 'inventory', 'name']],
   // Codex progress. Every one of these is a hxbit.MapData wrapping a Haxe
   // map behind an interface, so reading them needs the virtual hop.
   ['st.player.Progress', ['counters', 'unitsProgress', 'itemProgress',

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "hl_reader.h"
+#include "overlay.h"
 
 namespace fmk {
 
@@ -42,5 +43,30 @@ void atlas_ui_tick();
 
 // Render thread: the overlay draw callback.
 void atlas_ui_draw(float w, float h);
+
+// --- shared with other mods on this host ------------------------------------
+//
+// The atlas owns the generated item database and the icon texture. Anything
+// else with an item id - the Recent Loots feed, for one - wants the same
+// three things about it, and duplicating the TSV load to get them would put
+// a second copy of 1547 entries in memory to say "Copper Ore" instead of
+// "CopperOre".
+
+struct AtlasItemInfo {
+    std::string name;      // the game's own display name
+    int rarity = 0;        // 0..4, common..legendary
+    int icon = -1;         // cell in the icon atlas, -1 = none
+};
+
+// Searches every page for the id. False when the atlas has not loaded yet or
+// the id is not one it knows.
+bool atlas_ui_lookup(const std::string& id, AtlasItemInfo* out);
+
+// Draws one icon cell at any size. Silently draws nothing when `icon` is -1
+// or the atlas texture failed to load.
+void atlas_ui_draw_icon(int icon, float x, float y, float size, float alpha);
+
+// The colour the atlas paints a rarity, so borders agree across mods.
+Color atlas_ui_rarity_color(int rarity);
 
 }  // namespace fmk

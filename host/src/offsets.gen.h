@@ -67,7 +67,51 @@ namespace GameApp {
     constexpr uint32_t camera = 0xa8;  // OBJ : client.BaseCamera
     constexpr uint32_t hero = 0xd0;  // OBJ : ent.Hero
     constexpr uint32_t world = 0x98;  // OBJ : world.World
+    constexpr uint32_t gui = 0xa0;  // OBJ : ui.GameUI
 }  // namespace GameApp
+
+// ui.GameUI  (sizeof=296, extends ui.BaseUI)
+namespace ui_GameUI {
+    constexpr uint32_t SIZEOF = 296;
+    constexpr uint32_t windows = 0x90;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t root = 0x18;  // OBJ : ui.BaseUIRoot
+    constexpr uint32_t s2d = 0x8;  // OBJ : h2d.Scene
+}  // namespace ui_GameUI
+
+// h2d.Scene  (sizeof=360, extends h2d.Layers)
+namespace h2d_Scene {
+    constexpr uint32_t SIZEOF = 360;
+    constexpr uint32_t width = 0xbc;  // I32
+    constexpr uint32_t height = 0xc0;  // I32
+}  // namespace h2d_Scene
+
+// ui.win.MapWindow  (sizeof=1808, extends ui.win.TitleWindow)
+namespace ui_win_MapWindow {
+    constexpr uint32_t SIZEOF = 1808;
+    constexpr uint32_t mouseCursor = 0x530;  // OBJ : ui.win.map.MapMarker
+    constexpr uint32_t nearClickableMarker = 0x568;  // OBJ : ui.win.map.MapMarker
+    constexpr uint32_t pinMarkers = 0x570;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t markers = 0x548;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t visible = 0x50;  // BOOL
+    constexpr uint32_t parent = 0x18;  // OBJ : h2d.Object
+    constexpr uint32_t zoom = 0x500;  // F64
+}  // namespace ui_win_MapWindow
+
+// ui.win.map.MapMarker  (sizeof=1120, extends ui.UIElement)
+namespace ui_win_map_MapMarker {
+    constexpr uint32_t SIZEOF = 1120;
+    constexpr uint32_t worldPos = 0x448;  // OBJ : h3d.VectorImpl
+    constexpr uint32_t visible = 0x50;  // BOOL
+    constexpr uint32_t name = 0x20;  // OBJ : String
+    constexpr uint32_t absX = 0x98;  // F64
+    constexpr uint32_t absY = 0xa0;  // F64
+}  // namespace ui_win_map_MapMarker
+
+// ui.win.map.TextMarker  (sizeof=1136, extends ui.win.map.MapMarker)
+namespace ui_win_map_TextMarker {
+    constexpr uint32_t SIZEOF = 1136;
+    constexpr uint32_t desc = 0x468;  // OBJ : String
+}  // namespace ui_win_map_TextMarker
 
 // $App  (sizeof=88, extends hl.Class)
 namespace _App {
@@ -114,7 +158,18 @@ namespace st_Player {
     constexpr uint32_t accountProgress = 0xe0;  // OBJ : st.player.AccountProgress
     constexpr uint32_t progress = 0xf0;  // OBJ : st.player.Progress
     constexpr uint32_t name = 0xc0;  // OBJ : String
+    constexpr uint32_t heroData = 0xe8;  // OBJ : st.player.HeroData
 }  // namespace st_Player
+
+// st.player.HeroData  (sizeof=360, extends st.DBState)
+namespace st_player_HeroData {
+    constexpr uint32_t SIZEOF = 360;
+    constexpr uint32_t level = 0xb0;  // I32
+    constexpr uint32_t exp = 0xb4;  // I32
+    constexpr uint32_t currencies = 0x110;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t inventory = 0x100;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t name = 0xa0;  // OBJ : String
+}  // namespace st_player_HeroData
 
 // st.player.Progress  (sizeof=232, extends st.DBBaseState)
 namespace st_player_Progress {

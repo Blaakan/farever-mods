@@ -522,6 +522,123 @@ bool reader_read_inventories(Inventories* out) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Loot state
+//
+// A narrow, cheap read meant to run several times a second, because a loot
+// feed that samples once a minute is a list of things you have forgotten
+// picking up. Nothing here scans, and nothing walks the bank, the codex or
+// the collection.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool g_currency_diag = true;
+
+// The purse. Each element is a structural value with a name and an amount;
+// which words the game uses for those two is read rather than assumed, since
+// the same shape appears with `kind`/`id` and `count`/`value` elsewhere in
+// this file, and getting it wrong would report every balance as zero.
+void read_currency_array(void* array_obj, std::vector<Currency>* out) {
+    const int32_t len =
+        array_obj ? read_i32(array_obj, off::hl_types_ArrayBase::length) : 0;
+    void* varr = array_obj ? read_ptr(array_obj, off::hl_types_ArrayObj::array)
+                           : nullptr;
+    // The array itself gets a line, not only its elements: an empty purse and
+    // a walk that stopped one link short both produce no currency lines at
+    // all, and only this tells them apart.
+    if (g_currency_diag)
+        host_log("currencies: array=%p cls=%s len=%d varr=%p", array_obj,
+                 obj_class_name(array_obj).c_str(), len, varr);
+    if (len <= 0 || len > 256 || !varr) {
+        g_currency_diag = false;
+        return;
+    }
+    void* elems = (uint8_t*)varr + hlrt::varray_data;
+
+    for (int32_t i = 0; i < len; i++) {
+        void* e = read_ptr(elems, (uint32_t)(i * 8));
+        if (!e) continue;
+
+        std::vector<VirtualField> vf;
+        if (!read_virtual_fields(e, &vf)) {
+            // Not structural: perhaps a plain object with the same fields.
+            continue;
+        }
+        if (g_currency_diag) {
+            std::string desc;
+            for (size_t k = 0; k < vf.size() && k < 8; k++) {
+                if (!desc.empty()) desc += ", ";
+                desc += vf[k].name + ":k" + std::to_string(vf[k].kind);
+            }
+            host_log("currencies: elem[%d] {%s}", i, desc.c_str());
+        }
+
+        Currency c;
+        for (const auto& f : vf) {
+            if (!f.value_ptr) continue;
+            if (f.kind == hlrt::HOBJ &&
+                (f.name == "kind" || f.name == "id" || f.name == "item" ||
+                 f.name == "currency")) {
+                c.kind = read_hx_string(read_ptr(f.value_ptr, 0));
+            } else if (f.name == "count" || f.name == "value" ||
+                       f.name == "amount" || f.name == "nb") {
+                if (f.kind == hlrt::HI32) {
+                    c.count = read_i32(f.value_ptr, 0);
+                } else if (f.kind == hlrt::HF64) {
+                    double d = 0;
+                    fmk::read(f.value_ptr, 0, &d);
+                    c.count = (int64_t)d;
+                }
+            }
+        }
+        if (!c.kind.empty()) out->push_back(std::move(c));
+    }
+    g_currency_diag = false;
+}
+
+}  // namespace
+
+bool reader_read_loot_state(LootState* out) {
+    *out = {};
+    void* hero = reader_hero();
+    if (!hero) return false;
+
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+
+    void* hd = read_ptr(player, off::st_Player::heroData);
+    if (hd) {
+        out->level = read_i32(hd, off::st_player_HeroData::level);
+        out->exp = read_i32(hd, off::st_player_HeroData::exp);
+        // Uninitialised or mid-write values would read as a huge gain; a
+        // level past a few hundred is not a level, it is a bad pointer.
+        if (out->level < 0 || out->level > 999) { out->level = 0; out->exp = 0; }
+        if (out->exp < 0) out->exp = 0;
+        read_currency_array(read_ptr(hd, off::st_player_HeroData::currencies),
+                            &out->currencies);
+    }
+
+    // The bags, and only the bags: a chest opening puts its contents there,
+    // and anything that lands in the bank did not just happen to you.
+    //
+    // The item decoder's one-shot diagnostics belong to the atlas read, which
+    // is where a broken walk needs explaining. This poll runs twice a second
+    // and would burn that one shot immediately, then say nothing useful for
+    // the rest of the session - so it borrows the flag and puts it back.
+    void* loadout = read_ptr(hero, off::ent_Hero::loadout);
+    if (loadout) {
+        const bool diag = g_item_diag;
+        g_item_diag = false;
+        read_inventory(read_ptr(loadout, off::st_Loadout::inventory), "loot",
+                       &out->bags);
+        g_item_diag = diag;
+    }
+
+    out->valid = true;
+    return true;
+}
+
 void write_collection_json(const Collection& c) {
     wchar_t path[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -729,6 +846,201 @@ bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z) {
            read(hero, off::ent_GameObject::posy, y) &&
            read(hero, off::ent_GameObject::posz, z) &&
            read(hero, off::ent_GameObject::rotationZ, rot_z);
+}
+
+// ---------------------------------------------------------------------------
+// The game's own map
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// `ui.BaseUI.windows` is the list of windows that are **open**, not of every
+// window the UI knows: a live run showed `windows[0] of 1` while the map was
+// up, and a different MapWindow pointer on the next open. So presence in that
+// list is itself the answer to "is the map open", and there is nothing to
+// cache - caching it would only create the one failure this cannot otherwise
+// have, a pointer to a closed window that still passes a type check because
+// the collector has not reused the block yet.
+//
+// The walk costs one length, one array pointer and a handful of element
+// reads. At the pose thread's 20Hz that is not worth a cache.
+void* find_map_window() {
+    if (!g_app || !obj_is(g_app, "GameApp")) return nullptr;
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    if (!gui) return nullptr;
+    void* arr = read_ptr(gui, off::ui_GameUI::windows);
+    if (!arr) return nullptr;
+    int32_t len = read_i32(arr, off::hl_types_ArrayBase::length);
+    void* varr = read_ptr(arr, off::hl_types_ArrayObj::array);
+    if (len <= 0 || !varr) return nullptr;
+    // Open windows, so the list is short; a length past this is a bad read,
+    // not a player with two hundred windows open.
+    if (len > 128) len = 128;
+    void* elems = (uint8_t*)varr + hlrt::varray_data;
+    for (int32_t i = 0; i < len; i++) {
+        void* e = read_ptr(elems, (uint32_t)(i * 8));
+        if (e && obj_is(e, "ui.win.MapWindow")) return e;
+    }
+    return nullptr;
+}
+
+// A marker's world position. Every marker class inherits worldPos from
+// ui.win.map.MapMarker, so the subclass only matters for the label.
+bool marker_pos(void* marker, double* x, double* y, double* z) {
+    if (!marker) return false;
+    void* v = read_ptr(marker, off::ui_win_map_MapMarker::worldPos);
+    if (!v) return false;
+    return read(v, off::h3d_VectorImpl::x, x) &&
+           read(v, off::h3d_VectorImpl::y, y) &&
+           read(v, off::h3d_VectorImpl::z, z);
+}
+
+// The best name a marker can give for itself. There is no one field for it:
+// a text marker carries a description, some markers carry a scene-object
+// name, and the rest are only identified by what class they are. Falling
+// back through all three beats calling everything "Waypoint".
+std::string marker_label(void* marker) {
+    if (!marker) return "";
+    const std::string cls = obj_class_name(marker);
+    if (cls == "ui.win.map.TextMarker") {
+        std::string d =
+            read_hx_string(read_ptr(marker, off::ui_win_map_TextMarker::desc));
+        if (!d.empty()) return d;
+    }
+    std::string n =
+        read_hx_string(read_ptr(marker, off::ui_win_map_MapMarker::name));
+    if (!n.empty()) return n;
+
+    // Class name to something a player would recognise. "ui.win.map." is
+    // eleven characters of namespace nobody needs on a HUD.
+    static const struct { const char* cls; const char* label; } kNames[] = {
+        {"ui.win.map.ActivityMarker", "Activity"},
+        {"ui.win.map.ObeliskMarker", "Obelisk"},
+        {"ui.win.map.PinMarker", "Map pin"},
+        {"ui.win.map.TextMarker", "Place"},
+        {"ui.win.map.IconMarker", "Point of interest"},
+        {"ui.win.map.PlayerMarker", "Player"},
+    };
+    for (const auto& k : kNames)
+        if (cls == k.cls) return k.label;
+    return "Map location";
+}
+
+// Walks an ArrayObj of markers, calling `fn(marker)` on each live one.
+// Bounded: the map holds a marker per point of interest in the loaded
+// region, so this is hundreds, not tens - fine for a click, not for 20Hz.
+template <typename F>
+int for_each_marker(void* array_obj, F fn) {
+    if (!array_obj) return 0;
+    int32_t len = read_i32(array_obj, off::hl_types_ArrayBase::length);
+    void* varr = read_ptr(array_obj, off::hl_types_ArrayObj::array);
+    if (len <= 0 || !varr) return 0;
+    if (len > 4096) len = 4096;
+    void* elems = (uint8_t*)varr + hlrt::varray_data;
+    int seen = 0;
+    for (int32_t i = 0; i < len; i++) {
+        void* e = read_ptr(elems, (uint32_t)(i * 8));
+        if (!e) continue;
+        seen++;
+        fn(e);
+    }
+    return seen;
+}
+
+}  // namespace
+
+bool reader_read_map_state(MapState* out) {
+    *out = {};
+    void* win = find_map_window();
+    if (!win) return false;
+
+    // Being in the open-windows list is the answer. `visible` and `parent`
+    // are read anyway and reported, because they are the two fields that
+    // would justify a stricter gate if presence ever turns out not to be
+    // enough - and one line in the log settles that far better than a guess.
+    uint8_t visible = 0;
+    read(win, off::ui_win_MapWindow::visible, &visible);
+    out->window = win;
+    out->visible = visible != 0;
+    out->parented = read_ptr(win, off::ui_win_MapWindow::parent) != nullptr;
+    out->open = true;
+
+    // Reported, not used. Both were the first attempt at "what is under the
+    // cursor" and both stay null with a mouse: they belong to the gamepad
+    // crosshair and to the debug readout respectively. Kept in the log so
+    // that stays a fact rather than a memory.
+    out->near_clickable =
+        read_ptr(win, off::ui_win_MapWindow::nearClickableMarker);
+    out->mouse_cursor = read_ptr(win, off::ui_win_MapWindow::mouseCursor);
+
+    void* markers = read_ptr(win, off::ui_win_MapWindow::markers);
+    out->markers = for_each_marker(markers, [](void*) {});
+
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    void* scene = gui ? read_ptr(gui, off::ui_GameUI::s2d) : nullptr;
+    if (scene) {
+        out->scene_w = read_i32(scene, off::h2d_Scene::width);
+        out->scene_h = read_i32(scene, off::h2d_Scene::height);
+    }
+
+    // The player's own pins.
+    void* pins = read_ptr(win, off::ui_win_MapWindow::pinMarkers);
+    for_each_marker(pins, [&](void* m) {
+        MapPin p;
+        if (!marker_pos(m, &p.x, &p.y, &p.z)) return;
+        p.label = marker_label(m);
+        if (out->pins.size() < 64) out->pins.push_back(std::move(p));
+    });
+    return true;
+}
+
+bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
+                     MapPin* out) {
+    if (!out || client_w <= 0 || client_h <= 0) return false;
+    *out = {};
+    void* win = find_map_window();
+    if (!win) return false;
+
+    // Markers report their position in the UI scene's own units, and the
+    // mouse arrives in swap-chain pixels. When the UI is scaled those differ,
+    // so the scene's own dimensions supply the ratio between them. No scene
+    // means no way to compare, and guessing 1:1 would put the hit test
+    // somewhere else entirely on a scaled UI.
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    void* scene = gui ? read_ptr(gui, off::ui_GameUI::s2d) : nullptr;
+    if (!scene) return false;
+    const int32_t sw = read_i32(scene, off::h2d_Scene::width);
+    const int32_t sh = read_i32(scene, off::h2d_Scene::height);
+    if (sw <= 0 || sh <= 0) return false;
+    const double mx = client_x * ((double)sw / client_w);
+    const double my = client_y * ((double)sh / client_h);
+
+    // How near counts as clicking it, in scene units. Generous: map icons are
+    // around 32 units and the player is aiming at the icon, not its origin.
+    const double kReach = 26.0;
+
+    void* markers = read_ptr(win, off::ui_win_MapWindow::markers);
+    void* best = nullptr;
+    double best_d = kReach * kReach;
+    for_each_marker(markers, [&](void* m) {
+        uint8_t vis = 0;
+        read(m, off::ui_win_map_MapMarker::visible, &vis);
+        if (!vis) return;
+        double ax = 0, ay = 0;
+        if (!read(m, off::ui_win_map_MapMarker::absX, &ax) ||
+            !read(m, off::ui_win_map_MapMarker::absY, &ay))
+            return;
+        const double dx = ax - mx, dy = ay - my;
+        const double d = dx * dx + dy * dy;
+        if (d < best_d) {
+            best_d = d;
+            best = m;
+        }
+    });
+    if (!best) return false;
+    if (!marker_pos(best, &out->x, &out->y, &out->z)) return false;
+    out->label = marker_label(best);
+    return true;
 }
 
 bool reader_read_unit_state(UnitState* out) {

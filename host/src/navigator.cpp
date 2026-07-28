@@ -4,6 +4,12 @@
 // State is tiny and shared across three threads (worker: position + persist,
 // window thread: nothing, render thread: track/draw), so one critical
 // section guards all of it; every hold is microseconds.
+//
+// A tracked thing is a list of waypoints plus a NavMode saying what the list
+// means. Crossing a waypoint off happens on the pose thread, because that is
+// the only place that learns the hero moved - the render thread would notice
+// too, but only while the frame is on screen, and a route has to advance
+// whether or not you are looking at it.
 // ---------------------------------------------------------------------------
 
 #define WIN32_LEAN_AND_MEAN
@@ -28,10 +34,22 @@ namespace {
 CRITICAL_SECTION g_cs;
 bool g_cs_init = false;
 
-// Tracked item.
+// The ad-hoc list every loose waypoint lands in. One key, so queueing a
+// second one extends the first rather than replacing it.
+const char* const kQueueKey = "nav/waypoints";
+
+// Tracked thing.
 std::string g_key;                    // "" = nothing tracked
 std::string g_name;
 std::vector<NavTarget> g_targets;
+std::vector<char> g_done;             // parallel to g_targets
+std::vector<char> g_armed;            // parallel; 0 = cannot be reached yet
+NavMode g_mode = kNavNearest;
+
+// When the last outstanding waypoint was crossed off, so the pill can say so
+// before it disappears. 0 = not finished.
+DWORD g_finished_tick = 0;
+constexpr DWORD kFinishedMs = 6000;
 
 // Hero pose, stamped by the pose thread at ~20Hz.
 bool   g_pos_valid = false;
@@ -47,6 +65,7 @@ double g_view_dx = 0, g_view_dy = 0;
 double g_cam_dist = 0;      // camera-to-hero distance, diagnostics only
 
 std::wstring g_ini_path;
+std::wstring g_state_path;
 volatile LONG g_dirty = 0;
 
 // Frame placement, persisted. INT_MIN means "never placed" - the first draw
@@ -68,6 +87,44 @@ struct Lock {
 
 bool pos_fresh_locked() {
     return g_pos_valid && (GetTickCount() - g_pos_tick) < kPosFreshMs;
+}
+
+int remaining_locked() {
+    int n = 0;
+    for (char d : g_done)
+        if (!d) n++;
+    return n;
+}
+
+// Which waypoint the arrow points at, or -1 when the list is exhausted.
+//
+// kNavOrder follows the list, because someone chose that order. The other two
+// take the closest one still outstanding - which is the same computation, so
+// alternatives ("three vendors sell this") and a collection route ("every
+// chest in the zone") share it. Without a live hero position there is nothing
+// to be nearest to, so the first outstanding waypoint stands in; the frame
+// hides itself in that state anyway.
+int current_locked() {
+    if (g_targets.empty()) return -1;
+    if (g_mode == kNavOrder) {
+        for (size_t i = 0; i < g_targets.size(); i++)
+            if (!g_done[i]) return (int)i;
+        return -1;
+    }
+    const bool fresh = pos_fresh_locked();
+    int best = -1;
+    double best_d = 0;
+    for (size_t i = 0; i < g_targets.size(); i++) {
+        if (g_done[i]) continue;
+        if (!fresh) return (int)i;
+        const double dx = g_targets[i].x - g_hx, dy = g_targets[i].y - g_hy;
+        const double d = dx * dx + dy * dy;
+        if (best < 0 || d < best_d) {
+            best = (int)i;
+            best_d = d;
+        }
+    }
+    return best;
 }
 
 // Nearest target by 2D distance; vertical difference rarely matters for
@@ -109,26 +166,112 @@ void format_to_locked(const NavTarget& t, char* out, int out_len) {
         _snprintf_s(out, out_len, _TRUNCATE, "%.0fm %s", dist, dir);
 }
 
-}  // namespace
-
-void nav_init() {
-    if (!g_cs_init) {
-        InitializeCriticalSection(&g_cs);
-        g_cs_init = true;
+// Crosses off every waypoint the hero is currently standing on. Plural
+// because a dense route can have two chests inside one arrival radius, and
+// stopping after the first would leave the arrow pointing at a spot the
+// player is already on.
+//
+// The vertical gate is what makes this safe in a world with caves stacked
+// under hills: horizontal proximity alone would cross off the cave chest
+// while you ride over the top of it.
+// Arms every waypoint the hero has got well clear of. Until a waypoint is
+// armed it cannot be reached, which is what stops one dropped underfoot from
+// being crossed off in the same breath.
+void arm_departures_locked() {
+    if (!pos_fresh_locked()) return;
+    for (size_t i = 0; i < g_targets.size(); i++) {
+        if (g_armed[i] || g_done[i]) continue;
+        const double dx = g_targets[i].x - g_hx, dy = g_targets[i].y - g_hy;
+        if (sqrt(dx * dx + dy * dy) >= kArmDistance) {
+            g_armed[i] = 1;
+            InterlockedExchange(&g_dirty, 1);
+        }
     }
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    g_ini_path = std::wstring(path) + L"farever-modkit.ini";
+}
 
-    // Restore the tracked target: key, name, and targets serialized as
-    // label@x,y,z;... in the same shape the atlas TSV uses. Every conversion
-    // is checked: a value too long for its buffer (hand-edited INI, or a
-    // longer format from a future version) must read back as empty, not as
-    // uninitialized stack memory handed to strtok.
+void consume_arrivals_locked() {
+    if (g_mode == kNavNearest || g_targets.empty()) return;
+    for (int guard = 0; guard < 64; guard++) {
+        const int i = current_locked();
+        if (i < 0) break;
+        if (!g_armed[i]) break;
+        const NavTarget& t = g_targets[i];
+        const double dx = t.x - g_hx, dy = t.y - g_hy, dz = t.z - g_hz;
+        if (sqrt(dx * dx + dy * dy) > kArriveRadius) break;
+        if (fabs(dz) > kArriveHeight) break;
+        g_done[i] = 1;
+        InterlockedExchange(&g_dirty, 1);
+        const int left = remaining_locked();
+        host_log("nav: reached '%s' (%d of %d done)", t.label,
+                 (int)g_targets.size() - left, (int)g_targets.size());
+        if (left == 0) {
+            g_finished_tick = GetTickCount();
+            if (!g_finished_tick) g_finished_tick = 1;
+            break;
+        }
+    }
+}
+
+// --- persistence ------------------------------------------------------------
+//
+// The route lives in its own file rather than the INI: a chest route is
+// hundreds of waypoints, and GetPrivateProfileString reads into a fixed
+// buffer. The INI keeps the frame's position, which is two integers.
+
+bool read_all(const std::wstring& path, std::string* out) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const DWORD size = GetFileSize(f, nullptr);
+    if (size == INVALID_FILE_SIZE || size > 8u * 1024 * 1024) {
+        CloseHandle(f);
+        return false;
+    }
+    out->resize(size);
+    DWORD got = 0;
+    const BOOL ok =
+        ReadFile(f, out->empty() ? nullptr : &(*out)[0], size, &got, nullptr);
+    CloseHandle(f);
+    return ok && got == size;
+}
+
+void write_all(const std::wstring& path, const std::string& text) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, text.data(), (DWORD)text.size(), &written, nullptr);
+    CloseHandle(f);
+}
+
+// One waypoint line: `w=<state>,<x>,<y>,<z>,<label>`, where state is
+//   0  outstanding
+//   1  crossed off
+//   2  outstanding, and not yet armed - dropped where the player stood and
+//      not left since
+// The label goes last and runs to the end of the line, so a name with a comma
+// in it - "Zoey, Demon Huntress" - survives the round trip. A file written by
+// a build that only knew 0 and 1 still loads: everything reads as armed,
+// which is the safe reading for a route someone was already following.
+bool parse_waypoint(const char* s, NavTarget* t, bool* done, bool* armed) {
+    int d = 0;
+    if (sscanf_s(s, "%d,%lf,%lf,%lf", &d, &t->x, &t->y, &t->z) != 4)
+        return false;
+    const char* p = s;
+    for (int field = 0; field < 4; field++) {
+        p = strchr(p, ',');
+        if (!p) return false;
+        p++;
+    }
+    strncpy_s(t->label, p, _TRUNCATE);
+    *done = d == 1;
+    *armed = d != 2;
+    return true;
+}
+
+// The pre-route format, kept so an existing install does not lose what it was
+// tracking the first time it runs a build with routes in it.
+void load_legacy_ini_locked() {
     wchar_t buf[1024];
     char key[256] = {0}, name[96] = {0}, targets[1200] = {0};
     auto get = [&](const wchar_t* k, char* dst, int dst_len) {
@@ -139,11 +282,6 @@ void nav_init() {
                                  nullptr))
             dst[0] = 0;
     };
-    g_nav_x = GetPrivateProfileIntW(L"navigator", L"x", kUnplaced,
-                                    g_ini_path.c_str());
-    g_nav_y = GetPrivateProfileIntW(L"navigator", L"y", kUnplaced,
-                                    g_ini_path.c_str());
-
     get(L"key", key, sizeof(key));
     if (!key[0]) return;
     get(L"name", name, sizeof(name));
@@ -161,38 +299,117 @@ void nav_init() {
         if (sscanf_s(at + 1, "%lf,%lf,%lf", &t.x, &t.y, &t.z) == 3)
             list.push_back(t);
     }
-    if (key[0] && !list.empty()) {
+    if (list.empty()) return;
+    g_key = key;
+    g_name = name[0] ? name : key;
+    g_targets = std::move(list);
+    g_done.assign(g_targets.size(), 0);
+    g_armed.assign(g_targets.size(), 1);
+    g_mode = kNavNearest;
+}
+
+}  // namespace
+
+void nav_init() {
+    if (!g_cs_init) {
+        InitializeCriticalSection(&g_cs);
+        g_cs_init = true;
+    }
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return;
+    slash[1] = 0;
+    g_ini_path = std::wstring(path) + L"farever-modkit.ini";
+    g_state_path = std::wstring(path) + L"farever-nav-state.txt";
+
+    g_nav_x = GetPrivateProfileIntW(L"navigator", L"x", kUnplaced,
+                                    g_ini_path.c_str());
+    g_nav_y = GetPrivateProfileIntW(L"navigator", L"y", kUnplaced,
+                                    g_ini_path.c_str());
+
+    std::string text;
+    if (!read_all(g_state_path, &text)) {
         Lock lk;
-        g_key = key;
-        g_name = name[0] ? name : key;
-        g_targets = std::move(list);
+        load_legacy_ini_locked();
+        return;
+    }
+
+    std::string key, name;
+    NavMode mode = kNavNearest;
+    std::vector<NavTarget> list;
+    std::vector<char> done, armed;
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t e = text.find('\n', p);
+        if (e == std::string::npos) e = text.size();
+        std::string line = text.substr(p, e - p);
+        p = e + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line.compare(0, 4, "key=") == 0) key = line.substr(4);
+        else if (line.compare(0, 5, "name=") == 0) name = line.substr(5);
+        else if (line.compare(0, 5, "mode=") == 0) {
+            const int m = atoi(line.c_str() + 5);
+            mode = (m == kNavRoute || m == kNavOrder) ? (NavMode)m : kNavNearest;
+        } else if (line.compare(0, 2, "w=") == 0) {
+            NavTarget t{};
+            bool d = false, a = true;
+            if (parse_waypoint(line.c_str() + 2, &t, &d, &a)) {
+                list.push_back(t);
+                done.push_back(d ? 1 : 0);
+                armed.push_back(a ? 1 : 0);
+            }
+        }
+    }
+    if (key.empty() || list.empty()) return;
+    Lock lk;
+    g_key = key;
+    g_name = name.empty() ? key : name;
+    g_targets = std::move(list);
+    g_done = std::move(done);
+    g_armed = std::move(armed);
+    g_mode = mode;
+    // A route restored with nothing left would draw "complete" forever;
+    // finishing it in the previous session already said so. The ad-hoc queue
+    // is exempt: those waypoints exist because someone walked out and dropped
+    // them, and are usually on their way to being saved.
+    if (remaining_locked() == 0 && g_mode != kNavNearest && g_key != kQueueKey) {
+        g_key.clear();
+        g_name.clear();
+        g_targets.clear();
+        g_done.clear();
+        g_armed.clear();
     }
 }
 
 void nav_tick() {
     if (!InterlockedExchange(&g_dirty, 0)) return;
-    std::string key, name, ser;
+    std::string out =
+        "# farever-modkit navigator state - rewritten as you travel.\n"
+        "# Safe to delete; the navigator simply forgets what it was following.\n";
     {
         Lock lk;
-        key = g_key;
-        name = g_name;
-        char one[160];
-        for (const auto& t : g_targets) {
-            _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s@%.1f,%.1f,%.1f",
-                        ser.empty() ? "" : ";", t.label, t.x, t.y, t.z);
-            ser += one;
+        if (!g_key.empty() && !g_targets.empty()) {
+            out += "key=" + g_key + "\n";
+            out += "name=" + g_name + "\n";
+            char head[32];
+            _snprintf_s(head, sizeof(head), _TRUNCATE, "mode=%d\n", (int)g_mode);
+            out += head;
+            char one[224];
+            for (size_t i = 0; i < g_targets.size(); i++) {
+                const NavTarget& t = g_targets[i];
+                const int state = g_done[i] ? 1 : (g_armed[i] ? 0 : 2);
+                _snprintf_s(one, sizeof(one), _TRUNCATE,
+                            "w=%d,%.1f,%.1f,%.1f,%s\n", state, t.x, t.y, t.z,
+                            t.label);
+                out += one;
+            }
         }
     }
-    auto put = [&](const wchar_t* k, const std::string& v) {
-        wchar_t wide[1024] = {0};
-        if (!v.empty() &&
-            !MultiByteToWideChar(CP_UTF8, 0, v.c_str(), -1, wide, 1024))
-            wide[0] = 0;   // too long or invalid: store empty, not garbage
-        WritePrivateProfileStringW(L"navigator", k, wide, g_ini_path.c_str());
-    };
-    put(L"key", key);
-    put(L"name", name);
-    put(L"targets", ser);
+    write_all(g_state_path, out);
 
     if (InterlockedExchange(&g_layout_dirty, 0)) {
         wchar_t buf[32];
@@ -213,6 +430,10 @@ void nav_set_hero_pose(bool valid, double x, double y, double z, double rot_z) {
         g_hz = z;
         g_rz = rot_z;
         g_pos_tick = GetTickCount();
+        // Leaving arms; arriving consumes. In that order, so a waypoint can
+        // never be armed and consumed by the same reading.
+        arm_departures_locked();
+        consume_arrivals_locked();
     }
 }
 
@@ -248,14 +469,132 @@ bool nav_track(const char* key, const char* name, const NavTarget* targets,
         g_key.clear();
         g_name.clear();
         g_targets.clear();
+        g_done.clear();
+        g_armed.clear();
+        g_finished_tick = 0;
         InterlockedExchange(&g_dirty, 1);
         return false;
     }
     g_key = key;
     g_name = name ? name : key;
     g_targets.assign(targets, targets + count);
+    g_done.assign(g_targets.size(), 0);
+    g_armed.assign(g_targets.size(), 1);
+    g_mode = kNavNearest;
+    g_finished_tick = 0;
     InterlockedExchange(&g_dirty, 1);
     return true;
+}
+
+bool nav_start_route(const char* key, const char* name,
+                     const NavTarget* targets, int count, NavMode mode) {
+    if (!g_cs_init || !key || count <= 0) return false;
+    Lock lk;
+    g_key = key;
+    g_name = name ? name : key;
+    g_targets.assign(targets, targets + count);
+    g_done.assign(g_targets.size(), 0);
+    // A saved route's waypoints are places, not marks you just made, so
+    // standing on the first one means you have done that one.
+    g_armed.assign(g_targets.size(), 1);
+    g_mode = (mode == kNavOrder) ? kNavOrder : kNavRoute;
+    g_finished_tick = 0;
+    // Starting a route while already standing on its first waypoint should
+    // not leave the arrow pointing at your own feet.
+    consume_arrivals_locked();
+    InterlockedExchange(&g_dirty, 1);
+    host_log("nav: route '%s' started, %d waypoints, mode %d", g_name.c_str(),
+             count, (int)g_mode);
+    return true;
+}
+
+void nav_queue(const char* label, double x, double y, double z) {
+    if (!g_cs_init) return;
+    Lock lk;
+    if (g_key != kQueueKey) {
+        g_key = kQueueKey;
+        g_name = "Waypoints";
+        g_targets.clear();
+        g_done.clear();
+        g_armed.clear();
+        g_mode = kNavRoute;
+    }
+    // Finishing the queue and then adding to it starts it going again.
+    g_finished_tick = 0;
+    NavTarget t{};
+    _snprintf_s(t.label, sizeof(t.label), _TRUNCATE, "%s",
+                (label && label[0]) ? label : "Waypoint");
+    t.x = x;
+    t.y = y;
+    t.z = z;
+    g_targets.push_back(t);
+    g_done.push_back(0);
+    // Unarmed: a waypoint you are standing on, or looking at from the map,
+    // must not be crossed off before you have gone anywhere.
+    g_armed.push_back(0);
+    InterlockedExchange(&g_dirty, 1);
+    host_log("nav: queued '%s' at %.1f,%.1f,%.1f (%d waypoints)", t.label, x, y,
+             z, (int)g_targets.size());
+}
+
+void nav_add(const char* label, const NavTarget* targets, int count,
+             bool front) {
+    if (!g_cs_init || !targets || count <= 0) return;
+    Lock lk;
+    // Alternatives, so take one: the nearest when there is a live hero to be
+    // near to, the first otherwise.
+    const NavTarget* pick = pos_fresh_locked() ? nearest_locked(targets, count)
+                                               : &targets[0];
+    if (!pick) return;
+
+    // A single tracked atlas item is not a list to add to - it means "show me
+    // this one place" - so adding turns it into the ad-hoc list. A route is a
+    // list already, and growing it is the point. `g_key` is checked too:
+    // clearing a route leaves the mode behind it, and without this the first
+    // add after a clear would build a list with no name.
+    if (g_key.empty() || g_mode == kNavNearest) {
+        g_key = kQueueKey;
+        g_name = "Waypoints";
+        g_targets.clear();
+        g_done.clear();
+        g_armed.clear();
+        g_mode = kNavRoute;
+    }
+    g_finished_tick = 0;
+
+    NavTarget t = *pick;
+    if (label && label[0]) {
+        // The entry's own name leads, because on the pill that is what the
+        // reader is looking for; where it came from follows it.
+        char merged[96];
+        _snprintf_s(merged, sizeof(merged), _TRUNCATE, "%s - %s", label,
+                    pick->label);
+        _snprintf_s(t.label, sizeof(t.label), _TRUNCATE, "%s",
+                    pick->label[0] ? merged : label);
+    }
+
+    const size_t at = front ? 0 : g_targets.size();
+    g_targets.insert(g_targets.begin() + at, t);
+    g_done.insert(g_done.begin() + at, 0);
+    // Armed: this is a place out in the world, not a mark made underfoot, so
+    // there is no reason it should survive being stood on.
+    g_armed.insert(g_armed.begin() + at, 1);
+    InterlockedExchange(&g_dirty, 1);
+    host_log("nav: added '%s' at %s (%d waypoints, mode %d)", t.label,
+             front ? "the front" : "the end", (int)g_targets.size(),
+             (int)g_mode);
+}
+
+void nav_set_mode(NavMode mode) {
+    if (!g_cs_init) return;
+    Lock lk;
+    // Only ever switches between the two route readings. Turning a tracked
+    // atlas item into a route is nav_add's job, and doing it here by accident
+    // would start crossing off the vendors you walk past.
+    if (g_targets.empty() || g_mode == kNavNearest) return;
+    g_mode = (mode == kNavOrder) ? kNavOrder : kNavRoute;
+    g_finished_tick = 0;
+    InterlockedExchange(&g_dirty, 1);
 }
 
 void nav_untrack() {
@@ -264,6 +603,10 @@ void nav_untrack() {
     g_key.clear();
     g_name.clear();
     g_targets.clear();
+    g_done.clear();
+    g_armed.clear();
+    g_mode = kNavNearest;
+    g_finished_tick = 0;
     InterlockedExchange(&g_dirty, 1);
 }
 
@@ -271,6 +614,73 @@ bool nav_is_tracked(const char* key) {
     if (!g_cs_init || !key) return false;
     Lock lk;
     return g_key == key;
+}
+
+bool nav_hero_pos(double* x, double* y, double* z) {
+    if (!g_cs_init) return false;
+    Lock lk;
+    if (!pos_fresh_locked()) return false;
+    if (x) *x = g_hx;
+    if (y) *y = g_hy;
+    if (z) *z = g_hz;
+    return true;
+}
+
+void nav_skip() {
+    if (!g_cs_init) return;
+    Lock lk;
+    if (g_mode == kNavNearest) return;
+    const int i = current_locked();
+    if (i < 0) return;
+    g_done[i] = 1;
+    if (remaining_locked() == 0) {
+        g_finished_tick = GetTickCount();
+        if (!g_finished_tick) g_finished_tick = 1;
+    }
+    InterlockedExchange(&g_dirty, 1);
+}
+
+void nav_restart() {
+    if (!g_cs_init) return;
+    Lock lk;
+    if (g_targets.empty()) return;
+    g_done.assign(g_targets.size(), 0);
+    // Restarting a list means walking it again from here, so its waypoints
+    // are places rather than fresh marks - armed, like a route being started.
+    g_armed.assign(g_targets.size(), 1);
+    g_finished_tick = 0;
+    consume_arrivals_locked();
+    InterlockedExchange(&g_dirty, 1);
+}
+
+void nav_status(NavStatus* out) {
+    if (!out) return;
+    *out = NavStatus{};
+    if (!g_cs_init) return;
+    Lock lk;
+    if (g_key.empty() || g_targets.empty()) return;
+    out->active = true;
+    out->is_route = g_mode != kNavNearest;
+    out->mode = g_mode;
+    out->total = (int)g_targets.size();
+    out->done = out->total - remaining_locked();
+    _snprintf_s(out->key, sizeof(out->key), _TRUNCATE, "%s", g_key.c_str());
+    _snprintf_s(out->name, sizeof(out->name), _TRUNCATE, "%s", g_name.c_str());
+    const int i = current_locked();
+    if (i >= 0) {
+        _snprintf_s(out->label, sizeof(out->label), _TRUNCATE, "%s",
+                    g_targets[i].label);
+        if (pos_fresh_locked())
+            format_to_locked(g_targets[i], out->where, sizeof(out->where));
+    }
+}
+
+void nav_active_points(std::vector<NavTarget>* out) {
+    if (!out) return;
+    out->clear();
+    if (!g_cs_init) return;
+    Lock lk;
+    *out = g_targets;
 }
 
 bool nav_format_distance(const NavTarget* targets, int count, char* out,
@@ -331,13 +741,33 @@ static void draw_arrow_3d(float cx, float cy, float r, double a) {
     draw_triangle(p[2].x, p[2].y, p[4].x, p[4].y, p[3].x, p[3].y, dim);
 }
 
+// A tick, for the moment a route runs out of waypoints. Same two-facet
+// shading as the arrow so the pill does not change character when it
+// changes message.
+static void draw_check(float cx, float cy, float r) {
+    const Color lit{0.55f, 0.92f, 0.55f, 1.0f};
+    const Color dim{0.28f, 0.66f, 0.34f, 1.0f};
+    const float t = r * 0.30f;    // stroke half-width
+    // Short arm, down-right; long arm, up-right. Two quads as four triangles.
+    auto bar = [&](float x0, float y0, float x1, float y1, Color col) {
+        const float dx = x1 - x0, dy = y1 - y0;
+        const float len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.0001f) return;
+        const float nx = -dy / len * t, ny = dx / len * t;
+        draw_triangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, col);
+        draw_triangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, col);
+    };
+    bar(cx - r * 0.62f, cy + r * 0.02f, cx - r * 0.14f, cy + r * 0.52f, dim);
+    bar(cx - r * 0.14f, cy + r * 0.52f, cx + r * 0.66f, cy - r * 0.50f, lit);
+}
+
 // Nothing tracked, or nothing drawn: the frame must stop claiming screen
 // space, or it goes on swallowing clicks in an area showing nothing.
 void nav_clear_frame() {
     g_last_rect[2] = 0;
     g_last_rect[3] = 0;
     g_dragging = false;
-    input_set_aux_rect(0, 0, 0, 0);
+    input_set_aux_rect(0, 0, 0, 0, 0);
 }
 
 void nav_draw(float screen_w, float screen_h) {
@@ -351,51 +781,82 @@ void nav_draw(float screen_w, float screen_h) {
     const bool clicked = in.clicks != g_seen_clicks;
     g_seen_clicks = in.clicks;
 
-    char name[96], where[64], label[96];
-    bool have = false, fresh = false, used_camera = false;
+    char name[96], where[64], label[96], progress[48] = {0}, key[192] = {0};
+    bool have = false, fresh = false, used_camera = false, finished = false;
+    int done = 0, total = 0;
     double rel = 0;                   // radians clockwise from "dead ahead"
     double diag_target_b = 0, diag_cam_d = 0, diag_rz = 0, diag_cam_dist = 0;
     {
         Lock lk;
         if (!g_key.empty() && !g_targets.empty()) {
+            _snprintf_s(key, sizeof(key), _TRUNCATE, "%s", g_key.c_str());
             _snprintf_s(name, sizeof(name), _TRUNCATE, "%s", g_name.c_str());
             fresh = pos_fresh_locked();
-            const NavTarget* t = fresh
-                ? nearest_locked(g_targets.data(), (int)g_targets.size())
-                : &g_targets[0];
-            _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t->label);
-            if (fresh) {
-                format_to_locked(*t, where, sizeof(where));
-                // One convention for both paths: how far clockwise the target
-                // sits from whatever is currently "forward". The arrow rotates
-                // clockwise for positive, so right reads right.
-                const double target_b = bearing(t->x - g_hx, t->y - g_hy);
-                if (g_cam_valid) {
-                    // The screen faces along the camera's own view vector.
-                    rel = target_b - bearing(g_view_dx, g_view_dy);
-                    used_camera = true;
+            total = (int)g_targets.size();
+            done = total - remaining_locked();
+            const int cur = current_locked();
+            finished = cur < 0;
+
+            if (finished) {
+                // Hold the frame briefly so the last waypoint reads as
+                // finished rather than as the mod having crashed.
+                _snprintf_s(label, sizeof(label), _TRUNCATE, "%d waypoints",
+                            total);
+                _snprintf_s(where, sizeof(where), _TRUNCATE, "Route complete");
+                have = true;
+            } else {
+                const NavTarget& t = g_targets[cur];
+                _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t.label);
+                if (fresh) {
+                    format_to_locked(t, where, sizeof(where));
+                    // One convention for both paths: how far clockwise the
+                    // target sits from whatever is currently "forward". The
+                    // arrow rotates clockwise for positive, so right reads
+                    // right.
+                    const double target_b = bearing(t.x - g_hx, t.y - g_hy);
+                    if (g_cam_valid) {
+                        // The screen faces along the camera's own view vector.
+                        rel = target_b - bearing(g_view_dx, g_view_dy);
+                        used_camera = true;
+                    } else {
+                        // Fallback: the hero's own facing, whose vector is
+                        // (cos rotationZ, sin rotationZ) in world axes. That
+                        // is the same relation farever-minimap's own example
+                        // nav_arrow.lua uses, and it reduces to the arrow
+                        // behaviour already confirmed in game.
+                        rel = target_b - bearing(cos(g_rz), sin(g_rz));
+                    }
+                    diag_target_b = target_b;
                 } else {
-                    // Fallback: the hero's own facing, whose vector is
-                    // (cos rotationZ, sin rotationZ) in world axes. That is the
-                    // same relation farever-minimap's own example nav_arrow.lua
-                    // uses, and it reduces to the arrow behaviour already
-                    // confirmed in game.
-                    rel = target_b - bearing(cos(g_rz), sin(g_rz));
-        }
-        } else {
-            _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
-        }
-        diag_target_b = fresh ? bearing(t->x - g_hx, t->y - g_hy) : 0;
-        diag_cam_d = g_cam_valid ? bearing(g_view_dx, g_view_dy) : 0;
-        diag_rz = g_rz;
-        diag_cam_dist = g_cam_dist;
-        have = true;
+                    _snprintf_s(where, sizeof(where), _TRUNCATE, "...");
+                }
+                have = true;
+            }
+            if (g_mode != kNavNearest)
+                _snprintf_s(progress, sizeof(progress), _TRUNCATE,
+                            "%d / %d - %d left", done, total, total - done);
+            diag_cam_d = g_cam_valid ? bearing(g_view_dx, g_view_dy) : 0;
+            diag_rz = g_rz;
+            diag_cam_dist = g_cam_dist;
         }
     }
-    // No tracked target, or no live hero to measure from (main menu, logout,
-    // loading): draw nothing at all rather than a frame frozen on the last
-    // position it knew.
-    if (!have || !fresh) {
+
+    // A finished route holds the pill for a few seconds and then lets go of
+    // the screen, so it returns to how it was without a click. It does not
+    // let go of the *route*: those waypoints are still the thing you might
+    // want to save or walk again, and quietly deleting them a few seconds
+    // after the last one would throw away a recording as it was finished.
+    // The Routes page keeps showing it, with Restart and Stop next to it.
+    if (finished) {
+        const DWORD at = g_finished_tick;
+        if (!at || GetTickCount() - at > kFinishedMs) {
+            nav_clear_frame();
+            return;
+        }
+    } else if (!have || !fresh) {
+        // No tracked target, or no live hero to measure from (main menu,
+        // logout, loading): draw nothing at all rather than a frame frozen on
+        // the last position it knew.
         nav_clear_frame();
         return;
     }
@@ -405,7 +866,7 @@ void nav_draw(float screen_w, float screen_h) {
     // numbers - no guessing at a second attempt.
     static int last_source = -1;
     const int source = used_camera ? 1 : 0;
-    if (fresh && source != last_source) {
+    if (fresh && !finished && source != last_source) {
         last_source = source;
         host_log("nav: arrow from %s (targetBearing=%.1fdeg viewBearing=%.1fdeg "
                  "heroRotZ=%.1fdeg camToHero=%.1f rel=%.1fdeg)",
@@ -416,19 +877,44 @@ void nav_draw(float screen_w, float screen_h) {
 
     // --- layout: arrow above, distance under it, then what and where ------
     const float kArrowR = 34;
-    const float kDistSz = 22, kNameSz = 14, kLabelSz = 12;
+    const float kDistSz = 22, kNameSz = 14, kLabelSz = 12, kProgSz = 12;
+    const float kKeysSz = 11;
     const float pad = 10;
+    const bool show_progress = progress[0] != 0;
+    const float bar_h = show_progress ? 4.0f : 0.0f;
+
+    // The keys that drive the thing being drawn, shown where you are already
+    // looking. For the first stretch of a new route, then out of the way -
+    // teach it once, and let the frameless pill be frameless after that. The
+    // atlas being open brings it back, alongside the border and the drag
+    // handle.
+    static char seen_key[192] = {0};
+    static DWORD key_tick = 0;
+    if (strcmp(seen_key, key) != 0) {
+        strncpy_s(seen_key, key, _TRUNCATE);
+        key_tick = GetTickCount();
+        if (!key_tick) key_tick = 1;
+    }
+    const bool just_started = key_tick && (GetTickCount() - key_tick) < 20000;
+    const char* keys = "F10 skip     Shift+F10 clear";
+    const bool show_keys = show_progress && (in.visible || just_started);
 
     const float dist_w = measure_text(kDistSz, where);
     const float name_w = measure_text(kNameSz, name);
     const float label_w = measure_text(kLabelSz, label);
+    const float prog_w = show_progress ? measure_text(kProgSz, progress) : 0;
+    const float keys_w = show_keys ? measure_text(kKeysSz, keys) : 0;
     float w = dist_w;
     if (name_w > w) w = name_w;
     if (label_w > w) w = label_w;
+    if (prog_w > w) w = prog_w;
+    if (keys_w > w) w = keys_w;
     if (kArrowR * 2.4f > w) w = kArrowR * 2.4f;
     w += 2 * pad;
-    const float h = pad + kArrowR * 2.1f + 6 + kDistSz + 4 + kNameSz + 3 +
-                    kLabelSz + pad;
+    float h = pad + kArrowR * 2.1f + 6 + kDistSz + 4 + kNameSz + 3 + kLabelSz +
+              pad;
+    if (show_progress) h += 3 + kProgSz + 4 + bar_h;
+    if (show_keys) h += 6 + kKeysSz;
 
     // Placement: persisted, defaulting to just under the top edge, centred -
     // where a waypoint arrow is expected before anyone moves it.
@@ -484,7 +970,7 @@ void nav_draw(float screen_w, float screen_h) {
     g_last_rect[1] = y;
     g_last_rect[2] = w;
     g_last_rect[3] = h;
-    input_set_aux_rect(movable ? (int)x : 0, movable ? (int)y : 0,
+    input_set_aux_rect(0, movable ? (int)x : 0, movable ? (int)y : 0,
                        movable ? (int)w : 0, movable ? (int)h : 0);
 
     // Frameless while playing, like TomTom - only the arrow and its text
@@ -497,15 +983,42 @@ void nav_draw(float screen_w, float screen_h) {
     const float cx = x + w * 0.5f;
     float yy = y + pad;
 
-    draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
+    if (finished)
+        draw_check(cx, yy + kArrowR, kArrowR);
+    else
+        draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
     yy += kArrowR * 2.1f + 6;
 
-    draw_text(cx - dist_w * 0.5f, yy, kDistSz, {1.0f, 1.0f, 1.0f, 1.0f}, where);
+    draw_text(cx - dist_w * 0.5f, yy, kDistSz,
+              finished ? Color{0.62f, 0.94f, 0.62f, 1.0f}
+                       : Color{1.0f, 1.0f, 1.0f, 1.0f},
+              where);
     yy += kDistSz + 4;
     draw_text(cx - name_w * 0.5f, yy, kNameSz, {0.86f, 0.89f, 0.95f, 1.0f}, name);
     yy += kNameSz + 3;
     draw_text(cx - label_w * 0.5f, yy, kLabelSz, {0.55f, 0.60f, 0.70f, 1.0f},
               label);
+
+    if (show_progress) {
+        yy += kLabelSz + 3;
+        draw_text(cx - prog_w * 0.5f, yy, kProgSz, {0.50f, 0.56f, 0.66f, 1.0f},
+                  progress);
+        yy += kProgSz + 4;
+        // The bar carries the whole story at a glance, which the pill needs
+        // more than the numbers do while you are running.
+        const float bw = w - 2 * pad;
+        draw_rect(x + pad, yy, bw, bar_h, {0.14f, 0.16f, 0.22f, 0.9f});
+        const float frac = total > 0 ? (float)done / (float)total : 0.0f;
+        if (frac > 0)
+            draw_rect(x + pad, yy, bw * frac, bar_h, {0.40f, 0.78f, 1.0f, 0.95f});
+        yy += bar_h;
+    }
+
+    if (show_keys) {
+        yy += 6;
+        draw_text(cx - keys_w * 0.5f, yy, kKeysSz, {0.45f, 0.52f, 0.62f, 1.0f},
+                  keys);
+    }
 }
 
 }  // namespace fmk

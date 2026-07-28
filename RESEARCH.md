@@ -190,6 +190,126 @@ files rather than from a wiki:
   factions and reputation, world events, level cap to 50, talent trees, Druid
   and Monk classes, fishing, archaeology, guilds, an auction hall, PvP.
 
+## Can a mod be driven by in-game commands?
+
+Short answer: it can be driven by *typing*, but not by the game's own command
+system, and the difference matters.
+
+The build ships two text surfaces, both fully mapped in
+`tools/out/hl_types.json`:
+
+| Class | What it is | Fields that matter |
+|---|---|---|
+| `h2d.Console` / `ui.Console` | Heaps' developer console, with the game's own commands registered into it | `commands : haxe.ds.StringMap` `+0xe0`, `tf : h2d.TextInput` `+0xc0`, `curCmd : String` `+0x108` |
+| `ui.hud.ChatBox` | The player-facing chat | `messageInput : ui.comp.InputBox` `+0x480`, `messages : ui.BaseElement` `+0x468` |
+
+`ui.Console`'s static fields name the dev commands still compiled in —
+`loadLevel`, `tpElement`, `lootDrops`, `physTree`, `highlightObject`,
+`allFxs`. Registering a command into that map, or pushing text into either
+input, means **writing to game memory and calling into the game** — which is
+the one thing this host does not do, and in the console's case it would also
+be a cheat surface. Reading the chat box's input as you type is possible
+read-only, but a `/whatever` typed there is still sent to the server as a chat
+message, so it is not free either.
+
+The route taken instead: the host already owns a `WndProc` subclass
+(`input.cpp`), so **it can own keys and text of its own** without the game
+being involved at all. That is what F8 already was; **F9** (drop a waypoint)
+and the Routes page's text field are the same mechanism. A full `/`-style
+command line for the host would be the next step on that same path, and would
+need nothing new from the game.
+
+## Can fareverdb.com fill in missing locations?
+
+It could, and its coordinates are *exactly* ours — but it is not needed, and
+taking it would be taking someone else's work.
+
+`https://fareverdb.com/data/world_markers.json` is a plain static file, 840 KB,
+3108 markers for `W1_Siagarta`: 1155 creature, 877 poi, 576 gatherable, 445
+chest, 23 orb-chest, 18 npc, 12 dungeon, 2 rift. Each carries raw `x/y/z` plus
+a map-projected `lng/lat`, a zone id and a level.
+
+The raw coordinates are the same world space this repo already uses, confirmed
+on a shared object rather than assumed: `Madrigold_Small` reads
+`-9.70, 1011.68, 83.26` in their file and `-9.6961, 1011.6821, 83.2592` in
+`tools/out/pois_W1_Siagarta.json`.
+
+But the site says plainly that its data is "extracted directly from the game
+files", and so is ours — `tools/gen-routes.mjs` now reads the same 829 world
+tiles out of `res.map.pak` and gets 1051 collectible nodes with the zone each
+was baked into. The two overlap almost exactly where they overlap at all (both
+find 576 gatherables). What their file adds is creature spawn markers and
+per-marker levels, and both of those are derivable from the same tiles.
+
+So: **no dependency**. Their `robots.txt` reserves rights over the content
+(`Content-Signal: ai-train=no, use=reference`), redistributing their file in
+this repo is not ours to do, and a scrape breaks on their next redesign while a
+pak read breaks only on a game patch — which is a thing this toolchain already
+handles. FareverDB is a good site and worth linking to; it is not worth
+depending on.
+
+## Reading the game's own map, read-only
+
+`ui.win.MapWindow` turns out to be the best-instrumented object in the client
+for this purpose:
+
+```
+ui.win.MapWindow
+  +0x530  mouseCursor         : ui.win.map.MapMarker   <- world pos under the cursor
+  +0x568  nearClickableMarker : ui.win.map.MapMarker   <- the POI being hovered
+  +0x570  pinMarkers          : hl.types.ArrayObj      <- the player's own pins
+  +0x548  markers / +0x550 memoMarkers / +0x4f8 activities
+  +0x4e8  obelisks / +0x4f0 respawnPoints / +0x4c8 allZones
+  +0x620  debugCursorWorldPos : ui.comp.FmtText
+
+ui.win.map.MapMarker
+  +0x448  worldPos : h3d.VectorImpl
+```
+
+`MapMarker.worldPos` is a world-space vector, so "click a POI on the map to
+make it a waypoint" is a **read**. No writes, no hooks. This is what
+`host/src/mapwatch.cpp` does.
+
+**But not through `nearClickableMarker`**, which is the obvious-looking field
+and the wrong one. It sits with `crosshair`, `crosshairCheckbox` and a
+`showCrosshair` static: it is the *gamepad* cursor's snap target, and it stays
+null when playing with a mouse. `mouseCursor` is the same story one field
+over — it belongs to the debug readout (`debugCursor2DPos`,
+`debugCursorWorldPos`). A live run with the map open logged both as null.
+
+What works is the marker list plus each marker's own screen position, since
+every marker is an `h2d.Object`:
+
+```
+ui.win.MapWindow +0x548  markers : hl.types.ArrayObj   (all markers on screen)
+ui.win.MapWindow +0x570  pinMarkers                    (the player's own pins)
+h2d.Object       +0x098  absX : F64
+h2d.Object       +0x0a0  absY : F64
+```
+
+So a click becomes a proximity test between the mouse and every visible
+marker's `absX`/`absY`, and the winner's `worldPos` is the waypoint. Those
+are UI-scene units rather than swap-chain pixels, so the mouse is mapped
+through the ratio between `GameApp.gui.s2d`'s `width`/`height` and the frame
+size — assuming 1:1 would put the hit test somewhere else entirely on a
+scaled UI.
+
+The window itself is found without a memory scan: `GameApp.gui` is a
+`ui.GameUI`, which extends `ui.BaseUI`, whose `windows` at `+0x90` is a short
+`ArrayObj` of window instances — walk it once for the right class and cache
+the pointer, re-validating it by class name the way `reader_hero()` does.
+
+Two gotchas, both found the hard way:
+
+- **`windows` holds only the windows that are open.** A live run logged
+  `windows[0] of 1` with the map up, and a *different* `MapWindow` pointer on
+  the next open — so presence in that list is itself "the map is open", and
+  the first attempt's extra `visible && parent` gate was what silently
+  rejected every map click. Do not cache the pointer either: a closed
+  window's block still passes a type check until the collector reuses it.
+- **`near` is a `windef.h` macro.** `void* near = ...` fails to compile with
+  the error reported on the *following* line.
+
 ## Debunked: the "Farever modding" content farms
 
 A large share of search results for Farever modding are auto-generated SEO
@@ -223,4 +343,7 @@ Treat anything from those sources as unverified.
 - [Sviat/qbms_shirogames](https://github.com/Sviat/qbms_shirogames) — Shiro `res.pak` QuickBMS script
 - [Wartales modding guides on Nexus](https://www.nexusmods.com/wartales/articles/11)
 - [Massively OP — Farever early access launch](https://massivelyop.com/2026/05/06/shiros-easygoing-mmo-farever-officially-rolls-into-early-access-today-with-an-ambitious-roadmap/)
+- [FareverDB](https://www.fareverdb.com/) — fan-made database and world map.
+  Nothing here depends on it, but it is the best cross-check going for
+  anything extracted from the game files.
 - [RPG Site — Farever EA launch and roadmap](https://www.rpgsite.net/news/20313-farever-steam-early-access-discount-now-available-full-content-roadmap)

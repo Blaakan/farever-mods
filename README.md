@@ -27,6 +27,41 @@ every collectible category in the game.
 Press **F8** in game. See **[host/README.md](host/README.md)** for how it
 works and how to build it.
 
+## Routes
+
+The waypoint arrow follows a whole list, not one place. **69 routes and 1001
+waypoints** are generated straight out of the game's level data — every world,
+recipe, orb, vault and camp chest, every secret orb, and every ore and herb
+node, grouped by area. Start one and the arrow points at the nearest waypoint
+you have not reached yet; walk into it and it is crossed off and the next one
+appears, with a `7 / 23` progress bar on the pill.
+
+- **Ctrl+click an atlas entry** to add it to the route, **Shift+click** to put
+  it first — a run assembled out of the atlas itself
+- **Click a point of interest on the game's own map** and it becomes a
+  waypoint — the map already runs the hit test and every marker already knows
+  its world position, so this is a read, and the click still reaches the game
+- **F9 drops a waypoint where you stand** — recording a route is walking it
+- **F10 skips the current waypoint**, **Shift+F10** clears the route
+- **Save as route** names what you dropped and keeps it
+- **Copy / Import** move a route through the clipboard as one `FMKR1:` line,
+  so routes travel through Discord without anyone agreeing on where files live
+
+The **Routes** tab in the atlas window drives all of it.
+
+## Recent Loots
+
+The game's own loot line lasts a second or two — not long enough to read mid
+fight, and gone for good once it goes. This keeps a feed on screen: items with
+their own icon and rarity colour, experience, currency and level-ups, newest
+first, fading on their own timer. Open the atlas and it holds still so you can
+read it.
+
+There is no loot event to hook, because the host only reads, so the feed is a
+diff of your bags, purse and experience twice a second. It reports **gains to
+your bags** — a bank withdrawal reads the same as a chest, and losses are
+never reported at all.
+
 ## Everything else
 
 | Component | What it does |
@@ -74,15 +109,16 @@ host/build.cmd
 ```
 
 ```bash
-node tools/gen-offsets.mjs && node tools/gen-atlas.mjs
+node tools/gen-offsets.mjs && node tools/gen-atlas.mjs && node tools/gen-routes.mjs
 ```
 
 The first reads the game's bytecode for the field offsets the reader needs;
 the second builds the item database and icon atlas out of the game's own
-files, and copies both next to `Farever.exe`. Then put
+files; the third reads the world's level tiles for the starter route set.
+All three copy their output next to `Farever.exe`. Then put
 `host/build/dxgi.dll` in that same folder and launch. **F8** opens it.
 
-Re-run both after a game patch. The host refuses to read memory when the
+Re-run all three after a game patch. The host refuses to read memory when the
 bytecode hash does not match what its offsets were generated from, so a
 patch degrades to "does nothing" rather than to a crash.
 
@@ -174,10 +210,14 @@ host/                      the standalone mod host - see host/README.md
   src/overlay_d3d12.*        Present hook, font atlas, textured quads
   src/input.*                WndProc subclass: toggle, mouse, text
   src/atlas_ui.*             the Collection Atlas window
-  src/navigator.*            the waypoint arrow
+  src/navigator.*            the waypoint arrow, and following a route
+  src/routes.*               saved routes: files, share codes, the Routes page
+  src/mapwatch.*             waypoints from the game's own map, read-only
+  src/loot.*                 the Recent Loots feed
 tools/
   gen-offsets.mjs          field offsets -> host/src/offsets.gen.h
   gen-atlas.mjs            the Atlas database: item TSV + BC7 icon atlas
+  gen-routes.mjs           the generated route set, out of the world's tiles
   scan-hlboot.mjs          HashLink bytecode string-table extractor
   scan-hltypes.mjs         HashLink type/field-offset extractor
   pak-extract.mjs          Shiro/Heaps .pak reader (list + extract)

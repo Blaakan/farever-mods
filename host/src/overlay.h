@@ -34,6 +34,12 @@ bool overlay_ready();
 using DrawFn = void (*)(float width, float height);
 void overlay_set_draw(DrawFn fn);
 
+// The size of the last frame presented, from any thread. False before the
+// first one. Anything that has to relate the game's own UI to screen pixels
+// off the render thread needs this - the map hit test, which runs on the pose
+// thread, is the reason it exists.
+bool overlay_frame_size(float* w, float* h);
+
 // --- draw API (valid only inside the draw callback) ------------------------
 void draw_rect(float x, float y, float w, float h, Color c);
 void draw_rect_outline(float x, float y, float w, float h, float thickness, Color c);

@@ -32,6 +32,8 @@ void host_log(const char* fmt, ...);
 namespace {
 
 constexpr UINT kToggleKey = VK_F8;
+constexpr UINT kWaypointKey = VK_F9;
+constexpr UINT kSkipKey = VK_F10;
 constexpr DWORD kRectFreshMs = 3000;
 
 HWND    g_hwnd = nullptr;
@@ -41,10 +43,13 @@ volatile LONG g_mouse_x = 0, g_mouse_y = 0;
 volatile LONG g_lbutton = 0;        // press started inside the UI, still held
 volatile LONG g_clicks = 0;
 volatile LONG g_click_x = 0, g_click_y = 0;
+volatile LONG g_click_mods = 0;      // MK_SHIFT / MK_CONTROL at press time
 volatile LONG g_wheel_raw = 0;      // accumulated wheel delta (not detents)
 volatile LONG g_visible = 0;
 volatile LONG g_rect[4] = {0, 0, 0, 0};   // x, y, w, h
-volatile LONG g_aux[4] = {0, 0, 0, 0};    // the navigator's frame
+// One per mod with a movable frame: [0] the navigator's pill, [1] the loot
+// feed. Unclaimed slots stay zero, and a zero-sized rect swallows nothing.
+volatile LONG g_aux[kAuxRects][4] = {};
 volatile LONG g_rect_tick = 0;            // GetTickCount of the last publish
 
 // Typed text, as a single-producer single-consumer ring: the window thread
@@ -55,6 +60,25 @@ char g_text[kTextRing];
 volatile LONG g_text_head = 0;   // written by the window thread
 volatile LONG g_text_tail = 0;   // written by the render thread
 volatile LONG g_capture = 0;
+volatile LONG g_waypoint_presses = 0;
+volatile LONG g_skip_presses = 0;
+volatile LONG g_clear_presses = 0;
+
+// Left-clicks that pass through to the game, counted but never taken. The
+// press is remembered and the counter only advances on release, because a
+// press is not yet a click: the game's map pans with the same button, and
+// treating the start of a pan as a click would drop a waypoint every time
+// the player moved the map. A click is a release near where the press
+// landed, soon after it.
+volatile LONG g_raw_down = 0;
+volatile LONG g_raw_down_x = 0, g_raw_down_y = 0;
+volatile LONG g_raw_down_tick = 0;
+volatile LONG g_raw_down_mods = 0;
+volatile LONG g_raw_clicks = 0;
+volatile LONG g_raw_x = 0, g_raw_y = 0;
+volatile LONG g_raw_mods = 0;
+constexpr LONG kClickSlopPx = 6;
+constexpr DWORD kClickMs = 500;
 
 // Latches so the second half of a swallowed press/key never leaks.
 volatile LONG g_rbtn_held = 0;
@@ -68,7 +92,10 @@ bool in_rect(const volatile LONG* r, int x, int y) {
 }
 
 bool in_ui_rect(int x, int y) {
-    return in_rect(g_rect, x, y) || in_rect(g_aux, x, y);
+    if (in_rect(g_rect, x, y)) return true;
+    for (int i = 0; i < kAuxRects; i++)
+        if (in_rect(g_aux[i], x, y)) return true;
+    return false;
 }
 
 // Visible AND the render thread is actually drawing the window. The rect is
@@ -84,6 +111,21 @@ void clear_held_buttons() {
     InterlockedExchange(&g_rbtn_held, 0);
     InterlockedExchange(&g_mbtn_held, 0);
     InterlockedExchange(&g_xbtn_held, 0);
+    // The release will never arrive, so the press must not survive to be
+    // paired with an unrelated one later.
+    InterlockedExchange(&g_raw_down, 0);
+}
+
+// F10, from whichever message carried it. Shift decides which of the two
+// counters moves, read here rather than when the count is consumed - by then
+// the key is long back up.
+void note_skip_key(LPARAM lp) {
+    if (lp & (1 << 30)) return;                              // autorepeat
+    if (InterlockedCompareExchange(&g_capture, 0, 0)) return;  // typing
+    if (GetKeyState(VK_SHIFT) & 0x8000)
+        InterlockedIncrement(&g_clear_presses);
+    else
+        InterlockedIncrement(&g_skip_presses);
 }
 
 LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -94,6 +136,19 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kToggleKey && !(lp & (1 << 30))) {   // ignore autorepeat
                 InterlockedXor(&g_visible, 1);
                 InterlockedExchange(&g_capture, 0);
+                return 0;
+            }
+            // Held down, F9 would carpet the route with waypoints, so it
+            // counts presses and not repeats. It is swallowed either way,
+            // which keeps the game from also acting on it.
+            if (wp == kWaypointKey) {
+                if (!(lp & (1 << 30)) &&
+                    !InterlockedCompareExchange(&g_capture, 0, 0))
+                    InterlockedIncrement(&g_waypoint_presses);
+                return 0;
+            }
+            if (wp == kSkipKey) {
+                note_skip_key(lp);
                 return 0;
             }
             if (wp == VK_ESCAPE && active) {
@@ -118,8 +173,24 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
 
+        // **F10 pressed alone arrives here, not as WM_KEYDOWN**: Windows
+        // treats it as the menu-activation key. Only F10 is intercepted -
+        // everything else, Alt+F4 and Alt+Tab included, falls through to the
+        // game and to DefWindowProc untouched.
+        case WM_SYSKEYDOWN:
+            if (wp == kSkipKey) {
+                note_skip_key(lp);
+                return 0;
+            }
+            break;
+
+        case WM_SYSKEYUP:
+            if (wp == kSkipKey) return 0;
+            break;
+
         case WM_KEYUP:
-            if (wp == kToggleKey) return 0;
+            if (wp == kToggleKey || wp == kWaypointKey || wp == kSkipKey)
+                return 0;
             if (wp == VK_ESCAPE && InterlockedExchange(&g_esc_held, 0)) return 0;
             if (active && InterlockedCompareExchange(&g_capture, 0, 0)) {
                 if (wp == VK_BACK || wp == VK_RETURN || wp == VK_SPACE ||
@@ -162,6 +233,8 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (active && in_ui_rect(x, y)) {
                 InterlockedExchange(&g_click_x, x);
                 InterlockedExchange(&g_click_y, y);
+                InterlockedExchange(&g_click_mods,
+                                    (LONG)(wp & (MK_SHIFT | MK_CONTROL)));
                 InterlockedExchange(&g_lbutton, 1);
                 InterlockedIncrement(&g_clicks);
                 // Capture keeps the release visible even when it lands
@@ -169,6 +242,16 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SetCapture(hwnd);
                 return 0;
             }
+            // Not ours. Remember it so the release can decide whether it was
+            // a click, and let the message through untouched.
+            InterlockedExchange(&g_raw_down, 1);
+            InterlockedExchange(&g_raw_down_x, x);
+            InterlockedExchange(&g_raw_down_y, y);
+            InterlockedExchange(&g_raw_down_tick, (LONG)GetTickCount());
+            // Modifiers are recorded now, not when the click is read: the
+            // poll can be 50ms behind, by which time shift may be back up.
+            InterlockedExchange(&g_raw_down_mods,
+                                (LONG)(wp & (MK_SHIFT | MK_CONTROL)));
             break;
         }
 
@@ -176,6 +259,24 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (InterlockedExchange(&g_lbutton, 0)) {
                 if (GetCapture() == hwnd) ReleaseCapture();
                 return 0;
+            }
+            if (InterlockedExchange(&g_raw_down, 0)) {
+                const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                const LONG dx = x - InterlockedCompareExchange(&g_raw_down_x, 0, 0);
+                const LONG dy = y - InterlockedCompareExchange(&g_raw_down_y, 0, 0);
+                const DWORD held =
+                    GetTickCount() -
+                    (DWORD)InterlockedCompareExchange(&g_raw_down_tick, 0, 0);
+                if (dx <= kClickSlopPx && dx >= -kClickSlopPx &&
+                    dy <= kClickSlopPx && dy >= -kClickSlopPx &&
+                    held < kClickMs) {
+                    InterlockedExchange(&g_raw_x, x);
+                    InterlockedExchange(&g_raw_y, y);
+                    InterlockedExchange(
+                        &g_raw_mods,
+                        InterlockedCompareExchange(&g_raw_down_mods, 0, 0));
+                    InterlockedIncrement(&g_raw_clicks);
+                }
             }
             break;
 
@@ -292,6 +393,9 @@ void input_peek(InputState* out) {
     out->clicks  = InterlockedCompareExchange(&g_clicks, 0, 0);
     out->click_x = InterlockedCompareExchange(&g_click_x, 0, 0);
     out->click_y = InterlockedCompareExchange(&g_click_y, 0, 0);
+    const LONG cmods = InterlockedCompareExchange(&g_click_mods, 0, 0);
+    out->click_shift = (cmods & MK_SHIFT) != 0;
+    out->click_ctrl = (cmods & MK_CONTROL) != 0;
     out->lbutton = InterlockedCompareExchange(&g_lbutton, 0, 0) != 0;
     out->mouse_x = InterlockedCompareExchange(&g_mouse_x, 0, 0);
     out->mouse_y = InterlockedCompareExchange(&g_mouse_y, 0, 0);
@@ -311,6 +415,28 @@ void input_get(InputState* out) {
 void input_set_visible(bool v) {
     InterlockedExchange(&g_visible, v ? 1 : 0);
     if (!v) InterlockedExchange(&g_capture, 0);
+}
+
+int input_take_waypoint_presses() {
+    return (int)InterlockedExchange(&g_waypoint_presses, 0);
+}
+
+int input_take_skip_presses() {
+    return (int)InterlockedExchange(&g_skip_presses, 0);
+}
+
+int input_take_clear_presses() {
+    return (int)InterlockedExchange(&g_clear_presses, 0);
+}
+
+void input_peek_raw_click(RawClick* out) {
+    if (!out) return;
+    out->count = (int)InterlockedCompareExchange(&g_raw_clicks, 0, 0);
+    out->x = (int)InterlockedCompareExchange(&g_raw_x, 0, 0);
+    out->y = (int)InterlockedCompareExchange(&g_raw_y, 0, 0);
+    const LONG mods = InterlockedCompareExchange(&g_raw_mods, 0, 0);
+    out->shift = (mods & MK_SHIFT) != 0;
+    out->ctrl = (mods & MK_CONTROL) != 0;
 }
 
 void input_set_text_capture(bool on) {
@@ -343,11 +469,12 @@ void input_set_ui_rect(int x, int y, int w, int h) {
 
 bool input_in_main_rect(int x, int y) { return in_rect(g_rect, x, y); }
 
-void input_set_aux_rect(int x, int y, int w, int h) {
-    InterlockedExchange(&g_aux[0], x);
-    InterlockedExchange(&g_aux[1], y);
-    InterlockedExchange(&g_aux[2], w);
-    InterlockedExchange(&g_aux[3], h);
+void input_set_aux_rect(int slot, int x, int y, int w, int h) {
+    if (slot < 0 || slot >= kAuxRects) return;
+    InterlockedExchange(&g_aux[slot][0], x);
+    InterlockedExchange(&g_aux[slot][1], y);
+    InterlockedExchange(&g_aux[slot][2], w);
+    InterlockedExchange(&g_aux[slot][3], h);
 }
 
 }  // namespace fmk

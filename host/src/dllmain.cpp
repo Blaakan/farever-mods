@@ -47,8 +47,11 @@
 #include "hl_runtime.h"
 #include "dxgi_wrap.h"
 #include "input.h"
+#include "loot.h"
+#include "mapwatch.h"
 #include "navigator.h"
 #include "overlay.h"
+#include "routes.h"
 #include "offsets.gen.h"
 
 #pragma intrinsic(_ReturnAddress)
@@ -169,6 +172,7 @@ volatile LONG g_world_changed = 0;
 // its pill.
 void host_draw(float w, float h) {
     fmk::nav_draw(w, h);
+    fmk::loot_draw(w, h);
     fmk::atlas_ui_draw(w, h);
 }
 
@@ -179,12 +183,18 @@ void worker_sleep(int seconds) {
         Sleep(1000);
         fmk::atlas_ui_tick();
         fmk::nav_tick();
+        fmk::routes_tick();
+        fmk::loot_tick();
         // Entering or leaving the world cuts the wait short, so stepping
         // into the world refreshes the atlas at once instead of showing
         // nothing until the cycle happens to come round.
         if (InterlockedExchange(&g_world_changed, 0)) return;
     }
 }
+
+// Whether a character is in play, published by the pose thread so the loot
+// thread does not have to ask the reader the same question twice.
+volatile LONG g_in_world = 0;
 
 // The navigator's arrow rotates with the camera; at the worker's cadence it
 // would visibly lag every turn. This thread does nothing but a handful of
@@ -200,6 +210,7 @@ DWORD WINAPI pose_worker(LPVOID) {
         if (in_world != prev_in_world) {
             prev_in_world = in_world;
             fmk::atlas_ui_set_in_world(in_world);
+            InterlockedExchange(&g_in_world, in_world ? 1 : 0);
             InterlockedExchange(&g_world_changed, 1);
         }
         if (in_world) {
@@ -215,7 +226,33 @@ DWORD WINAPI pose_worker(LPVOID) {
             fmk::nav_set_hero_pose(false, 0, 0, 0, 0);
             fmk::nav_set_camera(false, 0, 0, 0, 0, 0, 0);
         }
+        // After the pose, so a waypoint dropped on this tick measures against
+        // a position stamped on this tick. Called even out of the world, so
+        // its click and key counters stay synchronised rather than firing a
+        // backlog on the next zone-in.
+        fmk::mapwatch_poll(in_world);
+
+        // The navigator's two live controls. Consumed unconditionally so a
+        // press at the main menu is dropped rather than queued up to fire on
+        // the next zone-in, and handled here rather than in mapwatch because
+        // neither has anything to do with the map.
+        for (int i = fmk::input_take_skip_presses(); i > 0; i--)
+            fmk::nav_skip();
+        for (int i = fmk::input_take_clear_presses(); i > 0; i--)
+            fmk::nav_untrack();
         Sleep(50);
+    }
+    return 0;
+}
+
+// The Recent Loots feed has no event to hook - the host only reads - so it
+// diffs a small slice of state against its last reading. Twice a second: fast
+// enough that a pickup lands on screen while you are still looking at the
+// chest, cheap enough that it is a rounding error against a frame.
+DWORD WINAPI loot_worker(LPVOID) {
+    while (!g_stop) {
+        fmk::loot_poll(InterlockedCompareExchange(&g_in_world, 0, 0) != 0);
+        Sleep(500);
     }
     return 0;
 }
@@ -296,8 +333,19 @@ DWORD WINAPI worker(LPVOID) {
     // once the build is verified; the thread stays a no-op until the worker
     // has located a hero.
     fmk::nav_init();
+    // Routes are only files on disk until something starts one, so they load
+    // beside the navigator and before anything can ask for them.
+    fmk::routes_init();
+    fmk::loot_init();
+    fmk::mapwatch_init();
     HANDLE pose = CreateThread(nullptr, 0, pose_worker, nullptr, 0, nullptr);
     if (pose) CloseHandle(pose);   // fire-and-forget; g_stop ends it
+    // The loot feed needs its own cadence: twice a second is fast enough that
+    // a pickup feels immediate, and slow enough that walking the bags costs
+    // nothing measurable. It cannot ride the pose thread, whose whole point
+    // is that it does a handful of qword reads and never touches an array.
+    HANDLE loot = CreateThread(nullptr, 0, loot_worker, nullptr, 0, nullptr);
+    if (loot) CloseHandle(loot);
 
     bool reported = false;
     bool overlay_tried = false;

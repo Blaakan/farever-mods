@@ -295,6 +295,10 @@ const soldItems = new Set();
 const shopPoints = [];      // {item, vendor, x, y, z, zone}
 const spawnPoints = [];     // {unit, unitGroup, x, y, z, zone}
 const activityOrbs = new Map();   // targetActivity id -> {x, y, z, zone}
+// Soulstone altars. Each one names the stone it consumes and the demon it
+// invokes, so the link between the two - and the exact place you go to use
+// one - is in the world data rather than in a naming convention.
+const invocationSites = [];       // {unit, item, x, y, z, zone}
 
 function isSpawner(node) {
   return node.props && node.props.$cdbtype === 'spawner';
@@ -340,6 +344,15 @@ function scanWorld(pak, pathFilter) {
       const target = props.props && props.props.targetActivity;
       if (target && !activityOrbs.has(target))
         activityOrbs.set(target, { x, y, z, zone });
+      // An altar that trades an item for a monster. This is where a rift
+      // soulstone is actually used, which is nowhere near the rift that
+      // dropped it.
+      const spawn = props.props && props.props.spawnUnit;
+      if (spawn && spawn.unit) {
+        const cost = ((props.props.interactible || {}).cost || [])[0];
+        invocationSites.push({ unit: spawn.unit, item: cost ? cost.item : null,
+                               x, y, z, zone });
+      }
     });
   }
   return { parsed, failed };
@@ -416,6 +429,31 @@ const mkTarget = (label, poi) => ({
 });
 
 const vaultChests = pois.filter((e) => e.name === 'VaultChest');
+
+// Rift doors. A rift is an instance like a dungeon is, so the world side of
+// it is the activity orb that opens it - `POI_Rift_01` sits at a real place
+// in Krisomal North. This is where a soulstone *drops*.
+const riftEntrances = [...activityOrbs.entries()]
+  .filter(([id]) => /rift/i.test(id))
+  .map(([, o]) => o);
+
+// ...and this is where one is *used*, which is somewhere else entirely: an
+// altar out in the world, one per demon. Indexed both ways, because the
+// demon's entry wants "where do I summon it" and the stone's wants "where
+// does this get spent".
+const sitesByUnit = new Map();
+const sitesByStone = new Map();
+const stoneForUnit = new Map();
+for (const s of invocationSites) {
+  if (!sitesByUnit.has(s.unit)) sitesByUnit.set(s.unit, []);
+  sitesByUnit.get(s.unit).push(s);
+  if (!s.item) continue;
+  stoneForUnit.set(s.unit, s.item);
+  if (!sitesByStone.has(s.item)) sitesByStone.set(s.item, []);
+  sitesByStone.get(s.item).push(s);
+}
+const invocationTargets = (sites) =>
+  clusterTargets(sites, (c) => `Invocation site - ${prettyZone(c.zone)}`);
 const merchantPois = pois.filter((e) => e.kind === 'merchant');
 const dungeonPois = pois.filter((e) => e.kind === 'dungeon');
 
@@ -563,19 +601,15 @@ function bestCluster(points, radius = 120) {
            entrance: best.entrance, n: near.length };
 }
 
-// A creature's targets: its best few clusters, so a unit found in two
+// The best few clusters of a set of points, so something found in two
 // regions offers both and the navigator picks whichever is nearer.
-function creatureTargets(unitId) {
-  const points = unitPoints.get(unitId);
+function clusterTargets(points, label, max = 3) {
   if (!points || !points.length) return [];
   const targets = [];
   let remaining = points.slice();
-  for (let i = 0; i < 3 && remaining.length; i++) {
+  for (let i = 0; i < max && remaining.length; i++) {
     const c = bestCluster(remaining);
-    const label = c.entrance
-      ? `Dungeon entrance - ${prettyZone(c.zone)}`
-      : prettyZone(c.zone);
-    targets.push(mkTarget(label, c));
+    targets.push(mkTarget(label(c), c));
     remaining = remaining.filter((p) => {
       const dx = p.x - c.x, dy = p.y - c.y;
       return dx * dx + dy * dy > 120 * 120;
@@ -584,14 +618,53 @@ function creatureTargets(unitId) {
   return targets;
 }
 
+// A creature's targets: where that unit stands, or the door to the dungeon
+// it lives behind.
+function creatureTargets(unitId) {
+  return clusterTargets(unitPoints.get(unitId), (c) =>
+    c.entrance ? `Dungeon entrance - ${prettyZone(c.zone)}`
+               : prettyZone(c.zone));
+}
+
+// Where a whole faction is. An outfit set is the gear of the enemies it was
+// taken from, and the item rows say which faction each piece belongs to - so
+// "where do I farm this appearance" is "where does that faction live", which
+// is the union of its units' spawn points.
+const factionPoints = new Map();
+for (const u of units) {
+  if (!u.faction) continue;
+  const pts = unitPoints.get(u.id);
+  if (!pts || !pts.length) continue;
+  if (!factionPoints.has(u.faction)) factionPoints.set(u.faction, []);
+  factionPoints.get(u.faction).push(...pts);
+}
+
+function factionTargets(faction) {
+  return clusterTargets(factionPoints.get(faction),
+                        (c) => `${faction} - ${prettyZone(c.zone)}`);
+}
+
 function targetsFor(itemId, sold) {
   const targets = [];
   const push = (t) => {
     if (targets.length < 6 && t.label && !targets.some((o) => o.label === t.label))
       targets.push(t);
   };
+  // A soulstone has two places, and they are nowhere near each other: the
+  // rift it drops in, and the altar it is spent at. The altar goes first
+  // because a stone you are holding is one you want to use.
+  for (const t of invocationTargets(sitesByStone.get(itemId))) push(t);
   for (const { id } of resolvedTables(itemId)) {
     let m;
+    // Anything that only comes out of a rift: the tiered rift tables, and
+    // the Soulstone table that the rift chests roll on. There is no id
+    // linking a loot table to an activity, so the table's own name is the
+    // link - which is fine, since it is the game's naming and not ours.
+    if (/^Rift/.test(id) || id === 'Soulstone') {
+      for (const r of riftEntrances)
+        push(mkTarget(`Rift - ${prettyZone(r.zone)}`, r));
+      continue;
+    }
     if ((m = id.match(/^Vault_Z(\d+)_\d+$/))) {
       for (const c of vaultChests)
         if ((c.zone || '').startsWith(`Z${m[1]}_`))
@@ -600,11 +673,27 @@ function targetsFor(itemId, sold) {
     }
     const unit = unitById.get(id) || unitById.get(id.replace(/_?LT2$/, ''));
     if (unit) {
-      // POI names abbreviate ('Nepsid' for Nepsilon), so match on a prefix.
-      const frag = unit.id.slice(0, 5).toLowerCase();
-      for (const d of dungeonPois)
-        if ((d.name || '').toLowerCase().includes(frag))
-          push(mkTarget(`${unit.texts?.name || unit.id} - ${prettyZone(d.zone)}`, d));
+      // Where that creature actually is - the same answer its own bestiary
+      // entry gives, including "at the entrance of the dungeon it lives in"
+      // for a boss that has no world position of its own.
+      //
+      // This used to look only for a dungeon POI whose *name* contained the
+      // first five letters of the unit id, which finds nothing whenever a
+      // dungeon is not named after its boss. High Inquisitor Chakram is the
+      // unit `Phrixes` and no POI is called anything like it, so the mount
+      // it drops had no target at all while the bestiary entry beside it had
+      // one all along.
+      const who = cleanText(unit.texts?.name || unit.id);
+      const found = creatureTargets(unit.id);
+      for (const t of found) push({ ...t, label: `${who} - ${t.label}` });
+      // The name match stays as a fallback: it can still name an entrance
+      // for a unit the world walk never placed.
+      if (!found.length) {
+        const frag = unit.id.slice(0, 5).toLowerCase();
+        for (const d of dungeonPois)
+          if ((d.name || '').toLowerCase().includes(frag))
+            push(mkTarget(`${who} - ${prettyZone(d.zone)}`, d));
+      }
     }
   }
   // Vendors now come from the prefabs with their own names and positions,
@@ -656,21 +745,57 @@ for (const t of lootTables) {
   }
   if (items.length) dropsByUnit.set(t.id, items);
 }
+// Where an outfit piece comes from when no loot table mentions it - which is
+// 385 of the 428 appearances, because cosmetic armour is not placed in tables
+// at all. The item's own row still knows: a faction set is the gear of the
+// enemies it was taken from, and the generic sets carry their rarity and zone
+// in the model path they load.
+const regionDisplay = (z) =>
+  cleanText(zoneById.get(`${z}_Region`)?.texts?.name || '') || z;
+
+function outfitOrigin(l) {
+  const model = l.visuals?.modelPath || '';
+  // Starter and World are not places you can go; Craft is already covered by
+  // the craft lookup.
+  if (l.faction && !['Starter', 'World', 'Craft'].includes(l.faction)) {
+    return { lines: [`Drops from ${l.faction} enemies`],
+             targets: factionTargets(l.faction) };
+  }
+  if (/\/Starter\//.test(model) || /_Starter_/.test(l.id))
+    return { lines: ['Starting outfit'], targets: [] };
+  if (/\/BaseClothes\//.test(model))
+    return { lines: ['Base clothing'], targets: [] };
+  // Outfit/Uncommon/Z2/FigCle/... - a tier and a region, and no one place:
+  // it drops from anything in that region, so saying where would be a lie.
+  const m = model.match(/Outfit\/(\w+)\/Z(\d)\//);
+  if (m)
+    return { lines: [`${m[1]} gear from ${regionDisplay(`Z${m[2]}`)} enemies`],
+             targets: [] };
+  return { lines: [], targets: [] };
+}
+
 const entries = [];   // { category, id, name, rarity, desc, acquire, gfxFile }
 
 for (const l of items) {
   const category = categoryOf(l);
   if (!category) continue;
   const gfx = l.gfx || {};
+  // Acquisition strings embed unit display names, which can be non-ASCII.
+  let acquire = acquisitionOf(l.id).map(cleanText);
+  let track = targetsFor(l.id, soldItems.has(l.id));
+  if (category === 'appearances' && !acquire.length) {
+    const o = outfitOrigin(l);
+    acquire = o.lines.map(cleanText);
+    if (!track.length) track = o.targets;
+  }
   entries.push({
     category,
     id: l.id,
     name: cleanText(l.texts?.name) || l.id,
     rarity: Math.max(0, rarities.indexOf(l.rarity ?? 'Common')),
     desc: cleanText(l.texts?.desc),
-    // Acquisition strings embed unit display names, which can be non-ASCII.
-    acquire: acquisitionOf(l.id).map(cleanText),
-    track: targetsFor(l.id, soldItems.has(l.id)),
+    acquire,
+    track,
     tags: tagsFor(l, category),
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
@@ -757,6 +882,9 @@ for (const c of crafts) {
   });
 }
 
+console.log(`summons: ${invocationSites.length} altars, ` +
+            `${sitesByUnit.size} units invoked from an item`);
+
 // Creatures: the bestiary. Everything the codex shows, which is the unit
 // list minus the entries flagged NoCodex, the *_Base templates and the
 // player classes - all of which give themselves away by having no portrait.
@@ -767,10 +895,13 @@ for (const u of units) {
   // include them.
   if (u.type === 'Critter') continue;
   // Only what a player can actually reach: a monster has to spawn in one
-  // of the released regions, in the world or inside one of its dungeons.
+  // of the released regions, in the world or inside one of its dungeons -
+  // or be summonable, which is reaching it by another route entirely.
   // Z4 and the test zone are flagged hidden in the codex for that reason.
   const regions = unitRegions.get(u.id);
-  if (!regions || !regions.size) continue;
+  const sites = sitesByUnit.get(u.id);
+  const summon = itemById.get(stoneForUnit.get(u.id) || '');
+  if ((!regions || !regions.size) && !sites) continue;
   const gfx = u.gfx || {};
   if (!gfx.file || !gfx.file.startsWith('UI/Portraits/')) continue;
 
@@ -788,13 +919,36 @@ for (const u of units) {
     facts.push(`Drops: ${named.join(', ')}`);
   }
 
-  const targets = creatureTargets(u.id);
+  let targets = creatureTargets(u.id);
   if (targets.length) {
     // Two clusters can sit in one zone; the navigator still wants both, but
     // naming the place twice in the tooltip reads like a mistake.
     const places = [...new Set(targets.map((t) => t.label))];
     facts.push(`Found in: ${places.join(', ')}`);
   }
+  // A summoned demon has no spawn point of its own: it appears at the altar
+  // where its stone is spent, and that - not the rift the stone came out of -
+  // is the place to walk to.
+  if (sites) {
+    const where = invocationTargets(sites);
+    const places = [...new Set(where.map((t) => t.label))];
+    facts.push(summon
+      ? `Summoned with the ${cleanText(summon.texts?.name || summon.id)}`
+      : 'Summoned at an altar');
+    if (places.length) facts.push(`Invoked at: ${places.join(', ')}`);
+    if (summon) {
+      // Where the stone itself comes from, since that is the step before.
+      for (const line of acquisitionOf(summon.id))
+        facts.push(`Stone: ${cleanText(line)}`);
+    }
+    if (!targets.length) targets = where;
+  }
+
+  // A summoned unit's region comes from the altar it appears at, since it
+  // has no spawn point to read one from.
+  const areas = regions && regions.size
+    ? [...regions]
+    : [...new Set((sites || []).map((s) => regionOf(s.zone)).filter(Boolean))];
 
   entries.push({
     category: 'creatures',
@@ -805,7 +959,7 @@ for (const u of units) {
     acquire: facts.map(cleanText),
     track: targets,
     tags: [`type:${u.type || 'Other'}`,
-           ...[...regions].sort().map((r) => `area:${r}`)],
+           ...areas.sort().map((r) => `area:${r}`)],
     gfxFile: gfx.file,
     gfxSize: gfx.size || 0,
   });

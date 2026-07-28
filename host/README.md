@@ -4,10 +4,10 @@ A standalone runtime for Farever mods, so Collection Atlas and AuraForge can
 ship without requiring farever-minimap (and without its minimap and DPS
 meter).
 
-**Status: stage 1 of 3 — injection vector, built and export-verified, not yet
-tested in-game.** It does not render anything or read game state yet. The
-plugins still run on farever-minimap today; nothing here changes that until
-stage 3 lands.
+**Status: running in-game.** The proxy loads, the D3D12 overlay draws, the
+reader reads, and the Collection Atlas, the navigator and the Recent Loots
+feed all run on it. The roadmap table at the bottom says which stage landed
+when. AuraForge is still a farever-minimap plugin.
 
 ## Why `dxgi.dll`
 
@@ -214,7 +214,10 @@ Two lessons worth keeping:
 | 2b | Post-patch update flow (`tools/update.mjs`) | **built, verified** |
 | 3a | Swap-chain observation via the factory wrapper | **built** |
 | 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | **built, text verified in-game** |
-| 3c | Native Collection Atlas UI (`atlas_ui.cpp` + `input.cpp`) | **built** — awaiting in-game verification |
+| 3c | Native Collection Atlas UI (`atlas_ui.cpp` + `input.cpp`) | **working in-game** — 1547 entries across 12 pages |
+| 4a | Navigator routes (`navigator.cpp`) + the Routes page (`routes.cpp`, `tools/gen-routes.mjs`) | **built** — awaiting in-game verification |
+| 4b | Recent Loots (`loot.cpp`) | **built** — awaiting in-game verification |
+| 4c | Waypoints from the game's map (`mapwatch.cpp`) | **built** — awaiting in-game verification |
 
 Stage 3c replaced the original plan of porting the Lua plugins wholesale: the
 tracker UI is now native to the host, driven by the host's own reader and the
@@ -284,6 +287,215 @@ never writes game memory. For real map pins, the `collection_atlas.lua`
 plugin running under farever-minimap places actual waypoints through that
 mod's API; the two can run side by side.
 
+### Building a route out of the atlas
+
+**Ctrl+click** an atlas entry to add it to the route being followed;
+**Shift+click** puts it at the front. A plain click still tracks it on its
+own, which is the common case.
+
+An entry's targets are *alternatives* — three vendors sell the same mount —
+so only the nearest is added. Adding all three would send you round every
+vendor for one item.
+
+Where a waypoint sits in the list only decides where the arrow goes next in
+**In order** mode; nearest-first picks by distance and no list order changes
+that. The Following box on the Routes page toggles between the two, which is
+what makes "add first" mean "go there next".
+
+### Routes
+
+A tracked thing is always a *list* of waypoints. What changes is what the
+list means, which is `NavMode`:
+
+| Mode | Reading | Arriving |
+|---|---|---|
+| `kNavNearest` | alternatives - "three vendors sell this" | changes nothing |
+| `kNavRoute` | a collection - "every chest in Krisomal" | crosses that one off, arrow moves to the next nearest |
+| `kNavOrder` | an itinerary someone chose the order of | crosses it off, arrow moves to the next in the list |
+
+Clicking an atlas item still uses the first, which is why walking to the
+vendor does not silently stop tracking it. The other two are routes: the pill
+grows a `7 / 23 - 16 left` line and a progress bar, and says **Route
+complete** with a tick for a few seconds when the last one is crossed off.
+
+Arrival is 15 world units horizontally **and** within 25 vertically. The
+vertical gate is what keeps a cave chest from being crossed off while you ride
+over the hill above it. It is noticed on the pose thread, so a route advances
+whether or not you are looking at the pill.
+
+**A waypoint you just dropped is unarmed.** It sits inside its own arrival
+radius the instant it exists, so without this, F9 marked a spot and crossed it
+off 60 milliseconds later — recording a route by walking it erased itself as
+you went. A dropped waypoint cannot be reached until you have once been 40
+units from it. Waypoints from a saved route are armed from the start, because
+standing on the first chest of a chest run really does mean you have done that
+one.
+
+A finished route lets go of the screen after a few seconds but **not of
+itself**: those waypoints are still the thing you might want to save or walk
+again, and deleting them just as the last one was reached threw away
+recordings at the moment they were complete. The Routes page keeps showing it,
+with Restart and Stop next to it.
+
+The active route persists in `farever-nav-state.txt` next to the game -
+including which waypoints are already done, so closing the game halfway
+through a chest run resumes halfway through it. (Its own file rather than the
+INI: a chest route is hundreds of waypoints and `GetPrivateProfileString`
+reads into a fixed buffer.)
+
+### The Routes page
+
+A thirteenth tab in the atlas window, listing every route with its waypoint
+count, its mode, and the distance to its nearest waypoint - the one number
+that says whether it is worth starting from where you stand.
+
+- **Start / Restart / Skip / Stop** for whatever is being followed. Skip and
+  stop are also on keys — **F10** skips the waypoint being aimed at,
+  **Shift+F10** clears the route — because both are wanted while running, and
+  this page is behind F8. The pill names them for the first twenty seconds of
+  a new route, and again whenever the atlas is open.
+- **F9 drops a waypoint where you stand**, atlas open or not, because
+  recording a route is walking it. They queue into one ad-hoc list.
+- **Save as route** names that list and writes it to
+  `farever-routes-custom.txt`
+- **Copy** puts an `FMKR1:` share code on the clipboard; **Import from
+  clipboard** reads one back. That is the whole sharing story - a route
+  travels through Discord or a forum post without anyone agreeing on where
+  files live. The code is base64 over the same plain text the files use, so
+  it stays inspectable rather than becoming an opaque blob.
+
+### Waypoints from the game's own map
+
+Open the map, click a point of interest, and it becomes a waypoint. Every
+marker on that map carries a world-space `worldPos` in the axes the navigator
+already uses, so no projection is involved and the map's zoom and panning
+never enter into it — `mapwatch.cpp` reads the marker and calls `nav_queue()`.
+
+**Placing one of the game's own map pins does the same thing.** The navigator
+mirrors `pinMarkers`, so a pin you drop the usual way becomes a waypoint with
+the arrow already pointing at it. `[map] pins = 0` turns that off.
+
+Finding *which* marker was clicked took a second attempt.
+`nearClickableMarker` looks exactly like the answer and is not: it sits with
+`crosshair`, `crosshairCheckbox` and a `showCrosshair` static, because it is
+the **gamepad** cursor's snap target, and it is null when playing with a
+mouse. `mouseCursor` belongs to the debug readout one field over. A live run
+with the map open logged both as null, which is why the log now names them on
+every open. What works instead: every marker is an `h2d.Object` and knows its
+own `absX`/`absY`, so a click is a proximity test against the visible markers
+and the winner's `worldPos` is the waypoint. Those are UI-scene units, not
+swap-chain pixels, so the mouse is mapped through the ratio between
+`GameApp.gui.s2d`'s dimensions and the frame size. The marker list is walked
+only on a click — it is hundreds of objects, which is fine once and not at
+20Hz.
+
+The click is not taken, either. `input.cpp` counts left-clicks that fall
+outside every host rectangle and passes them straight through, so the map
+still does whatever it was going to do. A press only counts as a click if it
+is released within half a second and six pixels — the map pans with the same
+button, and the start of a pan is not a click.
+
+`[map] click` in `farever-modkit.ini` picks which clicks count: `1` any clean
+click on a POI (the default), `2` shift-click only, `0` off.
+
+**F9 reads the map too.** It has always meant "drop a waypoint"; over an open
+map that is the POI under the cursor, or failing that the ground under the
+cursor (`mouseCursor` is a marker the map keeps pinned to the mouse for its
+own debug readout). With the map closed it is the ground you are standing on.
+
+**`ui.BaseUI.windows` is the list of windows that are open**, not of every
+window the UI knows — a live run logged `windows[0] of 1` with the map up, and
+a different `MapWindow` pointer on the next open. So presence in that list is
+itself the answer, and the window pointer is deliberately *not* cached:
+caching it would create the one failure this cannot otherwise have, a pointer
+to a closed window that still passes a type check because the collector has
+not reused the block yet. The walk is a length, an array pointer and a handful
+of elements, which at 20Hz is not worth a cache.
+
+`visible` and `parent` are read anyway and logged on every open and close.
+They gate nothing — one line in the log settles whether presence is really the
+whole story far better than a guess does.
+
+Two files, both next to the game:
+
+```
+farever-routes.txt          generated, overwritten wholesale
+farever-routes-custom.txt   yours; imports and saves land here
+```
+
+```
+[Primevalley - World chests]
+mode = nearest
+zone = Primevalley Island, Primevalley Coast +2 more
+-0.7, 1093.2, 112.5, World chest lv7 - Primevalley Island
+```
+
+`node tools/gen-routes.mjs` builds the generated set out of the game's own
+level tiles: **69 routes, 1001 waypoints** across 11 areas - world, recipe,
+orb, vault and camp chests, secret orbs, and every ore and herb node - each
+grouped by the zone it was baked into. Waypoints come out in a greedy
+nearest-neighbour order so the file reads as a circuit; they ship as
+`mode = nearest` because you can enter an area from any side and the
+navigator then re-derives the circuit from where you actually are.
+
+About half the gathering nodes carry no baked zone, so each takes the zone of
+its nearest neighbour that does. Being wrong about a node on a zone border
+costs one route boundary and fifty metres.
+
+## Recent Loots
+
+The game's own loot line lasts a second or two. In a fight, or while a chest
+chain-opens, that is not long enough to read, and once it is gone there is no
+way back to it. `loot.cpp` keeps a feed on screen instead: items with their
+own icon and rarity colour, experience, currency and level-ups, newest at the
+top, each line fading on its own timer. Open the atlas and every line holds
+until you close it again; drag it anywhere, same rule as the navigator's pill.
+
+**There is no loot event to hook**, because the host only reads. So the feed
+is a diff: `reader_read_loot_state` samples a deliberately narrow slice -
+`ent.Hero.loadout.inventory`, `st.player.HeroData.currencies`, and its `level`
+/ `exp` - twice a second, and anything that went up is something you gained.
+Items are bucketed by kind + level + upgrade + rarity, so a second Copper Ore
+adds to one line while a level 30 sword and a level 5 one stay apart.
+
+One honest consequence: it reports **gains to your bags**, not literally
+"loot". Withdrawing from the bank, buying from a merchant and receiving a
+trade all read the same, because to a reader of memory they are the same
+thing. Losses are never reported, so selling and depositing pass in silence.
+
+Two failure modes are handled rather than believed: a read that comes back
+empty against a non-empty baseline is a transient (a zone handover, a pointer
+repointed mid-walk) and is skipped, since adopting it would replay the whole
+inventory as loot on the next poll; and leaving the world drops the baseline
+entirely, so logging back in never arrives as a wall of text.
+
+Names, icons and rarity colours come from the atlas's own database through
+`atlas_ui_lookup` - one copy of 1547 entries, not two.
+
+### Where the harder targets come from
+
+Three sources that are not loot tables, because the things they place are not
+in loot tables:
+
+- **Boss drops** resolve through the creature, not through a name match. The
+  loot table names the unit; the unit's own bestiary entry already knows where
+  it is, including "at the door of the dungeon it lives behind". An earlier
+  version looked for a dungeon POI whose *name* contained the first five
+  letters of the unit id, which found nothing whenever a dungeon is not named
+  after its boss — High Inquisitor Chakram is the unit `Phrixes`.
+- **Outfit sets** are almost never in a loot table at all (385 of 428
+  appearances are in none). The item row still knows: a faction piece carries
+  `faction`, so it drops from those enemies and can point at where that
+  faction lives; the generic sets carry their rarity and region in the model
+  path they load, which names the region but no one place, so they say so and
+  offer no target.
+- **Summoned monsters** have no spawner anywhere. A soulstone altar is an
+  element carrying both `interactible.cost` (the stone it eats) and
+  `spawnUnit` (the demon it invokes), which links the two exactly and gives
+  the demon a real place — its altar, which is nowhere near the rift the stone
+  dropped in. A soulstone therefore has two targets, its altar and its rift,
+  labelled so you can tell which is which.
+
 ### Fixing wrong or missing acquisition info
 
 `tools/atlas-overrides.tsv` patches the generated data per item id - replace
@@ -294,14 +506,14 @@ rewards). It survives regeneration; see the comments in the file.
 Data files, generated from your own game install:
 
 ```bash
-node tools/gen-atlas.mjs
+node tools/gen-atlas.mjs && node tools/gen-routes.mjs
 ```
 
-writes `farever-atlas.tsv` (713 items across the six categories) and
+writes `farever-atlas.tsv` (1547 entries across twelve categories),
 `farever-atlas-icons.dds` (a 2048px BC7 atlas repacked block-for-block from
-the game's 256px portrait mips — no image decoding anywhere) and copies both
-next to `Farever.exe`. Re-run it after a patch, along with
-`tools/update.mjs`.
+the game's 256px portrait mips — no image decoding anywhere) and
+`farever-routes.txt`, and copies all three next to `Farever.exe`. Re-run both
+after a patch, along with `tools/update.mjs`.
 
 ## Build
 
