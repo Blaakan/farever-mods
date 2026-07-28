@@ -720,12 +720,10 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     // or hovering an owned mount would never name it.
     char status[160];
     if (e.cat == kRecipesCat) {
-        // Known by whom is the whole question for a recipe.
+        // Known by whom is the whole question for a craft.
         std::string who;
         if (snap) {
-            const std::string craft = tag_value(e, "craft:");
-            auto f = craft.empty() ? snap->learned_by.end()
-                                   : snap->learned_by.find(craft);
+            auto f = snap->learned_by.find(e.id);
             if (f != snap->learned_by.end()) {
                 for (const auto& name : f->second) {
                     if (!who.empty()) who += ", ";
@@ -733,12 +731,19 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
                 }
             }
         }
+        // Saying which job is missing is more use than "not learned" when
+        // the character has never taken the job at all.
+        const std::string job = tag_value(e, "job:");
+        const bool has_job = snap && !job.empty() &&
+                             snap->job_level.count(job) != 0;
         if (!who.empty())
             _snprintf_s(status, sizeof(status), _TRUNCATE, "Known by %s",
                         who.c_str());
-        else
+        else if (!has_job && !job.empty())
             _snprintf_s(status, sizeof(status), _TRUNCATE,
-                        "Not learned by any character seen");
+                        "No character has taken up %s", job.c_str());
+        else
+            _snprintf_s(status, sizeof(status), _TRUNCATE, "Not learned yet");
         draw_text(tx + pad, yy, small_sz,
                   who.empty() ? kTextDim : Color{0.45f, 0.85f, 0.45f, 1.0f},
                   status);
@@ -882,6 +887,25 @@ void write_jobs_json(const std::vector<JobState>& jobs,
 // Pulls "learned" lists out of a farever-jobs-*.json this host wrote.
 void scan_jobs_json(const std::string& text, const std::string& who,
                     OwnSnap* snap) {
+    // Which jobs this character has at all, so the tooltip can tell "nobody
+    // has taken that job up" from "taken up, but this one is not learned".
+    size_t jp = 0;
+    while ((jp = text.find("{\"job\":\"", jp)) != std::string::npos) {
+        jp += 8;
+        const size_t end = text.find('"', jp);
+        if (end == std::string::npos) break;
+        const std::string job = text.substr(jp, end - jp);
+        int level = 1;
+        const size_t lv = text.find("\"level\":", end);
+        if (lv != std::string::npos && lv < end + 24)
+            level = atoi(text.c_str() + lv + 8);
+        if (!job.empty()) {
+            int& known = snap->job_level[job];
+            if (level > known) known = level;
+        }
+        jp = end;
+    }
+
     size_t pos = 0;
     while ((pos = text.find("\"learned\":[", pos)) != std::string::npos) {
         pos += 11;
@@ -989,14 +1013,13 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
 
     // A recipe counts as owned when the craft it teaches is known by
     // someone - having the paper in a bag is not the point of the page.
+    // A recipe entry IS the craft: its id is the produced item, which is
+    // exactly what the game records as learned.
     for (int i = g_cat_begin[kRecipesCat]; i < g_cat_begin[kRecipesCat + 1]; i++) {
         const Entry& e = g_entries[i];
-        const std::string craft = tag_value(e, "craft:");
-        if (craft.empty()) continue;
-        auto f = snap->learned_by.find(craft);
+        auto f = snap->learned_by.find(e.id);
         if (f == snap->learned_by.end() || f->second.empty()) continue;
-        Owned& o = snap->byId[kRecipesCat][e.id];
-        o.unlocked = true;
+        snap->byId[kRecipesCat][e.id].unlocked = true;
     }
 
     // Finalize aggregates, then count owned ids that exist in the database.

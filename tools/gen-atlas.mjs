@@ -97,8 +97,9 @@ const BY_TYPE = new Map(Object.entries({
   // Materials
   CraftingComponent: 'materials', Ore: 'materials', Cloth: 'materials',
   Leather: 'materials', Soulstone: 'materials',
-  // Recipes
-  Recipe: 'recipes',
+  // The Recipe_* items are pieces of paper you carry, so they belong with
+  // the other oddments. The Recipes page is about the crafts themselves.
+  Recipe: 'misc',
   // Tools, currency, containers and the leftovers
   Package: 'misc', CompletedPackage: 'misc', Misc: 'misc',
   Currency: 'misc', Bag: 'misc', Prospecting: 'misc',
@@ -161,19 +162,6 @@ function tagsFor(item, category) {
         if (cls) tags.push(`class:${cls}`);
       }
       if (!tags.length) tags.push('class:Any');
-      break;
-    }
-    case 'recipes': {
-      // Which job can use it, and the craft the game will record as known.
-      const craft = craftByRecipe.get(item.id);
-      if (craft) {
-        if (craft.job) tags.push(`job:${craft.job}`);
-        // The craft id is what the game records as known; it is carried for
-        // the lookup, not offered as a filter (the UI hides it).
-        tags.push(`craft:${craft.item}`);
-      } else {
-        tags.push('job:Unknown');
-      }
       break;
     }
     case 'consumables':
@@ -712,6 +700,58 @@ for (const u of units) {
     // Pet families read straight off the id: Ladybug_Yellow, DemonDog_Red.
     tags: [`type:${u.id.split('_')[0]}`,
            ...[...(unitRegions.get(u.id) || [])].sort().map((r) => `area:${r}`)],
+    gfxFile: gfx.file || '',
+    gfxSize: gfx.size || 0,
+  });
+}
+
+// Recipes: the crafts themselves - what you can make - rather than the
+// scraps of paper that teach them. The game records a learned craft under
+// the id of the item it produces, so that id is the entry's id too, and
+// "known" becomes a direct lookup.
+for (const c of crafts) {
+  const made = itemById.get(c.item);
+  if (!made) continue;
+  const gfx = made.gfx || {};
+
+  const facts = [];
+  facts.push(`${c.job || 'Craft'}${c.level ? ` level ${c.level}` : ''}`);
+  if (c.input && c.input.length) {
+    const parts = c.input.slice(0, 6).map((i) => {
+      const ing = itemById.get(i.item);
+      return `${i.count || 1}x ${cleanText(ing?.texts?.name || i.item)}`;
+    });
+    facts.push(`Needs: ${parts.join(', ')}`);
+  }
+  if (c.cost) facts.push(`Cost: ${c.cost} gold`);
+
+  // A recipe-gated craft has to be unlocked by finding its recipe item, so
+  // the useful "how to get" is that item's own story, and the navigator
+  // should point at wherever it drops or is sold.
+  let targets = [];
+  if (c.unlockSource) {
+    const paper = itemById.get(c.unlockSource);
+    const named = cleanText(paper?.texts?.name || '');
+    facts.push(named ? `Unlocked by: ${named}` : 'Unlocked by a recipe you must find');
+    // Its own acquisition, minus the line saying what it teaches - which on
+    // this page would only repeat the entry's own name back at you.
+    for (const line of acquisitionOf(c.unlockSource))
+      if (!/^Teaches:/.test(line)) facts.push(line);
+    targets = targetsFor(c.unlockSource, soldItems.has(c.unlockSource));
+  } else {
+    facts.push('Known automatically at that job level');
+  }
+
+  entries.push({
+    category: 'recipes',
+    id: c.item,
+    name: cleanText(made.texts?.name) || c.item,
+    rarity: Math.max(0, rarities.indexOf(made.rarity ?? 'Common')),
+    desc: cleanText(made.texts?.desc),
+    acquire: facts.map(cleanText),
+    track: targets,
+    tags: [`job:${c.job || 'Other'}`,
+           c.unlockSource ? 'source:Recipe needed' : 'source:Automatic'],
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
