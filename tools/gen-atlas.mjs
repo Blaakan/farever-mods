@@ -30,6 +30,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync,
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openPak } from './lib/pak.mjs';
+import { readHBSON, walkNodes } from './lib/hbson.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out', 'atlas');
@@ -205,35 +206,80 @@ for (const c of crafts) {
   if (c.item) craftByItem.set(c.item, c);
 }
 
-// Shop stalls live in binary prefabs as "@shop" followed by @ItemId tokens.
-// The serialization is hide's binary tree, which we do not parse; a windowed
-// token scan over the raw bytes is enough to learn *that* an item is sold.
+// --- the world, parsed --------------------------------------------------
+//
+// One pass over the map prefabs yields everything positional the atlas
+// wants: who sells what and where, where creatures spawn, and where the
+// dungeon entrances are. This used to be a raw scan for "@shop" tokens,
+// which was wrong in a way worth recording: the '@' it keyed on is really
+// HBSON's 0x40 "short string" flag, and the writer only uses it for strings
+// of 16 bytes or fewer - so that scan was silently blind to every item id of
+// 17 characters or more.
+
 const soldItems = new Set();
-function scanShops(pak, pathFilter) {
+const shopPoints = [];      // {item, vendor, x, y, z, zone}
+const spawnPoints = [];     // {unit, unitGroup, x, y, z, zone}
+const activityOrbs = new Map();   // targetActivity id -> {x, y, z, zone}
+
+function isSpawner(node) {
+  return node.props && node.props.$cdbtype === 'spawner';
+}
+
+function scanWorld(pak, pathFilter) {
+  let parsed = 0, failed = 0;
   for (const f of pak.files) {
     if (!pathFilter(f.path)) continue;
-    const buf = pak.read(f);
-    const s = buf.toString('latin1');
-    let i = -1;
-    while ((i = s.indexOf('@shop', i + 1)) !== -1) {
-      const win = s.slice(i, i + 4096);
-      for (const m of win.matchAll(/@([A-Za-z][A-Za-z0-9_]{2,63})/g)) {
-        if (itemById.has(m[1])) soldItems.add(m[1]);
-      }
+    let doc;
+    try {
+      doc = readHBSON(pak.read(f));
+    } catch (e) {
+      failed++;
+      continue;
     }
+    parsed++;
+    walkNodes(doc.root, (node, x, y, z) => {
+      const props = node.props;
+      if (!props || typeof props !== 'object') return;
+      // The cdb-typed object carries the baked zone alongside $cdbtype; the
+      // node itself only holds the transform.
+      const zone = props.zoneBaked || node.zoneBaked || null;
+
+      if (props.$cdbtype === 'spawner') {
+        if (props.unit || props.unitGroup)
+          spawnPoints.push({ unit: props.unit || null,
+                             unitGroup: props.unitGroup || null, x, y, z, zone });
+        return;
+      }
+      // Shops carry their stock, and the element carries a display name.
+      const stock = props.props && props.props.shop;
+      if (Array.isArray(stock)) {
+        const vendor = cleanText(props.texts?.name || props.id || 'Merchant');
+        for (const row of stock) {
+          if (!row || !row.item || !itemById.has(row.item)) continue;
+          soldItems.add(row.item);
+          shopPoints.push({ item: row.item, vendor, x, y, z, zone });
+        }
+      }
+      // An orb that opens an instance: the world-side anchor for everything
+      // that only spawns inside that instance.
+      const target = props.props && props.props.targetActivity;
+      if (target && !activityOrbs.has(target))
+        activityOrbs.set(target, { x, y, z, zone });
+    });
   }
+  return { parsed, failed };
 }
 
 const respak = openPak(join(game, 'res.pak'));
-scanShops(respak, (p) => p.startsWith('Gameplay/Prefabs/') && p.endsWith('.prefab'));
+let mapPak = null;
 try {
-  const mapPak = openPak(join(game, 'res.map.pak'));
-  scanShops(mapPak, (p) => p.endsWith('.prefab'));
-  mapPak.close();
+  mapPak = openPak(join(game, 'res.map.pak'));
+  const r = scanWorld(mapPak, (p) => p.endsWith('.prefab'));
+  console.log(`world: ${r.parsed} prefabs parsed${r.failed ? `, ${r.failed} failed` : ''}, ` +
+              `${spawnPoints.length} spawn points, ${soldItems.size} items sold`);
 } catch (e) {
   console.warn('res.map.pak not scanned:', e.message);
 }
-console.log(`shops: ${soldItems.size} distinct items seen behind @shop stalls`);
 
 function acquisitionOf(itemId) {
   const parts = [];
@@ -289,6 +335,135 @@ const vaultChests = pois.filter((e) => e.name === 'VaultChest');
 const merchantPois = pois.filter((e) => e.kind === 'merchant');
 const dungeonPois = pois.filter((e) => e.kind === 'dungeon');
 
+// --- where each creature is found ---------------------------------------
+//
+// Spawners name either a unit outright or a unitGroup; groups are rosters
+// with weights, so expanding them is what puts the small critters on the
+// map at all - most of them are never named by a spawner directly.
+
+const unitGroups = new Map(sheet('unitGroup').lines.map((g) => [g.id, g]));
+
+function groupMembers(groupId, depth = 0) {
+  const group = unitGroups.get(groupId);
+  if (!group || depth > 3) return [];
+  const out = [];
+  for (const comp of group.composition || []) {
+    const weight = comp.weight ?? 1;
+    for (const entry of comp.group || []) {
+      if (entry.unit) out.push({ unit: entry.unit, weight });
+      else if (entry.unitGroup)
+        for (const nested of groupMembers(entry.unitGroup, depth + 1))
+          out.push({ unit: nested.unit, weight: weight * nested.weight });
+    }
+  }
+  return out;
+}
+
+const unitPoints = new Map();   // unit id -> [{x, y, z, zone}]
+const addPoint = (unit, p) => {
+  if (!unit) return;
+  if (!unitPoints.has(unit)) unitPoints.set(unit, []);
+  const list = unitPoints.get(unit);
+  if (list.length < 400) list.push(p);
+};
+for (const s of spawnPoints) {
+  const p = { x: s.x, y: s.y, z: s.z, zone: s.zone };
+  if (s.unit) addPoint(s.unit, p);
+  if (s.unitGroup)
+    for (const m of groupMembers(s.unitGroup)) addPoint(m.unit, p);
+}
+
+// Units that only exist inside an instance get the world-side entrance of
+// that instance instead - the boss is not standing in the overworld, but
+// the door to it is. Instance levels name their activity, and a world orb
+// points back at the same id.
+try {
+  const levels = openPak(join(game, 'res.levels.pak'));
+  const byLevel = new Map();   // level dir -> {activity, units:Set}
+  for (const f of levels.files) {
+    if (!f.path.endsWith('.prefab')) continue;
+    // One level is everything under its own "<name>.dat" directory. Slicing
+    // a fixed depth instead lumps every level of a region together, which
+    // hands several bosses the same entrance.
+    const parts = f.path.split('/');
+    const datAt = parts.findIndex((s) => s.endsWith('.dat'));
+    if (datAt < 0) continue;
+    const dir = parts.slice(0, datAt + 1).join('/');
+    let doc;
+    try { doc = readHBSON(levels.read(f)); } catch (e) { continue; }
+    if (!byLevel.has(dir)) byLevel.set(dir, { activity: null, units: new Set() });
+    const rec = byLevel.get(dir);
+    walkNodes(doc.root, (node) => {
+      const props = node.props;
+      if (!props || typeof props !== 'object') return;
+      if (props.$cdbtype === 'activity' && props.id) rec.activity = props.id;
+      if (props.$cdbtype === 'spawner') {
+        if (props.unit) rec.units.add(props.unit);
+        if (props.unitGroup)
+          for (const m of groupMembers(props.unitGroup)) rec.units.add(m.unit);
+      }
+    });
+  }
+  levels.close();
+  let placed = 0;
+  for (const rec of byLevel.values()) {
+    const orb = rec.activity ? activityOrbs.get(rec.activity) : null;
+    if (!orb) continue;
+    for (const unit of rec.units) {
+      if (unitPoints.has(unit)) continue;      // already out in the world
+      addPoint(unit, { ...orb, entrance: true });
+      placed++;
+    }
+  }
+  console.log(`instances: ${placed} units placed at their dungeon entrance`);
+} catch (e) {
+  console.warn('res.levels.pak not scanned:', e.message);
+}
+
+// The mean of a unit's spawn points is meaningless when it lives on two
+// islands - it lands in the sea between them. Take the densest cluster
+// instead: the point with the most neighbours, averaged with them.
+function bestCluster(points, radius = 120) {
+  if (points.length === 1) return { ...points[0], n: 1 };
+  let best = null, bestN = -1;
+  for (const a of points) {
+    let n = 0;
+    for (const b of points) {
+      const dx = a.x - b.x, dy = a.y - b.y;
+      if (dx * dx + dy * dy <= radius * radius) n++;
+    }
+    if (n > bestN) { bestN = n; best = a; }
+  }
+  const near = points.filter((b) => {
+    const dx = best.x - b.x, dy = best.y - b.y;
+    return dx * dx + dy * dy <= radius * radius;
+  });
+  const avg = (k) => near.reduce((s, p) => s + p[k], 0) / near.length;
+  return { x: avg('x'), y: avg('y'), z: avg('z'), zone: best.zone,
+           entrance: best.entrance, n: near.length };
+}
+
+// A creature's targets: its best few clusters, so a unit found in two
+// regions offers both and the navigator picks whichever is nearer.
+function creatureTargets(unitId) {
+  const points = unitPoints.get(unitId);
+  if (!points || !points.length) return [];
+  const targets = [];
+  let remaining = points.slice();
+  for (let i = 0; i < 3 && remaining.length; i++) {
+    const c = bestCluster(remaining);
+    const label = c.entrance
+      ? `Dungeon entrance - ${prettyZone(c.zone)}`
+      : prettyZone(c.zone);
+    targets.push(mkTarget(label, c));
+    remaining = remaining.filter((p) => {
+      const dx = p.x - c.x, dy = p.y - c.y;
+      return dx * dx + dy * dy > 120 * 120;
+    });
+  }
+  return targets;
+}
+
 function targetsFor(itemId, sold) {
   const targets = [];
   const push = (t) => {
@@ -312,7 +487,12 @@ function targetsFor(itemId, sold) {
           push(mkTarget(`${unit.texts?.name || unit.id} - ${prettyZone(d.zone)}`, d));
     }
   }
-  if (sold)
+  // Vendors now come from the prefabs with their own names and positions,
+  // which beats pointing at every wandering merchant on the map.
+  for (const s of shopPoints) {
+    if (s.item === itemId) push(mkTarget(`${s.vendor} - ${prettyZone(s.zone)}`, s));
+  }
+  if (sold && !targets.length)
     for (const mch of merchantPois)
       push(mkTarget(`Merchant - ${prettyZone(mch.zone)}`, mch));
   return targets;
@@ -394,8 +574,8 @@ for (const u of units) {
     rarity: 0,
     desc: '',
     acquire: [...viaItem, 'Capture in the wild (Capture Net)'],
-    track: itemById.has(critterItem)
-      ? targetsFor(critterItem, soldItems.has(critterItem)) : [],
+    // A pet is a creature first: point at where it actually lives.
+    track: creatureTargets(u.id),
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
@@ -424,6 +604,14 @@ for (const u of units) {
     facts.push(`Drops: ${named.join(', ')}`);
   }
 
+  const targets = creatureTargets(u.id);
+  if (targets.length) {
+    // Two clusters can sit in one zone; the navigator still wants both, but
+    // naming the place twice in the tooltip reads like a mistake.
+    const places = [...new Set(targets.map((t) => t.label))];
+    facts.push(`Found in: ${places.join(', ')}`);
+  }
+
   entries.push({
     category: 'creatures',
     id: u.id,
@@ -431,7 +619,7 @@ for (const u of units) {
     rarity: (u.flags & UNIT_BOSS) ? 4 : (u.flags & UNIT_MINIBOSS) ? 3 : 0,
     desc: cleanText(u.texts?.desc || ''),
     acquire: facts.map(cleanText),
-    track: [],
+    track: targets,
     gfxFile: gfx.file,
     gfxSize: gfx.size || 0,
   });
