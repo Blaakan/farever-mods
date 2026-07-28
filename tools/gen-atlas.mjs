@@ -84,6 +84,29 @@ function typeChain(typeId) {
 
 const TRINKET_TYPES = new Set(['GearTrinket', 'GearNeck', 'GearFinger']);
 
+// The equippable/collectible categories are decided from the itemType
+// inheritance chain; everything else is grouped by what the player would
+// call it, since inheritance puts food, recipes and enchants all under
+// "Usable" and that makes a useless page.
+const BY_TYPE = new Map(Object.entries({
+  // Consumables
+  Food: 'consumables', Potion: 'consumables', Elixir: 'consumables',
+  Consumable: 'consumables', HealthPotion: 'consumables',
+  Usable: 'consumables', SkillPointBook: 'consumables', Mastery: 'consumables',
+  // Materials
+  CraftingComponent: 'materials', Ore: 'materials', Cloth: 'materials',
+  Leather: 'materials', Soulstone: 'materials',
+  // Recipes
+  Recipe: 'recipes',
+  // Tools, currency, containers and the leftovers
+  Package: 'misc', CompletedPackage: 'misc', Misc: 'misc',
+  Currency: 'misc', Bag: 'misc', Prospecting: 'misc',
+  LootableContainer: 'misc', Collection: 'misc', Gear: 'misc',
+  GearPickaxe: 'misc', GearSickle: 'misc', ToolBlacksmith: 'misc',
+  ToolOutfitter: 'misc', ToolAlchemist: 'misc', ToolJeweller: 'misc',
+  ToolCook: 'misc', ToolEnchanter: 'misc',
+}));
+
 function categoryOf(item) {
   const chain = typeChain(item.type || '');
   if (chain.includes('Weapon')) return 'weapons';
@@ -91,7 +114,9 @@ function categoryOf(item) {
   if (TRINKET_TYPES.has(item.type)) return 'trinkets';
   if (chain.includes('GearGlider')) return 'gliders';
   if (item.type === 'Mount') return 'mounts';
-  return null;
+  // Every Augment* variant lands on one page rather than eight.
+  if (/^Augment/.test(item.type || '')) return 'augments';
+  return BY_TYPE.get(item.type) || null;
 }
 
 // Unit flags, in declaration order of the flags column.
@@ -314,7 +339,8 @@ function cleanText(s) {
 // --- build the entry list ---------------------------------------------------
 
 const CATEGORY_ORDER = ['appearances', 'mounts', 'pets', 'gliders',
-                        'trinkets', 'weapons'];
+                        'trinkets', 'weapons', 'consumables', 'materials',
+                        'recipes', 'augments', 'misc'];
 const entries = [];   // { category, id, name, rarity, desc, acquire, gfxFile }
 
 for (const l of items) {

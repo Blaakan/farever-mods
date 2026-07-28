@@ -36,11 +36,17 @@ namespace {
 
 // --- static item database (immutable once g_loaded is set) ------------------
 
-constexpr int kCats = 6;
-const char* kCatNames[kCats] = {"Appearances", "Mounts", "Pets",
-                                "Gliders", "Trinkets", "Weapons"};
-const char* kCatTsv[kCats] = {"appearances", "mounts", "pets",
-                              "gliders", "trinkets", "weapons"};
+constexpr int kCats = 11;
+const char* kCatNames[kCats] = {"Appearances", "Mounts", "Pets", "Gliders",
+                                "Trinkets", "Weapons", "Consumables",
+                                "Materials", "Recipes", "Augments", "Misc"};
+const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
+                              "trinkets", "weapons", "consumables",
+                              "materials", "recipes", "augments", "misc"};
+
+// The first four pages are account-wide collection unlocks; the rest are
+// real items, owned only while they sit in a bank, bag or equipment slot.
+constexpr int kFirstItemCat = 4;
 
 struct Entry {
     std::string id, name, desc;
@@ -368,7 +374,7 @@ bool load_icons(const std::wstring& dir) {
 void merge_item(OwnSnap* snap, const std::string& kind, uint8_t where,
                 const std::string& character, int level, int rarity,
                 int count) {
-    for (int c : {4, 5}) {                 // trinkets, weapons
+    for (int c = kFirstItemCat; c < kCats; c++) {
         auto it = g_entry_by_id[c].find(kind);
         if (it == g_entry_by_id[c].end()) continue;
         owned_add_copy(&snap->byId[c][kind], where, character, level,
@@ -600,8 +606,14 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
         else
             sprintf_s(status, "Owned");
         draw_text(tx + pad, yy, small_sz, {0.45f, 0.85f, 0.45f, 1.0f}, status);
-    } else {
+    } else if (e.cat < kFirstItemCat) {
         sprintf_s(status, "Not collected - %s", kRarityName[rar]);
+        draw_text(tx + pad, yy, small_sz, kTextDim, status);
+    } else {
+        // Consumables and materials are not "collected" - you either have
+        // some right now or you do not, and saying where we looked is more
+        // use than calling it missing.
+        sprintf_s(status, "None in bank or bags - %s", kRarityName[rar]);
         draw_text(tx + pad, yy, small_sz, kTextDim, status);
     }
     yy += 17;
@@ -860,37 +872,61 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     }
 
     // --- tabs ---------------------------------------------------------------
-    float tab_x = wx + 6;
-    const float tab_y = wy + kTitleH + 2;
+    //
+    // Eleven pages do not fit on one row, so the strip wraps and the content
+    // below starts wherever it ends.
+    const float tab_row_h = kTabsH - 6;
+    const float tab_area_w = win_w - 12;
+    char labels[kCats][64];
+    float tab_bx[kCats], tab_by[kCats], tab_bw[kCats];
+    int tab_rows = 1;
+    {
+        float lx = 0, ly = 0;
+        for (int c = 0; c < kCats; c++) {
+            const int total = g_cat_begin[c + 1] - g_cat_begin[c];
+            if (own)
+                sprintf_s(labels[c], "%s %d/%d", kCatNames[c],
+                          own->owned_count[c], total);
+            else
+                sprintf_s(labels[c], "%s %d", kCatNames[c], total);
+            const float tw = measure_text(13, labels[c]) + 18;
+            if (lx > 0 && lx + tw > tab_area_w) {
+                lx = 0;
+                ly += tab_row_h + 3;
+                tab_rows++;
+            }
+            tab_bx[c] = lx;
+            tab_by[c] = ly;
+            tab_bw[c] = tw;
+            lx += tw + 4;
+        }
+    }
+    const float tabs_h = tab_rows * (tab_row_h + 3) + 4;
+    const float tab_ox = wx + 6, tab_oy = wy + kTitleH + 2;
+
     for (int c = 0; c < kCats; c++) {
-        char label[64];
-        const int total = g_cat_begin[c + 1] - g_cat_begin[c];
-        if (own)
-            sprintf_s(label, "%s %d/%d", kCatNames[c], own->owned_count[c], total);
-        else
-            sprintf_s(label, "%s %d", kCatNames[c], total);
-        const float tw = measure_text(13, label) + 18;
-        const bool hot = in.mouse_x >= tab_x && in.mouse_x < tab_x + tw &&
-                         in.mouse_y >= tab_y && in.mouse_y < tab_y + kTabsH - 6;
-        draw_rect(tab_x, tab_y, tw, kTabsH - 6,
+        const float bx = tab_ox + tab_bx[c], by = tab_oy + tab_by[c];
+        const float tw = tab_bw[c];
+        const bool hot = in.mouse_x >= bx && in.mouse_x < bx + tw &&
+                         in.mouse_y >= by && in.mouse_y < by + tab_row_h;
+        draw_rect(bx, by, tw, tab_row_h,
                   c == tab ? kTabOn : (hot ? Color{0.12f, 0.15f, 0.22f, 1.0f}
                                            : kTabOff));
-        if (c == tab) draw_rect(tab_x, tab_y + kTabsH - 8, tw, 2, kAccent);
-        draw_text(tab_x + 9, tab_y + 4, 13, c == tab ? kText : kTextDim, label);
-        if (clicked && in.click_x >= tab_x && in.click_x < tab_x + tw &&
-            in.click_y >= tab_y && in.click_y < tab_y + kTabsH - 6) {
+        if (c == tab) draw_rect(bx, by + tab_row_h - 2, tw, 2, kAccent);
+        draw_text(bx + 9, by + 4, 13, c == tab ? kText : kTextDim, labels[c]);
+        if (clicked && in.click_x >= bx && in.click_x < bx + tw &&
+            in.click_y >= by && in.click_y < by + tab_row_h) {
             tab = c;
             InterlockedExchange(&g_tab, c);
             save_layout_dirty();
         }
-        tab_x += tw + 4;
     }
 
     // --- grid ---------------------------------------------------------------
     const float content_x = wx + kPad;
-    const float content_y = wy + kTitleH + kTabsH + 6;
+    const float content_y = wy + kTitleH + tabs_h + 4;
     const float content_w = win_w - 2 * kPad - 10;   // room for scrollbar
-    const float content_h = win_h - (kTitleH + kTabsH + 6) - kPad;
+    const float content_h = win_h - (kTitleH + tabs_h + 4) - kPad;
     const int cols = content_w >= kStride ? (int)((content_w + kGap) / kStride) : 1;
 
     const int first = g_cat_begin[tab], last = g_cat_begin[tab + 1];
