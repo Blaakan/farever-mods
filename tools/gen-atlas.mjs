@@ -108,6 +108,58 @@ const BY_TYPE = new Map(Object.entries({
   ToolCook: 'misc', ToolEnchanter: 'misc',
 }));
 
+// --- facets, for the in-game filters ------------------------------------
+//
+// Armour ids end in the classes that can wear them, one or two at a time:
+// Fig/Ass/Wiz/Cle, which the game presents as Warrior/Rogue/Mage/Priest.
+// (A handful end in Craft/Shop/BaseClothes instead - those are unrestricted.)
+const CLASS_CODES = new Map([
+  ['Fig', 'Warrior'], ['Ass', 'Rogue'], ['Wiz', 'Mage'], ['Cle', 'Priest'],
+]);
+const ARMOUR_SLOTS = new Set(['Chest', 'Legs', 'Feet', 'Head', 'Hands',
+                              'Waist', 'Back', 'Shoulders']);
+const TRINKET_LABEL = new Map([
+  ['GearTrinket', 'Trinket'], ['GearNeck', 'Necklace'], ['GearFinger', 'Ring'],
+]);
+
+// The family in an id like Mount_Wolf_01 or Glider_Owl_Grey.
+function familyOf(id, prefix) {
+  const m = id.match(new RegExp(`^${prefix}_([A-Za-z]+)`));
+  if (m) return m[1];
+  return id.replace(/_?\d+$/, '').replace(/_.*$/, '') || 'Other';
+}
+
+function tagsFor(item, category) {
+  const tags = [];
+  switch (category) {
+    case 'appearances': {
+      if (ARMOUR_SLOTS.has(item.type)) tags.push(`slot:${item.type}`);
+      const suffix = (item.id.match(/_([A-Za-z]+)$/) || [])[1] || '';
+      for (const [code, name] of CLASS_CODES) {
+        if (suffix.includes(code)) tags.push(`class:${name}`);
+      }
+      // No class in the id means anyone can wear it.
+      if (!tags.some((t) => t.startsWith('class:'))) tags.push('class:Any');
+      break;
+    }
+    case 'mounts':   tags.push(`type:${familyOf(item.id, 'Mount')}`); break;
+    case 'gliders':  tags.push(`type:${familyOf(item.id, 'Glider')}`); break;
+    case 'trinkets':
+      tags.push(`type:${TRINKET_LABEL.get(item.type) || item.type}`);
+      break;
+    case 'weapons':  tags.push(`type:${item.type}`); break;
+    case 'recipes':
+    case 'consumables':
+    case 'materials':
+    case 'augments':
+    case 'misc':
+      tags.push(`type:${item.type}`);
+      break;
+    default: break;
+  }
+  return tags;
+}
+
 function categoryOf(item) {
   const chain = typeChain(item.type || '');
   if (chain.includes('Weapon')) return 'weapons';
@@ -359,6 +411,31 @@ function groupMembers(groupId, depth = 0) {
   return out;
 }
 
+// Which released region a zone belongs to. The codex is organised by
+// region, and only Z1-Z3 are visible in it - Z4 and the test zone are
+// flagged hidden, being unreleased.
+const zoneById = new Map(sheet('zone').lines.map((z) => [z.id, z]));
+const VISIBLE_REGIONS = new Map([
+  ['Z1_Region', 'Z1'], ['Z2_Region', 'Z2'], ['Z3_Region', 'Z3'],
+]);
+function regionOf(zoneId) {
+  let z = zoneById.get(zoneId);
+  for (let i = 0; z && i < 10; i++) {
+    if (VISIBLE_REGIONS.has(z.id)) return VISIBLE_REGIONS.get(z.id);
+    z = z.parent ? zoneById.get(z.parent) : null;
+  }
+  const m = (zoneId || '').match(/^(Z\d)_/);
+  return m && VISIBLE_REGIONS.has(`${m[1]}_Region`) ? m[1] : null;
+}
+
+const unitRegions = new Map();  // unit id -> Set of region ids
+const noteRegion = (unit, zone) => {
+  const r = regionOf(zone);
+  if (!unit || !r) return;
+  if (!unitRegions.has(unit)) unitRegions.set(unit, new Set());
+  unitRegions.get(unit).add(r);
+};
+
 const unitPoints = new Map();   // unit id -> [{x, y, z, zone}]
 const addPoint = (unit, p) => {
   if (!unit) return;
@@ -368,9 +445,12 @@ const addPoint = (unit, p) => {
 };
 for (const s of spawnPoints) {
   const p = { x: s.x, y: s.y, z: s.z, zone: s.zone };
-  if (s.unit) addPoint(s.unit, p);
+  if (s.unit) { addPoint(s.unit, p); noteRegion(s.unit, s.zone); }
   if (s.unitGroup)
-    for (const m of groupMembers(s.unitGroup)) addPoint(m.unit, p);
+    for (const m of groupMembers(s.unitGroup)) {
+      addPoint(m.unit, p);
+      noteRegion(m.unit, s.zone);
+    }
 }
 
 // Units that only exist inside an instance get the world-side entrance of
@@ -398,9 +478,17 @@ try {
       if (!props || typeof props !== 'object') return;
       if (props.$cdbtype === 'activity' && props.id) rec.activity = props.id;
       if (props.$cdbtype === 'spawner') {
-        if (props.unit) rec.units.add(props.unit);
+        // A dungeon's monsters belong to the region the dungeon is in,
+        // which its own path names (Level/POI/Z1Levels/...) even when the
+        // baked zone inside the instance does not resolve.
+        const inRegion = props.zoneBaked ||
+            ((f.path.match(/Level\/POI\/(Z\d)Levels\//) || [])[1] || '') + '_Region';
+        if (props.unit) { rec.units.add(props.unit); noteRegion(props.unit, inRegion); }
         if (props.unitGroup)
-          for (const m of groupMembers(props.unitGroup)) rec.units.add(m.unit);
+          for (const m of groupMembers(props.unitGroup)) {
+            rec.units.add(m.unit);
+            noteRegion(m.unit, inRegion);
+          }
       }
     });
   }
@@ -551,6 +639,7 @@ for (const l of items) {
     // Acquisition strings embed unit display names, which can be non-ASCII.
     acquire: acquisitionOf(l.id).map(cleanText),
     track: targetsFor(l.id, soldItems.has(l.id)),
+    tags: tagsFor(l, category),
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
@@ -576,6 +665,9 @@ for (const u of units) {
     acquire: [...viaItem, 'Capture in the wild (Capture Net)'],
     // A pet is a creature first: point at where it actually lives.
     track: creatureTargets(u.id),
+    // Pet families read straight off the id: Ladybug_Yellow, DemonDog_Red.
+    tags: [`type:${u.id.split('_')[0]}`,
+           ...[...(unitRegions.get(u.id) || [])].sort().map((r) => `area:${r}`)],
     gfxFile: gfx.file || '',
     gfxSize: gfx.size || 0,
   });
@@ -587,6 +679,14 @@ for (const u of units) {
 for (const u of units) {
   if (u.flags & UNIT_NO_CODEX) continue;
   if (/_Base$/.test(u.id)) continue;
+  // Critters are the Pets page; the codex's Monsters category does not
+  // include them.
+  if (u.type === 'Critter') continue;
+  // Only what a player can actually reach: a monster has to spawn in one
+  // of the released regions, in the world or inside one of its dungeons.
+  // Z4 and the test zone are flagged hidden in the codex for that reason.
+  const regions = unitRegions.get(u.id);
+  if (!regions || !regions.size) continue;
   const gfx = u.gfx || {};
   if (!gfx.file || !gfx.file.startsWith('UI/Portraits/')) continue;
 
@@ -620,6 +720,8 @@ for (const u of units) {
     desc: cleanText(u.texts?.desc || ''),
     acquire: facts.map(cleanText),
     track: targets,
+    tags: [`type:${u.type || 'Other'}`,
+           ...[...regions].sort().map((r) => `area:${r}`)],
     gfxFile: gfx.file,
     gfxSize: gfx.size || 0,
   });
@@ -780,7 +882,7 @@ function ddsFile(w, h, payload) {
 mkdirSync(OUT, { recursive: true });
 
 const tsvField = (s) => String(s).replace(/[\t\r\n]+/g, ' ');
-const tsv = ['# category\tid\tname\trarity\ticon\tdesc\tacquire\ttrack'];
+const tsv = ['# category\tid\tname\trarity\ticon\tdesc\tacquire\ttrack\ttags'];
 let tracked = 0;
 for (const e of entries) {
   const track = (e.track || [])
@@ -788,7 +890,7 @@ for (const e of entries) {
   if (track) tracked++;
   tsv.push([e.category, e.id, tsvField(e.name), e.rarity, e.icon,
             tsvField(e.desc), tsvField(e.acquire.join(' | ')),
-            tsvField(track)].join('\t'));
+            tsvField(track), tsvField((e.tags || []).join(','))].join('\t'));
 }
 writeFileSync(join(OUT, 'farever-atlas.tsv'), tsv.join('\n') + '\n');
 writeFileSync(join(OUT, 'farever-atlas-icons.dds'),

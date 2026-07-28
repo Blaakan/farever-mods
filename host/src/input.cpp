@@ -47,6 +47,15 @@ volatile LONG g_rect[4] = {0, 0, 0, 0};   // x, y, w, h
 volatile LONG g_aux[4] = {0, 0, 0, 0};    // the navigator's frame
 volatile LONG g_rect_tick = 0;            // GetTickCount of the last publish
 
+// Typed text, as a single-producer single-consumer ring: the window thread
+// writes, the render thread drains. No lock in the WndProc, which is the
+// rule the rest of this file follows.
+constexpr int kTextRing = 128;
+char g_text[kTextRing];
+volatile LONG g_text_head = 0;   // written by the window thread
+volatile LONG g_text_tail = 0;   // written by the render thread
+volatile LONG g_capture = 0;
+
 // Latches so the second half of a swallowed press/key never leaks.
 volatile LONG g_rbtn_held = 0;
 volatile LONG g_mbtn_held = 0;
@@ -84,19 +93,57 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
             if (wp == kToggleKey && !(lp & (1 << 30))) {   // ignore autorepeat
                 InterlockedXor(&g_visible, 1);
+                InterlockedExchange(&g_capture, 0);
                 return 0;
             }
             if (wp == VK_ESCAPE && active) {
+                // With a text field focused, Escape leaves the field rather
+                // than closing the window - the usual expectation.
+                if (InterlockedExchange(&g_capture, 0)) {
+                    InterlockedExchange(&g_esc_held, 1);
+                    return 0;
+                }
                 InterlockedExchange(&g_visible, 0);
                 InterlockedExchange(&g_esc_held, 1);
                 return 0;
+            }
+            // Typing into a field: swallow the keys so they neither move the
+            // character nor open the game's own windows. Everything else
+            // still reaches the game, which is why capture is opt-in.
+            if (active && InterlockedCompareExchange(&g_capture, 0, 0)) {
+                if (wp == VK_BACK || wp == VK_RETURN || wp == VK_SPACE ||
+                    (wp >= '0' && wp <= 'Z') || (wp >= VK_NUMPAD0 && wp <= VK_DIVIDE) ||
+                    (wp >= VK_OEM_1 && wp <= VK_OEM_102))
+                    return 0;
             }
             break;
 
         case WM_KEYUP:
             if (wp == kToggleKey) return 0;
             if (wp == VK_ESCAPE && InterlockedExchange(&g_esc_held, 0)) return 0;
+            if (active && InterlockedCompareExchange(&g_capture, 0, 0)) {
+                if (wp == VK_BACK || wp == VK_RETURN || wp == VK_SPACE ||
+                    (wp >= '0' && wp <= 'Z') || (wp >= VK_NUMPAD0 && wp <= VK_DIVIDE) ||
+                    (wp >= VK_OEM_1 && wp <= VK_OEM_102))
+                    return 0;
+            }
             break;
+
+        // The character itself, already keyboard-layout translated - the
+        // only correct source for typed text.
+        case WM_CHAR: {
+            if (!active || !InterlockedCompareExchange(&g_capture, 0, 0)) break;
+            const wchar_t ch = (wchar_t)wp;
+            if (ch == '\b' || ch == '\r' || (ch >= 0x20 && ch < 0x7f)) {
+                const LONG head = InterlockedCompareExchange(&g_text_head, 0, 0);
+                const LONG tail = InterlockedCompareExchange(&g_text_tail, 0, 0);
+                if (((head + 1) % kTextRing) != tail) {   // drop when full
+                    g_text[head] = ch == '\r' ? '\n' : (char)ch;
+                    InterlockedExchange(&g_text_head, (head + 1) % kTextRing);
+                }
+            }
+            return 0;
+        }
 
         case WM_MOUSEMOVE: {
             const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -263,6 +310,27 @@ void input_get(InputState* out) {
 
 void input_set_visible(bool v) {
     InterlockedExchange(&g_visible, v ? 1 : 0);
+    if (!v) InterlockedExchange(&g_capture, 0);
+}
+
+void input_set_text_capture(bool on) {
+    InterlockedExchange(&g_capture, on ? 1 : 0);
+}
+
+bool input_text_capture() {
+    return InterlockedCompareExchange(&g_capture, 0, 0) != 0;
+}
+
+int input_take_text(char* out, int max_len) {
+    int n = 0;
+    LONG tail = InterlockedCompareExchange(&g_text_tail, 0, 0);
+    const LONG head = InterlockedCompareExchange(&g_text_head, 0, 0);
+    while (tail != head && n < max_len) {
+        out[n++] = g_text[tail];
+        tail = (tail + 1) % kTextRing;
+    }
+    InterlockedExchange(&g_text_tail, tail);
+    return n;
 }
 
 void input_set_ui_rect(int x, int y, int w, int h) {

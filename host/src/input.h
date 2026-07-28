@@ -36,6 +36,17 @@ void input_peek(InputState* out);
 
 void input_set_visible(bool v);
 
+// Text entry, off by default. While capture is on, printable characters and
+// backspace are collected here and kept from the game; while it is off, only
+// the toggle key and Escape are ever touched, so movement keys keep working
+// with the window open. Turn it on only while a text field has focus.
+void input_set_text_capture(bool on);
+bool input_text_capture();
+
+// Drains the characters typed since the last call. Backspace arrives as
+// '\b'; Enter as '\n'.
+int input_take_text(char* out, int max_len);
+
 // The UI publishes its window rectangle every frame; mouse input inside it
 // is swallowed while the UI is visible, everything outside stays the game's.
 void input_set_ui_rect(int x, int y, int w, int h);

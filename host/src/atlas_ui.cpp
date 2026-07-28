@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -55,12 +56,20 @@ constexpr int kCreaturesCat = 11;
 
 struct Entry {
     std::string id, name, desc;
+    std::string search;               // name + id, lowercased, for matching
     std::vector<std::string> acquire;
+    std::vector<std::string> tags;    // "slot:Chest", "class:Mage", "area:Z1"
     std::vector<NavTarget> targets;   // tracker destinations, often empty
     int rarity = 0;      // 0..4 = common..legendary, from the CastleDB
     int icon = -1;       // cell in the icon atlas, -1 = none
     int cat = 0;
 };
+
+std::string lower(const std::string& s) {
+    std::string o = s;
+    for (char& c : o) c = (char)tolower((unsigned char)c);
+    return o;
+}
 
 std::vector<Entry> g_entries;            // grouped by category
 int g_cat_begin[kCats + 1]{};            // entry index ranges per category
@@ -152,6 +161,59 @@ volatile LONG g_tab = 0;
 // --- render-thread state ----------------------------------------------------
 
 volatile LONG g_in_world = 0;
+
+// Search and filters. Search spans every page; filters belong to the page
+// they were set on, so switching tabs does not carry a slot filter onto the
+// creatures list.
+std::string g_search;
+bool g_search_focus = false;
+std::vector<std::string> g_filters[kCats];   // selected tags, per page
+
+bool has_filter(int cat, const std::string& tag) {
+    for (const auto& t : g_filters[cat]) if (t == tag) return true;
+    return false;
+}
+
+void toggle_filter(int cat, const std::string& tag) {
+    for (size_t i = 0; i < g_filters[cat].size(); i++) {
+        if (g_filters[cat][i] == tag) {
+            g_filters[cat].erase(g_filters[cat].begin() + i);
+            return;
+        }
+    }
+    g_filters[cat].push_back(tag);
+}
+
+// A facet is the part before the colon. Selections inside one facet widen
+// the result (Chest or Legs); selections across facets narrow it (a Chest
+// piece that a Mage can wear).
+std::string facet_of(const std::string& tag) {
+    const size_t c = tag.find(':');
+    return c == std::string::npos ? tag : tag.substr(0, c);
+}
+
+bool passes_filters(const Entry& e, int cat) {
+    if (g_filters[cat].empty()) return true;
+    std::vector<std::string> facets;
+    for (const auto& f : g_filters[cat]) {
+        const std::string fa = facet_of(f);
+        if (std::find(facets.begin(), facets.end(), fa) == facets.end())
+            facets.push_back(fa);
+    }
+    for (const auto& fa : facets) {
+        bool any = false;
+        for (const auto& sel : g_filters[cat]) {
+            if (facet_of(sel) != fa) continue;
+            for (const auto& t : e.tags) {
+                if (t == sel) { any = true; break; }
+            }
+            if (any) break;
+        }
+        if (!any) return false;
+    }
+    return true;
+}
+
 float g_scroll[kCats]{};
 bool  g_dragging = false;
 float g_drag_dx = 0, g_drag_dy = 0;
@@ -291,6 +353,18 @@ bool load_tsv(const std::wstring& path) {
             }
             e.acquire.push_back(a.substr(p, sep - p));
             p = sep + 3;
+        }
+        e.search = lower(e.name) + " " + lower(e.id);
+        // tags are ","-joined facets
+        if (f.size() >= 9 && !f[8].empty()) {
+            size_t tp = 0;
+            const std::string& tg = f[8];
+            while (tp < tg.size()) {
+                size_t sep = tg.find(',', tp);
+                if (sep == std::string::npos) sep = tg.size();
+                if (sep > tp) e.tags.push_back(tg.substr(tp, sep - tp));
+                tp = sep + 1;
+            }
         }
         // track is ";"-joined label@x,y,z
         if (f.size() >= 8 && !f[7].empty()) {
@@ -463,6 +537,27 @@ void icon_uv(int cell, float* u0, float* v0, float* u1, float* v1) {
     *v0 = (cy * 64 + 0.5f) / g_atlas_h;
     *u1 = ((cx + 1) * 64 - 0.5f) / g_atlas_w;
     *v1 = ((cy + 1) * 64 - 0.5f) / g_atlas_h;
+}
+
+// A rectangle trimmed to a vertical band, so it can be drawn inside a
+// scrolling list without spilling over the edges.
+void draw_rect_clipped(float x, float y, float w, float h, float clip_y0,
+                       float clip_y1, Color c) {
+    const float y0 = y < clip_y0 ? clip_y0 : y;
+    const float y1 = (y + h) > clip_y1 ? clip_y1 : y + h;
+    if (y1 > y0) draw_rect(x, y0, w, y1 - y0, c);
+}
+
+// The cell border, clipped the same way its icon is. Drawing it only when
+// the whole cell fitted meant the top row lost its border the moment the
+// list was scrolled by even a pixel.
+void draw_cell_border(float x, float y, float size, float t, float clip_y0,
+                      float clip_y1, Color c) {
+    draw_rect_clipped(x, y, size, t, clip_y0, clip_y1, c);                 // top
+    draw_rect_clipped(x, y + size - t, size, t, clip_y0, clip_y1, c);      // bottom
+    draw_rect_clipped(x, y + t, t, size - 2 * t, clip_y0, clip_y1, c);     // left
+    draw_rect_clipped(x + size - t, y + t, t, size - 2 * t, clip_y0, clip_y1,
+                      c);                                                   // right
 }
 
 // Draws an icon clipped to [clip_y0, clip_y1), trimming uv proportionally.
@@ -952,21 +1047,142 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         }
     }
 
+    // --- search box ---------------------------------------------------------
+    //
+    // Typing only reaches the box while it has focus; otherwise the movement
+    // keys keep working with the window open, which matters more than saving
+    // a click.
+    const float sb_x = wx + kPad, sb_y = wy + kTitleH + tabs_h;
+    const float sb_w = 260, sb_h = 22;
+    const bool sb_hot = in.mouse_x >= sb_x && in.mouse_x < sb_x + sb_w &&
+                        in.mouse_y >= sb_y && in.mouse_y < sb_y + sb_h;
+    if (clicked) {
+        const bool hit = in.click_x >= sb_x && in.click_x < sb_x + sb_w &&
+                         in.click_y >= sb_y && in.click_y < sb_y + sb_h;
+        if (hit != g_search_focus) {
+            g_search_focus = hit;
+            input_set_text_capture(hit);
+        }
+    }
+    if (g_search_focus && !input_text_capture()) g_search_focus = false;
+
+    if (g_search_focus) {
+        char typed[64];
+        const int n = input_take_text(typed, sizeof(typed));
+        for (int i = 0; i < n; i++) {
+            if (typed[i] == '\b') {
+                if (!g_search.empty()) g_search.pop_back();
+            } else if (typed[i] == '\n') {
+                g_search_focus = false;
+                input_set_text_capture(false);
+            } else if (g_search.size() < 40) {
+                g_search.push_back((char)tolower((unsigned char)typed[i]));
+            }
+        }
+    }
+
+    draw_rect(sb_x, sb_y, sb_w, sb_h, {0.03f, 0.04f, 0.06f, 1.0f});
+    draw_rect_outline(sb_x, sb_y, sb_w, sb_h, 1.0f,
+                      g_search_focus ? kAccent
+                                     : (sb_hot ? kTextDim : kMissEdge));
+    if (g_search.empty() && !g_search_focus) {
+        draw_text(sb_x + 7, sb_y + 4, 13, kTextFaint,
+                  "Search all pages - click here");
+    } else {
+        std::string shown = g_search;
+        if (g_search_focus) shown += "_";
+        draw_text(sb_x + 7, sb_y + 4, 13, kText, shown.c_str());
+    }
+    // A clear button, once there is something to clear.
+    if (!g_search.empty()) {
+        const float cx1 = sb_x + sb_w + 6;
+        draw_rect(cx1, sb_y, 22, sb_h, {0.18f, 0.20f, 0.28f, 1.0f});
+        draw_text(cx1 + 7, sb_y + 4, 13, kText, "x");
+        if (clicked && in.click_x >= cx1 && in.click_x < cx1 + 22 &&
+            in.click_y >= sb_y && in.click_y < sb_y + sb_h) {
+            g_search.clear();
+        }
+    }
+
+    // --- filter chips -------------------------------------------------------
+    //
+    // Built from the tags actually present on this page, so a page with
+    // nothing to filter shows no row at all.
+    const bool searching = !g_search.empty();
+    float chips_h = 0;
+    if (!searching) {
+        std::vector<std::string> tags;
+        for (int i = g_cat_begin[tab]; i < g_cat_begin[tab + 1]; i++) {
+            for (const auto& t : g_entries[i].tags) {
+                if (std::find(tags.begin(), tags.end(), t) == tags.end())
+                    tags.push_back(t);
+            }
+        }
+        std::sort(tags.begin(), tags.end());
+        if (!tags.empty()) {
+            const float row_h = 20;
+            float cx1 = 0, cy1 = 0;
+            const float avail = win_w - 2 * kPad;
+            for (const auto& t : tags) {
+                const std::string label = t.substr(t.find(':') + 1);
+                const float cw = measure_text(12, label.c_str()) + 14;
+                if (cx1 > 0 && cx1 + cw > avail) { cx1 = 0; cy1 += row_h + 3; }
+                const float px = wx + kPad + cx1;
+                const float py = sb_y + sb_h + 6 + cy1;
+                const bool on = has_filter(tab, t);
+                const bool hot = in.mouse_x >= px && in.mouse_x < px + cw &&
+                                 in.mouse_y >= py && in.mouse_y < py + row_h;
+                draw_rect(px, py, cw, row_h,
+                          on ? Color{0.20f, 0.34f, 0.50f, 1.0f}
+                             : (hot ? Color{0.14f, 0.16f, 0.23f, 1.0f}
+                                    : Color{0.09f, 0.10f, 0.15f, 1.0f}));
+                if (on) draw_rect_outline(px, py, cw, row_h, 1.0f, kAccent);
+                draw_text(px + 7, py + 3, 12, on ? kText : kTextDim,
+                          label.c_str());
+                if (clicked && in.click_x >= px && in.click_x < px + cw &&
+                    in.click_y >= py && in.click_y < py + row_h) {
+                    toggle_filter(tab, t);
+                }
+                cx1 += cw + 4;
+            }
+            chips_h = cy1 + row_h + 6;
+        }
+    }
+
+    // --- the visible set ----------------------------------------------------
+    //
+    // Search looks across every page; filters apply to the page you are on.
+    static std::vector<int> visible;
+    visible.clear();
+    if (searching) {
+        for (size_t i = 0; i < g_entries.size(); i++) {
+            if (g_entries[i].search.find(g_search) != std::string::npos)
+                visible.push_back((int)i);
+        }
+    } else {
+        for (int i = g_cat_begin[tab]; i < g_cat_begin[tab + 1]; i++) {
+            if (passes_filters(g_entries[i], tab)) visible.push_back(i);
+        }
+    }
+
     // --- grid ---------------------------------------------------------------
+    const float header_h = sb_h + 6 + chips_h;
     const float content_x = wx + kPad;
-    const float content_y = wy + kTitleH + tabs_h + 4;
+    const float content_y = wy + kTitleH + tabs_h + 4 + header_h;
     const float content_w = win_w - 2 * kPad - 10;   // room for scrollbar
-    const float content_h = win_h - (kTitleH + tabs_h + 4) - kPad;
+    const float content_h = win_h - (kTitleH + tabs_h + 4 + header_h) - kPad;
     const int cols = content_w >= kStride ? (int)((content_w + kGap) / kStride) : 1;
 
-    const int first = g_cat_begin[tab], last = g_cat_begin[tab + 1];
-    const int count = last - first;
+    const int count = (int)visible.size();
     const int rows = (count + cols - 1) / cols;
     const float total_h = rows * kStride;
     float max_scroll = total_h - content_h;
     if (max_scroll < 0) max_scroll = 0;
 
-    float& scroll = g_scroll[tab];
+    // Searching has its own scroll position, so returning to a page does not
+    // land halfway down a list it no longer shows.
+    static float search_scroll = 0;
+    float& scroll = searching ? search_scroll : g_scroll[tab];
     scroll -= in.wheel * kStride * 2;
     if (scroll < 0) scroll = 0;
     if (scroll > max_scroll) scroll = max_scroll;
@@ -980,17 +1196,21 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     const int row1 = (int)((scroll + content_h) / kStride) + 1;
     for (int r = row0; r <= row1 && r < rows; r++) {
         for (int col = 0; col < cols; col++) {
-            const int idx = first + r * cols + col;
-            if (idx >= last) break;
+            const int slot = r * cols + col;
+            if (slot >= count) break;
+            const int idx = visible[slot];
             const Entry& e = g_entries[idx];
+            // While searching the grid mixes pages, so ownership has to be
+            // looked up against the entry's own page rather than the tab.
+            const int ecat = e.cat;
             const float x = content_x + col * kStride;
             const float y = content_y + r * kStride - scroll;
             if (y + kIcon < content_y || y > content_y + content_h) continue;
 
             const Owned* owned = nullptr;
             if (own) {
-                auto f = own->byId[tab].find(e.id);
-                if (f != own->byId[tab].end()) owned = &f->second;
+                auto f = own->byId[ecat].find(e.id);
+                if (f != own->byId[ecat].end()) owned = &f->second;
             }
 
             // Cell background, then the icon clipped to the content band.
@@ -1001,16 +1221,14 @@ void atlas_ui_draw(float screen_w, float screen_h) {
             draw_icon_clipped(e, x, y, kIcon, clip0, clip1,
                               owned ? kOwnTint : kMissTint);
 
-            // Rarity border for owned, faint frame for missing - only when
-            // the full cell is inside the band (partial borders look broken).
-            if (y >= clip0 && y + kIcon <= clip1) {
-                if (owned) {
-                    const int rar = owned->best_rarity >= 0 ? owned->best_rarity
-                                                            : e.rarity;
-                    draw_rect_outline(x, y, kIcon, kIcon, 2, kRarity[rar]);
-                } else {
-                    draw_rect_outline(x, y, kIcon, kIcon, 1, kMissEdge);
-                }
+            // Rarity border for owned, faint frame for missing, clipped to
+            // the band like the icon so a half-scrolled row still has one.
+            if (owned) {
+                const int rar = owned->best_rarity >= 0 ? owned->best_rarity
+                                                        : e.rarity;
+                draw_cell_border(x, y, kIcon, 2, clip0, clip1, kRarity[rar]);
+            } else {
+                draw_cell_border(x, y, kIcon, 1, clip0, clip1, kMissEdge);
             }
 
             if (mouse_in_content && in.mouse_x >= x && in.mouse_x < x + kIcon &&
@@ -1027,7 +1245,7 @@ void atlas_ui_draw(float screen_w, float screen_h) {
                 in.click_y >= by0 && in.click_y < by1) {
                 char key[192];
                 _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
-                            kCatTsv[tab], e.id.c_str());
+                            kCatTsv[ecat], e.id.c_str());
                 nav_track(key, e.name.c_str(), e.targets.data(),
                           (int)e.targets.size());
             }
@@ -1049,17 +1267,15 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     // outline would paint over the tab strip or the window border.
     if (hover.valid) {
         const Entry& e = g_entries[hover.entry];
-        if (hover.cell_y >= content_y &&
-            hover.cell_y + kIcon <= content_y + content_h)
-            draw_rect_outline(hover.cell_x, hover.cell_y, kIcon, kIcon, 2,
-                              {1.0f, 1.0f, 1.0f, 0.85f});
+        draw_cell_border(hover.cell_x, hover.cell_y, kIcon, 2, content_y,
+                         content_y + content_h, {1.0f, 1.0f, 1.0f, 0.85f});
         const Owned* owned = nullptr;
         if (own) {
-            auto f = own->byId[tab].find(e.id);
-            if (f != own->byId[tab].end()) owned = &f->second;
+            auto f = own->byId[e.cat].find(e.id);
+            if (f != own->byId[e.cat].end()) owned = &f->second;
         }
         char key[192];
-        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s", kCatTsv[tab],
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s", kCatTsv[e.cat],
                     e.id.c_str());
         draw_tooltip(e, owned, key, (float)in.mouse_x, (float)in.mouse_y,
                      screen_w, screen_h);
