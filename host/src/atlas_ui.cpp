@@ -36,17 +36,22 @@ namespace {
 
 // --- static item database (immutable once g_loaded is set) ------------------
 
-constexpr int kCats = 11;
+constexpr int kCats = 12;
 const char* kCatNames[kCats] = {"Appearances", "Mounts", "Pets", "Gliders",
                                 "Trinkets", "Weapons", "Consumables",
-                                "Materials", "Recipes", "Augments", "Misc"};
+                                "Materials", "Recipes", "Augments", "Misc",
+                                "Creatures"};
 const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
                               "trinkets", "weapons", "consumables",
-                              "materials", "recipes", "augments", "misc"};
+                              "materials", "recipes", "augments", "misc",
+                              "creatures"};
 
-// The first four pages are account-wide collection unlocks; the rest are
-// real items, owned only while they sit in a bank, bag or equipment slot.
+// Three kinds of page, in this order: account-wide collection unlocks
+// (0..3), real items owned only while they sit in a bank, bag or equipment
+// slot (4..10), and the bestiary, whose progress comes from the codex
+// rather than from anything you carry (11).
 constexpr int kFirstItemCat = 4;
+constexpr int kCreaturesCat = 11;
 
 struct Entry {
     std::string id, name, desc;
@@ -119,6 +124,8 @@ void owned_add_copy(Owned* o, uint8_t where, const std::string& character,
 
 void owned_finalize(Owned* o) {
     if (o->unlocked && o->total == 0) o->total = 1;
+    // Creature progress is set outright rather than accumulated per stack,
+    // so leave a non-zero total alone.
 }
 
 CRITICAL_SECTION g_own_cs;
@@ -374,7 +381,7 @@ bool load_icons(const std::wstring& dir) {
 void merge_item(OwnSnap* snap, const std::string& kind, uint8_t where,
                 const std::string& character, int level, int rarity,
                 int count) {
-    for (int c = kFirstItemCat; c < kCats; c++) {
+    for (int c = kFirstItemCat; c < kCreaturesCat; c++) {
         auto it = g_entry_by_id[c].find(kind);
         if (it == g_entry_by_id[c].end()) continue;
         owned_add_copy(&snap->byId[c][kind], where, character, level,
@@ -598,7 +605,15 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     // unlocks have no stack lines - for them the header keeps the rarity,
     // or hovering an owned mount would never name it.
     char status[96];
-    if (owned) {
+    if (e.cat == kCreaturesCat) {
+        // The bestiary counts encounters, not possessions.
+        if (owned)
+            sprintf_s(status, "Encountered - codex progress %d", owned->total);
+        else
+            sprintf_s(status, "Not yet encountered");
+        draw_text(tx + pad, yy, small_sz,
+                  owned ? Color{0.45f, 0.85f, 0.45f, 1.0f} : kTextDim, status);
+    } else if (owned) {
         if (owned->copies.empty())
             sprintf_s(status, "Owned - %s", kRarityName[rar]);
         else if (owned->total > 1)
@@ -688,7 +703,9 @@ bool atlas_ui_init() {
     return true;
 }
 
-void atlas_ui_update(const Collection& c, const Inventories& inv) {
+void atlas_ui_update(const Collection& c, const Inventories& inv,
+                     const std::vector<std::pair<std::string, int32_t>>&
+                         unit_progress) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
     auto snap = std::make_shared<OwnSnap>();
@@ -715,6 +732,15 @@ void atlas_ui_update(const Collection& c, const Inventories& inv) {
         add_items(inv.bank_equipment, kBankSlots, "");
         add_items(inv.equipped, kEquipped, who);
         add_items(inv.bags, kBags, who);
+    }
+
+    // The bestiary: an entry in the codex map means encountered, and the
+    // value is how far along that creature's progress stands.
+    for (const auto& kv : unit_progress) {
+        if (!g_entry_by_id[kCreaturesCat].count(kv.first)) continue;
+        Owned& o = snap->byId[kCreaturesCat][kv.first];
+        o.unlocked = true;
+        o.total = kv.second > 0 ? kv.second : 1;
     }
 
     // Offline characters: their bags/equipped only exist in the JSON files

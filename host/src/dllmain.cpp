@@ -381,9 +381,15 @@ DWORD WINAPI worker(LPVOID) {
                     }
                 }
 
-                // Hand both reads to the UI; it swaps in a fresh ownership
+                // The bestiary, read from the codex map. Failing here is not
+                // fatal to the rest: the creatures page simply shows nothing
+                // encountered.
+                std::vector<std::pair<std::string, int32_t>> units;
+                fmk::reader_read_unit_progress(&units);
+
+                // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
-                fmk::atlas_ui_update(c, inv);
+                fmk::atlas_ui_update(c, inv, units);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }

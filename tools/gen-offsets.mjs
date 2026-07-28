@@ -78,6 +78,12 @@ const WANT = [
   ['h3d.Camera', ['pos', 'target']],
   ['h3d.VectorImpl', ['x', 'y', 'z']],
   ['st.Player', ['accountProgress', 'progress', 'name']],
+  // Codex progress. Every one of these is a hxbit.MapData wrapping a Haxe
+  // map behind an interface, so reading them needs the virtual hop.
+  ['st.player.Progress', ['counters', 'unitsProgress', 'itemProgress',
+                          'zones', 'achievements', 'pets']],
+  ['hxbit.MapData', ['map']],
+  ['haxe.ds.StringMap', ['h']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],
   ['hxbit.ArrayProxyData', ['array']],

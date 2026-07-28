@@ -14,6 +14,10 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "hl_reader.h"
 
 namespace fmk {
@@ -22,8 +26,11 @@ namespace fmk {
 bool atlas_ui_init();
 
 // Worker thread: fresh reader output. Rebuilds the ownership snapshot the
-// draw side reads.
-void atlas_ui_update(const Collection& c, const Inventories& inv);
+// draw side reads. `unit_progress` is the codex: unit id -> the count the
+// game tracks for it, absent meaning never encountered.
+void atlas_ui_update(const Collection& c, const Inventories& inv,
+                     const std::vector<std::pair<std::string, int32_t>>&
+                         unit_progress);
 
 // Pose thread: whether a character is actually in the world. Going false
 // (main menu, logout, character select) drops the ownership snapshot and

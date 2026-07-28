@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fmk {
@@ -60,6 +61,11 @@ struct Inventories {
 // falls back to a memory scan when it does not (first call, zone change).
 bool reader_locate_hero(bool force_rescan);
 void* reader_hero();
+
+// Codex progress per creature: unit id -> the number the game tracks for it
+// (kill count / progress points). A creature absent from the map has never
+// been encountered. Empty when the walk cannot be trusted.
+bool reader_read_unit_progress(std::vector<std::pair<std::string, int32_t>>* out);
 
 bool reader_read_collection(Collection* out);
 bool reader_read_unit_state(UnitState* out);

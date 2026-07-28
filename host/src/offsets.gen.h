@@ -97,6 +97,29 @@ namespace st_Player {
     constexpr uint32_t name = 0xc0;  // OBJ : String
 }  // namespace st_Player
 
+// st.player.Progress  (sizeof=232, extends st.DBBaseState)
+namespace st_player_Progress {
+    constexpr uint32_t SIZEOF = 232;
+    constexpr uint32_t counters = 0x80;  // OBJ : haxe.ds.StringMap
+    constexpr uint32_t unitsProgress = 0xa0;  // OBJ : hxbit.MapData
+    constexpr uint32_t itemProgress = 0xa8;  // OBJ : hxbit.MapData
+    constexpr uint32_t zones = 0xc0;  // OBJ : hxbit.MapData
+    constexpr uint32_t achievements = 0xc8;  // OBJ : hxbit.MapData
+    constexpr uint32_t pets = 0xd0;  // OBJ : hxbit.MapData
+}  // namespace st_player_Progress
+
+// hxbit.MapData  (sizeof=48, extends hxbit.BaseProxy)
+namespace hxbit_MapData {
+    constexpr uint32_t SIZEOF = 48;
+    constexpr uint32_t map = 0x28;  // VIRTUAL
+}  // namespace hxbit_MapData
+
+// haxe.ds.StringMap  (sizeof=24)
+namespace haxe_ds_StringMap {
+    constexpr uint32_t SIZEOF = 24;
+    constexpr uint32_t h = 0x8;  // ABSTRACT : hl_bytes_map
+}  // namespace haxe_ds_StringMap
+
 // st.player.AccountProgress  (sizeof=208, extends st.DBState)
 namespace st_player_AccountProgress {
     constexpr uint32_t SIZEOF = 208;

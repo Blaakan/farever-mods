@@ -48,9 +48,19 @@ constexpr uint32_t obj_global     = 0x38;
 constexpr uint32_t varray_size    = 0x10;
 constexpr uint32_t varray_data    = 0x18;   // elements start here
 
+constexpr int      HI32           = 3;
+constexpr int      HF64           = 6;
+constexpr int      HBOOL          = 7;
 constexpr int      HOBJ           = 11;
 constexpr int      HVIRTUAL       = 15;
+constexpr int      HENUM          = 18;
 constexpr int      HSTRUCT        = 21;
+
+// A boxed value: { hl_type* t; union payload; }. Map values arrive as these,
+// so the tag travels with the value and the reader does not need to know a
+// generic's erased type parameter.
+constexpr uint32_t dyn_payload    = 0x08;
+
 
 // hl_type_virtual, reached through hl_type+0x08:
 //   hl_obj_field *fields;  +0x00
@@ -69,6 +79,26 @@ constexpr uint32_t vfield_type    = 0x08;
 constexpr uint32_t vvirtual_value = 0x08;
 constexpr uint32_t vvirtual_data  = 24;
 }  // namespace hlrt
+
+// hl_bytes_map / hl_obj_map / hl_int_map - one native layout, sizeof 0x40.
+// This is HashLink's own C struct rather than a Haxe class, so it does not
+// appear in the generated offsets; it changes only if the game ships a new
+// HashLink build, which tools/update.mjs already detects by hashing
+// libhl.dll. The layout was read out of the shipped libhl.dll's accessors
+// (hl_hbsize returns [m+0x34]; hl_hbkeys walks cells/nexts and indexes
+// values as ((void**)values)[c*2]).
+namespace hlmap {
+constexpr uint32_t cells      = 0x00;   // int8[] or int32[], <0 = empty
+constexpr uint32_t nexts      = 0x08;   // same width, <0 = end of chain
+constexpr uint32_t entries    = 0x10;   // hashes (bytes map) / keys (int map)
+constexpr uint32_t values     = 0x18;   // {key, value} pairs, 16B stride
+constexpr uint32_t ncells     = 0x30;
+constexpr uint32_t nentries   = 0x34;   // live entry count
+constexpr uint32_t maxentries = 0x38;   // capacity, and picks the index width
+// Every accessor branches on `maxentries < 0x80` to choose between a byte
+// and an int index array. There is no 16-bit variant.
+constexpr int32_t  narrow_max = 0x80;
+}  // namespace hlmap
 
 // Describes a HVIRTUAL's field table, for decoding structural values.
 struct VirtualField {
@@ -143,5 +173,29 @@ std::string read_hx_string(const void* str_obj);
 // Returns the element pointer block and count. `out_elems` points into game
 // memory and is only valid for the duration of the current read.
 bool read_proxy_array(const void* proxy, void** out_elems, int32_t* out_count);
+
+// One entry of a string-keyed Haxe map. `value` is the raw boxed value; use
+// dyn_as_int for the common case of a counter.
+struct MapEntry {
+    std::string key;
+    void* value = nullptr;
+};
+
+// Enumerates a haxe.ds.StringMap by walking its buckets. A flat sweep of the
+// value array would be wrong: freed slots are recycled through a free list,
+// so a live entry can sit past the live count.
+//
+// Succeeds only when the number of entries recovered matches the map's own
+// count, which is the check that proves the walk rather than assuming it.
+bool read_string_map(const void* map_obj, std::vector<MapEntry>* out);
+
+// Takes a field that holds a Haxe interface (genhl compiles those to
+// HVIRTUAL) and returns the object behind it. Passes through an object that
+// is already concrete.
+void* deref_virtual(const void* holder, uint32_t field);
+
+// Reads a boxed value as an int when it is one. Returns `fallback` for any
+// other shape rather than reinterpreting the payload.
+int32_t dyn_as_int(const void* dyn, int32_t fallback);
 
 }  // namespace fmk

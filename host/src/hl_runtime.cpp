@@ -164,4 +164,99 @@ bool read_proxy_array(const void* proxy, void** out_elems, int32_t* out_count) {
     return true;
 }
 
+// A generic's type parameters are erased, so a Map<K,V> field is typed as
+// the haxe.IMap interface - and genhl compiles interfaces to HVIRTUAL. The
+// field therefore holds a vvirtual whose `value` is the real map object.
+void* deref_virtual(const void* holder, uint32_t field) {
+    void* p = read_ptr(holder, field);
+    if (!p) return nullptr;
+    void* type = read_ptr(p, 0);
+    if (!type) return nullptr;
+    const int32_t kind = read_i32(type, hlrt::type_kind);
+    if (kind == hlrt::HVIRTUAL) return read_ptr(p, hlrt::vvirtual_value);
+    if (kind == hlrt::HOBJ || kind == hlrt::HSTRUCT) return p;
+    return nullptr;
+}
+
+int32_t dyn_as_int(const void* dyn, int32_t fallback) {
+    if (!dyn) return fallback;
+    void* type = read_ptr(dyn, 0);
+    if (!type) return fallback;
+    switch (read_i32(type, hlrt::type_kind)) {
+        case hlrt::HI32:  return read_i32(dyn, hlrt::dyn_payload);
+        case hlrt::HBOOL: {
+            uint8_t b = 0;
+            read(dyn, hlrt::dyn_payload, &b);
+            return b ? 1 : 0;
+        }
+        case hlrt::HF64: {
+            double d = 0;
+            if (!read(dyn, hlrt::dyn_payload, &d)) return fallback;
+            if (d < -2e9 || d > 2e9) return fallback;
+            return (int32_t)d;
+        }
+        // An enum value carries its constructor index right after the type.
+        case hlrt::HENUM: return read_i32(dyn, hlrt::dyn_payload);
+        default: return fallback;
+    }
+}
+
+bool read_string_map(const void* map_obj, std::vector<MapEntry>* out) {
+    out->clear();
+    if (!map_obj) return false;
+
+    // haxe.ds.StringMap.h -> the native hl_bytes_map
+    void* m = read_ptr(map_obj, off::haxe_ds_StringMap::h);
+    if (!m) return false;
+
+    const int32_t nc = read_i32(m, hlmap::ncells);
+    const int32_t ne = read_i32(m, hlmap::nentries);
+    const int32_t max = read_i32(m, hlmap::maxentries);
+    if (nc <= 0 || nc > (1 << 20)) return false;
+    if (ne < 0 || max < 0 || ne > max || max > (1 << 20)) return false;
+    if (ne == 0) return true;                 // legitimately empty
+
+    void* cells = read_ptr(m, hlmap::cells);
+    void* nexts = read_ptr(m, hlmap::nexts);
+    void* vals = read_ptr(m, hlmap::values);
+    if (!cells || !nexts || !vals) return false;
+
+    // The index arrays narrow to single bytes for small maps; every one of
+    // HashLink's own accessors branches on exactly this.
+    const bool narrow = max < hlmap::narrow_max;
+    auto index_at = [&](const void* arr, int32_t i, int32_t* slot) -> bool {
+        if (narrow) {
+            int8_t v = 0;
+            if (!read(arr, (uint32_t)i, &v)) return false;
+            *slot = v;
+        } else {
+            int32_t v = 0;
+            if (!read(arr, (uint32_t)(i * 4), &v)) return false;
+            *slot = v;
+        }
+        return true;
+    };
+
+    out->reserve((size_t)ne);
+    int32_t steps = 0;
+    for (int32_t i = 0; i < nc; i++) {
+        int32_t c = -1;
+        if (!index_at(cells, i, &c)) return false;
+        while (c >= 0) {
+            if (c >= max || ++steps > max) return false;   // corrupt or cyclic
+            // Keys are the String's raw UTF-16 buffer, stored without a
+            // copy - not a String object.
+            void* key = read_ptr(vals, (uint32_t)(c * 16));
+            void* value = read_ptr(vals, (uint32_t)(c * 16 + 8));
+            std::string k = read_utf16(key, 128);
+            if (!k.empty()) out->push_back({std::move(k), value});
+            if (!index_at(nexts, c, &c)) return false;
+        }
+    }
+
+    // The map's own live count is the proof: the walk must recover exactly
+    // that many entries, or an offset is wrong and the data is not ours.
+    return (int32_t)out->size() == ne;
+}
+
 }  // namespace fmk

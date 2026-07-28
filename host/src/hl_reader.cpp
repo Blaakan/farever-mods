@@ -182,6 +182,52 @@ void* reader_hero() {
     return (h && obj_is(h, "ent.Hero")) ? h : nullptr;
 }
 
+bool reader_read_unit_progress(
+    std::vector<std::pair<std::string, int32_t>>* out) {
+    out->clear();
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* progress = read_ptr(player, off::st_Player::progress);
+    if (!obj_is(progress, "st.player.Progress")) return false;
+
+    void* data = read_ptr(progress, off::st_player_Progress::unitsProgress);
+    if (!obj_is(data, "hxbit.MapData")) return false;
+
+    // MapData.map is typed as the IMap interface, so it holds a vvirtual.
+    void* map = deref_virtual(data, off::hxbit_MapData::map);
+    if (!obj_is(map, "haxe.ds.StringMap")) {
+        static bool once = true;
+        if (once) {
+            once = false;
+            host_log("codex: unitsProgress map is %s, not a StringMap",
+                     obj_class_name(map).c_str());
+        }
+        return false;
+    }
+
+    std::vector<MapEntry> entries;
+    if (!read_string_map(map, &entries)) return false;
+
+    out->reserve(entries.size());
+    for (const auto& e : entries)
+        out->push_back({e.key, dyn_as_int(e.value, 0)});
+
+    // One line the first time through: the value type is a generic's erased
+    // parameter, so the only way to know whether these are kill counts or
+    // state codes is to look at what actually came back.
+    static bool once = true;
+    if (once && !out->empty()) {
+        once = false;
+        host_log("codex: %zu units with progress, e.g. %s=%d %s=%d",
+                 out->size(), (*out)[0].first.c_str(), (*out)[0].second,
+                 out->size() > 1 ? (*out)[1].first.c_str() : "",
+                 out->size() > 1 ? (*out)[1].second : 0);
+    }
+    return true;
+}
+
 bool reader_read_collection(Collection* out) {
     *out = {};
     void* hero = reader_hero();

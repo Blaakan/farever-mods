@@ -120,6 +120,7 @@ function categoryOf(item) {
 }
 
 // Unit flags, in declaration order of the flags column.
+const UNIT_NO_CODEX = 1 << 18;
 const UNIT_NO_COLLECTION = 1 << 20;
 
 // --- acquisition ------------------------------------------------------------
@@ -340,7 +341,21 @@ function cleanText(s) {
 
 const CATEGORY_ORDER = ['appearances', 'mounts', 'pets', 'gliders',
                         'trinkets', 'weapons', 'consumables', 'materials',
-                        'recipes', 'augments', 'misc'];
+                        'recipes', 'augments', 'misc', 'creatures'];
+
+// What a creature drops - the loot table read forwards, for once, since a
+// bestiary entry wants "what do I get" rather than "where is this from".
+const dropsByUnit = new Map();
+for (const t of lootTables) {
+  const items = [];
+  for (const e of t.loot || []) {
+    if (!e.item) continue;
+    const item = itemById.get(e.item);
+    if (!item || !item.texts?.name) continue;
+    items.push({ name: cleanText(item.texts.name), proba: e.proba ?? 1 });
+  }
+  if (items.length) dropsByUnit.set(t.id, items);
+}
 const entries = [];   // { category, id, name, rarity, desc, acquire, gfxFile }
 
 for (const l of items) {
@@ -382,6 +397,42 @@ for (const u of units) {
     track: itemById.has(critterItem)
       ? targetsFor(critterItem, soldItems.has(critterItem)) : [],
     gfxFile: gfx.file || '',
+    gfxSize: gfx.size || 0,
+  });
+}
+
+// Creatures: the bestiary. Everything the codex shows, which is the unit
+// list minus the entries flagged NoCodex, the *_Base templates and the
+// player classes - all of which give themselves away by having no portrait.
+for (const u of units) {
+  if (u.flags & UNIT_NO_CODEX) continue;
+  if (/_Base$/.test(u.id)) continue;
+  const gfx = u.gfx || {};
+  if (!gfx.file || !gfx.file.startsWith('UI/Portraits/')) continue;
+
+  const facts = [];
+  if (u.lvl) {
+    facts.push(u.maxLvl && u.maxLvl !== u.lvl
+      ? `Level ${u.lvl}-${u.maxLvl}` : `Level ${u.lvl}`);
+  }
+  if (u.flags & UNIT_BOSS) facts.push('World boss');
+  else if (u.flags & UNIT_MINIBOSS) facts.push('Miniboss');
+  const drops = dropsByUnit.get(u.id) || [];
+  if (drops.length) {
+    const named = drops.sort((a, b) => b.proba - a.proba).slice(0, 5)
+      .map((d) => (d.proba <= 0.011 ? `${d.name} (rare)` : d.name));
+    facts.push(`Drops: ${named.join(', ')}`);
+  }
+
+  entries.push({
+    category: 'creatures',
+    id: u.id,
+    name: cleanText(u.texts?.name) || u.id,
+    rarity: (u.flags & UNIT_BOSS) ? 4 : (u.flags & UNIT_MINIBOSS) ? 3 : 0,
+    desc: cleanText(u.texts?.desc || ''),
+    acquire: facts.map(cleanText),
+    track: [],
+    gfxFile: gfx.file,
     gfxSize: gfx.size || 0,
   });
 }
