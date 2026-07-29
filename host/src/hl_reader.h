@@ -78,6 +78,36 @@ struct JobState {
 // another character on the same account knows different recipes.
 bool reader_read_jobs(std::vector<JobState>* out);
 
+// Skill runes. A rune is a one-use pickup that permanently teaches this
+// character an upgrade to one skill, which they may then slot or not - so
+// there are two lists and they answer different questions. `learned` is what
+// the character owns and is what the atlas ticks off; `slotted` is the few
+// currently in effect.
+struct RuneState {
+    std::vector<std::string> learned;
+    std::vector<std::string> slotted;
+};
+bool reader_read_runes(RuneState* out);
+
+// What this character has already finished. The ids are the game's own
+// element and activity ids - `W1_Siagarta_WorldChest_16`, `POI_Rift_01` -
+// which are exactly the ids the atlas records against a one-time source, so
+// membership here is what retires a chest or a quest from a target list.
+//
+// Per character: a chest your Priest opened is still there for your Mage.
+struct CompletionState {
+    bool valid = false;
+    std::vector<std::string> done;
+};
+bool reader_read_completion(CompletionState* out);
+
+// One-shot diagnostic over the parts of that state whose shape is not yet
+// settled. Writes to the log and nothing else. It exists because these are
+// generic maps whose value type is erased, so what a key looks like and what
+// a value means cannot be read off the bytecode - guessing at that is what
+// made the map hit test read the gamepad's cursor.
+void reader_probe_completion();
+
 // What the codex records for one creature. A creature absent from the map
 // has never been encountered at all.
 struct UnitProgress {
@@ -152,8 +182,11 @@ bool reader_read_map_state(MapState* out);
 // `client_*` are swap-chain pixels - the space the mouse arrives in - which
 // this maps onto the UI scene's own units before comparing. Returns false
 // when the map is closed or nothing is within reach of that point.
+// `miss_dist`, when given, receives how far the nearest visible marker was in
+// scene units even on a failure - which is the only way to tell "you clicked
+// empty map" from "the reach is too tight".
 bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
-                     MapPin* out);
+                     MapPin* out, double* miss_dist = nullptr);
 
 // World position and facing of the local hero, for the navigator's distance
 // and arrow readout. Cheap (four validated qword reads), safe to call at

@@ -205,6 +205,14 @@ volatile LONG g_in_world = 0;
 DWORD WINAPI pose_worker(LPVOID) {
     bool prev_in_world = false;
     while (!g_stop) {
+        // Re-derive GameApp from App.inst before reading anything rooted at
+        // it. The game replaces that object across a character select, and
+        // the cached pointer cannot be told apart from a live one - so
+        // without this the camera and the map window silently read a dead
+        // app for the rest of the session. Never with a scan: this runs at
+        // 20Hz, and the cheap path is the only one that belongs here.
+        fmk::reader_locate_app(false);
+
         double x = 0, y = 0, z = 0, rz = 0;
         const bool in_world = fmk::reader_read_hero_pose(&x, &y, &z, &rz);
         if (in_world != prev_in_world) {
@@ -384,9 +392,15 @@ DWORD WINAPI worker(LPVOID) {
             app_tries++;
             // App.inst is null until the game builds its application, which
             // happens well before the main menu but not instantly. Keep to
-            // the free path for the first half-minute or so; only then pay
-            // for a sweep.
-            const bool allow_scan = app_tries > 10;
+            // the free path; only then pay for a sweep.
+            //
+            // Three minutes, not thirty seconds. The pose thread now
+            // re-derives App.inst every tick, so the moment the game builds
+            // its application object one of the two threads has it - which
+            // makes the sweep pure redundancy rather than a fallback. Being
+            // impatient cost four 6-second scans on a cold launch, one of
+            // which finished *after* the pose thread had already found it.
+            const bool allow_scan = app_tries > 60;
             app_found = fmk::reader_locate_app(allow_scan);
             if (!app_found) {
                 worker_sleep(3);
@@ -449,9 +463,21 @@ DWORD WINAPI worker(LPVOID) {
                 std::vector<fmk::JobState> jobs;
                 fmk::reader_read_jobs(&jobs);
 
+                // Skill runes, which are learned the same per-character way.
+                fmk::RuneState runes;
+                fmk::reader_read_runes(&runes);
+
+                // The one-time sources this character has already spent, so
+                // the atlas stops pointing at them.
+                fmk::CompletionState done;
+                fmk::reader_read_completion(&done);
+
+                // The one shape still unsettled: an NPC's per-quest goals.
+                fmk::reader_probe_completion();
+
                 // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
-                fmk::atlas_ui_update(c, inv, units, jobs);
+                fmk::atlas_ui_update(c, inv, units, jobs, runes, done);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }

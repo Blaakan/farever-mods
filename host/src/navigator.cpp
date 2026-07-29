@@ -46,11 +46,6 @@ std::vector<char> g_done;             // parallel to g_targets
 std::vector<char> g_armed;            // parallel; 0 = cannot be reached yet
 NavMode g_mode = kNavNearest;
 
-// When the last outstanding waypoint was crossed off, so the pill can say so
-// before it disappears. 0 = not finished.
-DWORD g_finished_tick = 0;
-constexpr DWORD kFinishedMs = 6000;
-
 // Hero pose, stamped by the pose thread at ~20Hz.
 bool   g_pos_valid = false;
 double g_hx = 0, g_hy = 0, g_hz = 0;
@@ -205,8 +200,17 @@ void consume_arrivals_locked() {
         host_log("nav: reached '%s' (%d of %d done)", t.label,
                  (int)g_targets.size() - left, (int)g_targets.size());
         if (left == 0) {
-            g_finished_tick = GetTickCount();
-            if (!g_finished_tick) g_finished_tick = 1;
+            // A finished route is finished: the frame goes, the way it does
+            // on Shift+F10. Held here rather than in the draw callback so it
+            // happens the moment the last waypoint is reached, whether or
+            // not the overlay is on screen at the time.
+            host_log("nav: route '%s' complete - cleared", g_name.c_str());
+            g_key.clear();
+            g_name.clear();
+            g_targets.clear();
+            g_done.clear();
+            g_armed.clear();
+            g_mode = kNavNearest;
             break;
         }
     }
@@ -471,7 +475,6 @@ bool nav_track(const char* key, const char* name, const NavTarget* targets,
         g_targets.clear();
         g_done.clear();
         g_armed.clear();
-        g_finished_tick = 0;
         InterlockedExchange(&g_dirty, 1);
         return false;
     }
@@ -481,7 +484,6 @@ bool nav_track(const char* key, const char* name, const NavTarget* targets,
     g_done.assign(g_targets.size(), 0);
     g_armed.assign(g_targets.size(), 1);
     g_mode = kNavNearest;
-    g_finished_tick = 0;
     InterlockedExchange(&g_dirty, 1);
     return true;
 }
@@ -498,7 +500,6 @@ bool nav_start_route(const char* key, const char* name,
     // standing on the first one means you have done that one.
     g_armed.assign(g_targets.size(), 1);
     g_mode = (mode == kNavOrder) ? kNavOrder : kNavRoute;
-    g_finished_tick = 0;
     // Starting a route while already standing on its first waypoint should
     // not leave the arrow pointing at your own feet.
     consume_arrivals_locked();
@@ -520,7 +521,6 @@ void nav_queue(const char* label, double x, double y, double z) {
         g_mode = kNavRoute;
     }
     // Finishing the queue and then adding to it starts it going again.
-    g_finished_tick = 0;
     NavTarget t{};
     _snprintf_s(t.label, sizeof(t.label), _TRUNCATE, "%s",
                 (label && label[0]) ? label : "Waypoint");
@@ -560,7 +560,6 @@ void nav_add(const char* label, const NavTarget* targets, int count,
         g_armed.clear();
         g_mode = kNavRoute;
     }
-    g_finished_tick = 0;
 
     NavTarget t = *pick;
     if (label && label[0]) {
@@ -593,7 +592,6 @@ void nav_set_mode(NavMode mode) {
     // would start crossing off the vendors you walk past.
     if (g_targets.empty() || g_mode == kNavNearest) return;
     g_mode = (mode == kNavOrder) ? kNavOrder : kNavRoute;
-    g_finished_tick = 0;
     InterlockedExchange(&g_dirty, 1);
 }
 
@@ -606,7 +604,6 @@ void nav_untrack() {
     g_done.clear();
     g_armed.clear();
     g_mode = kNavNearest;
-    g_finished_tick = 0;
     InterlockedExchange(&g_dirty, 1);
 }
 
@@ -634,8 +631,6 @@ void nav_skip() {
     if (i < 0) return;
     g_done[i] = 1;
     if (remaining_locked() == 0) {
-        g_finished_tick = GetTickCount();
-        if (!g_finished_tick) g_finished_tick = 1;
     }
     InterlockedExchange(&g_dirty, 1);
 }
@@ -648,7 +643,6 @@ void nav_restart() {
     // Restarting a list means walking it again from here, so its waypoints
     // are places rather than fresh marks - armed, like a route being started.
     g_armed.assign(g_targets.size(), 1);
-    g_finished_tick = 0;
     consume_arrivals_locked();
     InterlockedExchange(&g_dirty, 1);
 }
@@ -741,26 +735,6 @@ static void draw_arrow_3d(float cx, float cy, float r, double a) {
     draw_triangle(p[2].x, p[2].y, p[4].x, p[4].y, p[3].x, p[3].y, dim);
 }
 
-// A tick, for the moment a route runs out of waypoints. Same two-facet
-// shading as the arrow so the pill does not change character when it
-// changes message.
-static void draw_check(float cx, float cy, float r) {
-    const Color lit{0.55f, 0.92f, 0.55f, 1.0f};
-    const Color dim{0.28f, 0.66f, 0.34f, 1.0f};
-    const float t = r * 0.30f;    // stroke half-width
-    // Short arm, down-right; long arm, up-right. Two quads as four triangles.
-    auto bar = [&](float x0, float y0, float x1, float y1, Color col) {
-        const float dx = x1 - x0, dy = y1 - y0;
-        const float len = sqrtf(dx * dx + dy * dy);
-        if (len < 0.0001f) return;
-        const float nx = -dy / len * t, ny = dx / len * t;
-        draw_triangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, col);
-        draw_triangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, col);
-    };
-    bar(cx - r * 0.62f, cy + r * 0.02f, cx - r * 0.14f, cy + r * 0.52f, dim);
-    bar(cx - r * 0.14f, cy + r * 0.52f, cx + r * 0.66f, cy - r * 0.50f, lit);
-}
-
 // Nothing tracked, or nothing drawn: the frame must stop claiming screen
 // space, or it goes on swallowing clicks in an area showing nothing.
 void nav_clear_frame() {
@@ -782,7 +756,7 @@ void nav_draw(float screen_w, float screen_h) {
     g_seen_clicks = in.clicks;
 
     char name[96], where[64], label[96], progress[48] = {0}, key[192] = {0};
-    bool have = false, fresh = false, used_camera = false, finished = false;
+    bool have = false, fresh = false, used_camera = false;
     int done = 0, total = 0;
     double rel = 0;                   // radians clockwise from "dead ahead"
     double diag_target_b = 0, diag_cam_d = 0, diag_rz = 0, diag_cam_dist = 0;
@@ -795,16 +769,12 @@ void nav_draw(float screen_w, float screen_h) {
             total = (int)g_targets.size();
             done = total - remaining_locked();
             const int cur = current_locked();
-            finished = cur < 0;
-
-            if (finished) {
-                // Hold the frame briefly so the last waypoint reads as
-                // finished rather than as the mod having crashed.
-                _snprintf_s(label, sizeof(label), _TRUNCATE, "%d waypoints",
-                            total);
-                _snprintf_s(where, sizeof(where), _TRUNCATE, "Route complete");
-                have = true;
-            } else {
+            // A route that runs out is cleared the moment its last waypoint
+            // is reached (consume_arrivals_locked), so the only way to be
+            // here with nothing outstanding is a list of alternatives, where
+            // there is always a current one. Draw nothing rather than invent
+            // a state for it.
+            if (cur >= 0) {
                 const NavTarget& t = g_targets[cur];
                 _snprintf_s(label, sizeof(label), _TRUNCATE, "%s", t.label);
                 if (fresh) {
@@ -841,19 +811,7 @@ void nav_draw(float screen_w, float screen_h) {
         }
     }
 
-    // A finished route holds the pill for a few seconds and then lets go of
-    // the screen, so it returns to how it was without a click. It does not
-    // let go of the *route*: those waypoints are still the thing you might
-    // want to save or walk again, and quietly deleting them a few seconds
-    // after the last one would throw away a recording as it was finished.
-    // The Routes page keeps showing it, with Restart and Stop next to it.
-    if (finished) {
-        const DWORD at = g_finished_tick;
-        if (!at || GetTickCount() - at > kFinishedMs) {
-            nav_clear_frame();
-            return;
-        }
-    } else if (!have || !fresh) {
+    if (!have || !fresh) {
         // No tracked target, or no live hero to measure from (main menu,
         // logout, loading): draw nothing at all rather than a frame frozen on
         // the last position it knew.
@@ -866,7 +824,7 @@ void nav_draw(float screen_w, float screen_h) {
     // numbers - no guessing at a second attempt.
     static int last_source = -1;
     const int source = used_camera ? 1 : 0;
-    if (fresh && !finished && source != last_source) {
+    if (fresh && source != last_source) {
         last_source = source;
         host_log("nav: arrow from %s (targetBearing=%.1fdeg viewBearing=%.1fdeg "
                  "heroRotZ=%.1fdeg camToHero=%.1f rel=%.1fdeg)",
@@ -983,15 +941,10 @@ void nav_draw(float screen_w, float screen_h) {
     const float cx = x + w * 0.5f;
     float yy = y + pad;
 
-    if (finished)
-        draw_check(cx, yy + kArrowR, kArrowR);
-    else
-        draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
+    draw_arrow_3d(cx, yy + kArrowR, kArrowR, rel);
     yy += kArrowR * 2.1f + 6;
 
-    draw_text(cx - dist_w * 0.5f, yy, kDistSz,
-              finished ? Color{0.62f, 0.94f, 0.62f, 1.0f}
-                       : Color{1.0f, 1.0f, 1.0f, 1.0f},
+    draw_text(cx - dist_w * 0.5f, yy, kDistSz, {1.0f, 1.0f, 1.0f, 1.0f},
               where);
     yy += kDistSz + 4;
     draw_text(cx - name_w * 0.5f, yy, kNameSz, {0.86f, 0.89f, 0.95f, 1.0f}, name);

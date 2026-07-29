@@ -39,15 +39,15 @@ namespace {
 
 // --- static item database (immutable once g_loaded is set) ------------------
 
-constexpr int kCats = 12;
+constexpr int kCats = 13;
 const char* kCatNames[kCats] = {"Appearances", "Mounts", "Pets", "Gliders",
                                 "Trinkets", "Weapons", "Consumables",
                                 "Materials", "Recipes", "Augments", "Misc",
-                                "Creatures"};
+                                "Creatures", "Runes"};
 const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
                               "trinkets", "weapons", "consumables",
                               "materials", "recipes", "augments", "misc",
-                              "creatures"};
+                              "creatures", "runes"};
 
 // Three kinds of page, in this order: account-wide collection unlocks
 // (0..3), real items owned only while they sit in a bank, bag or equipment
@@ -56,6 +56,10 @@ const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
 constexpr int kFirstItemCat = 4;
 constexpr int kRecipesCat = 8;
 constexpr int kCreaturesCat = 11;
+// Runes are neither carried nor unlocked account-wide: like a craft, a
+// character learns one permanently and another character has not. They sit
+// past the bestiary so every range above keeps its meaning.
+constexpr int kRunesCat = 12;
 
 // One more tab than there are categories. Routes are not a collection of
 // anything the account owns, so they have no entries, no ownership and no
@@ -70,6 +74,10 @@ struct Entry {
     std::vector<std::string> acquire;
     std::vector<std::string> tags;    // "slot:Chest", "class:Mage", "area:Z1"
     std::vector<NavTarget> targets;   // tracker destinations, often empty
+    // Parallel to `targets`: the id of the one-time thing each one is, or
+    // empty when it is repeatable. A source already spent is dropped from
+    // the list rather than sent you to twice.
+    std::vector<std::string> target_once;
     int rarity = 0;      // 0..4 = common..legendary, from the CastleDB
     int icon = -1;       // cell in the icon atlas, -1 = none
     int cat = 0;
@@ -122,7 +130,55 @@ struct OwnSnap {
     // character, so "known" is a question of by whom.
     std::unordered_map<std::string, std::set<std::string>> learned_by;
     std::unordered_map<std::string, int> job_level;
+    // One-time sources this character has already spent, by the game's own
+    // element and activity ids.
+    std::set<std::string> done_sources;
 };
+
+// The targets of an entry worth still walking to: everything repeatable,
+// plus the one-time sources not yet spent. Returned by value because the
+// caller hands the result to the navigator, which copies it anyway.
+//
+// A source that ran out is not "somewhere you could go" - it is somewhere
+// you already went, and leaving it on the list sends you across the map for
+// a chest you opened last week.
+// Three kinds of target, and the difference decides what is safe to walk to:
+//
+//   no id      repeatable - a vendor, a spawn cluster, a world crate. Always
+//              good.
+//   plain id   a chest or an activity, and the game records whether this
+//              character finished it. Verifiable, so drop it once spent.
+//   `q:` id    a quest. Nothing in the save records a quest being handed in -
+//              checked every map on Progress and HeroData - so its state is
+//              unknowable, and a waypoint to one is a coin flip.
+//
+// A coin flip is worse than nothing when there is a sure thing available, so
+// unverifiable targets are used only when nothing else survives. That is the
+// difference between the arrow sending you to a quest you finished last week
+// and sending you to a chest that is definitely still there.
+std::vector<NavTarget> live_targets(const Entry& e, const OwnSnap* snap) {
+    if (e.target_once.empty()) return e.targets;
+
+    std::vector<NavTarget> sure, unsure;
+    for (size_t i = 0; i < e.targets.size(); i++) {
+        const std::string& once =
+            i < e.target_once.size() ? e.target_once[i] : std::string();
+        if (once.compare(0, 2, "q:") == 0) {
+            unsure.push_back(e.targets[i]);
+            continue;
+        }
+        if (!once.empty() && snap && snap->done_sources.count(once)) continue;
+        sure.push_back(e.targets[i]);
+    }
+    if (!sure.empty()) return sure;
+    // Nothing checkable left. A quest is *not* an acceptable fallback: half
+    // the time it sends you across the map to an NPC you already handed it
+    // to, and being sent somewhere wrong is worse than being sent nowhere.
+    // The quests are still named in the tooltip, where you can judge for
+    // yourself which you have done.
+    (void)unsure;
+    return {};
+}
 
 // Aggregates always update, even when the per-stack list is full: the total,
 // the border rarity and the max level must reflect everything the account
@@ -402,8 +458,18 @@ bool load_tsv(const std::wstring& path) {
                 NavTarget t{};
                 strncpy_s(t.label, one.substr(0, at).c_str(), _TRUNCATE);
                 if (sscanf_s(one.c_str() + at + 1, "%lf,%lf,%lf",
-                             &t.x, &t.y, &t.z) == 3)
+                             &t.x, &t.y, &t.z) == 3) {
+                    // A fourth field, when present, is the one-time source's
+                    // own id: `label@x,y,z,NPC_Ratou`.
+                    std::string once;
+                    const std::string nums = one.substr(at + 1);
+                    size_t c = 0, commas = 0;
+                    for (; c < nums.size() && commas < 3; c++)
+                        if (nums[c] == ',') commas++;
+                    if (commas == 3 && c < nums.size()) once = nums.substr(c);
                     e.targets.push_back(t);
+                    e.target_once.push_back(std::move(once));
+                }
             }
         }
         entries.push_back(std::move(e));
@@ -696,16 +762,20 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     // target list otherwise, and the click hint.
     char track_dist[96] = {0};
     const bool tracked = nav_is_tracked(track_key);
-    if (!e.targets.empty())
-        nav_format_distance(e.targets.data(), (int)e.targets.size(),
+    const std::vector<NavTarget> live = live_targets(e, snap);
+    const int spent = (int)e.targets.size() - (int)live.size();
+    if (!live.empty())
+        nav_format_distance(live.data(), (int)live.size(),
                             track_dist, sizeof(track_dist));
 
     float th = pad + 20 /*name*/ + 17 /*status line*/;
     th += copy_lines.size() * 16.0f;
     if (!desc_lines.empty()) th += 6 + desc_lines.size() * 16.0f;
     if (!acq_lines.empty()) th += 6 + 16 /*header*/ + acq_lines.size() * 16.0f;
-    // Two hint lines - track, and add-to-route - plus the live distance.
-    if (!e.targets.empty()) th += 6 + 16 + 16 + (track_dist[0] ? 16.0f : 0);
+    // Two hint lines - track, and add-to-route - plus the live distance and,
+    // when any one-time source is spent, a line saying so.
+    if (!e.targets.empty())
+        th += 6 + 16 + 16 + (track_dist[0] ? 16.0f : 0) + (spent ? 16.0f : 0);
     th += 4 + 14 /*id line*/ + pad;
 
     float tx = mx + 18, ty = my + 18;
@@ -751,6 +821,27 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
         else if (!has_job && !job.empty())
             _snprintf_s(status, sizeof(status), _TRUNCATE,
                         "No character has taken up %s", job.c_str());
+        else
+            _snprintf_s(status, sizeof(status), _TRUNCATE, "Not learned yet");
+        draw_text(tx + pad, yy, small_sz,
+                  who.empty() ? kTextDim : Color{0.45f, 0.85f, 0.45f, 1.0f},
+                  status);
+    } else if (e.cat == kRunesCat) {
+        // A rune is one-use and one-pickup, so "who has it" is the question -
+        // and a rune learned by your Mage is gone for your Priest.
+        std::string who;
+        if (snap) {
+            auto f = snap->learned_by.find(e.id);
+            if (f != snap->learned_by.end()) {
+                for (const auto& name : f->second) {
+                    if (!who.empty()) who += ", ";
+                    who += name;
+                }
+            }
+        }
+        if (!who.empty())
+            _snprintf_s(status, sizeof(status), _TRUNCATE, "Learned by %s",
+                        who.c_str());
         else
             _snprintf_s(status, sizeof(status), _TRUNCATE, "Not learned yet");
         draw_text(tx + pad, yy, small_sz,
@@ -826,6 +917,32 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
         draw_text(tx + pad, yy, small_sz, {0.45f, 0.50f, 0.60f, 1.0f},
                   "Ctrl+click: add to route   Shift: add first");
         yy += 16;
+        if (spent) {
+            // Naming what was dropped matters: silently showing fewer places
+            // than yesterday would read as the atlas losing data.
+            int quests = 0, done_here = 0;
+            for (size_t i = 0; i < e.target_once.size(); i++) {
+                const std::string& o = e.target_once[i];
+                if (o.compare(0, 2, "q:") == 0) quests++;
+                else if (!o.empty() && snap && snap->done_sources.count(o))
+                    done_here++;
+            }
+            char line[160];
+            if (done_here)
+                _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "%d source%s already done on this character - "
+                            "hidden", done_here, done_here == 1 ? "" : "s");
+            else
+                // Not hidden for being done - the game does not record that
+                // for quests, so they are listed above but never walked to.
+                _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "%d quest source%s listed above - not tracked, "
+                            "the game does not record which you finished",
+                            quests, quests == 1 ? "" : "s");
+            draw_text(tx + pad, yy, small_sz, {0.55f, 0.60f, 0.45f, 1.0f},
+                      line);
+            yy += 16;
+        }
     }
     yy += 4;
     draw_text(tx + pad, yy, 11, kTextFaint, e.id.c_str());
@@ -864,8 +981,8 @@ bool atlas_ui_init() {
 // the way inventories are - that is how the atlas can say "known by Emsei"
 // while you are playing someone else.
 void write_jobs_json(const std::vector<JobState>& jobs,
-                     const std::string& character) {
-    if (jobs.empty() || character.empty()) return;
+                     const RuneState& runes, const std::string& character) {
+    if ((jobs.empty() && runes.learned.empty()) || character.empty()) return;
     std::wstring path = exe_dir();
     if (path.empty()) return;
     std::string safe = sanitize_name(character);
@@ -885,7 +1002,15 @@ void write_jobs_json(const std::vector<JobState>& jobs,
         }
         out += "]}";
     }
-    out += "\n  ]\n}\n";
+    // Runes ride in the same file for the same reason crafts do: they are
+    // learned per character, so the atlas can only say "learned by Emsay"
+    // about a character who is not logged in if it wrote that down.
+    out += "\n  ],\n  \"runes\":[";
+    for (size_t i = 0; i < runes.learned.size(); i++) {
+        if (i) out += ",";
+        out += "\"" + runes.learned[i] + "\"";
+    }
+    out += "]\n}\n";
 
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
@@ -918,27 +1043,33 @@ void scan_jobs_json(const std::string& text, const std::string& who,
         jp = end;
     }
 
-    size_t pos = 0;
-    while ((pos = text.find("\"learned\":[", pos)) != std::string::npos) {
-        pos += 11;
-        const size_t end = text.find(']', pos);
-        if (end == std::string::npos) break;
-        size_t p = pos;
-        while (p < end) {
-            const size_t a = text.find('"', p);
-            if (a == std::string::npos || a > end) break;
-            const size_t b = text.find('"', a + 1);
-            if (b == std::string::npos || b > end) break;
-            snap->learned_by[text.substr(a + 1, b - a - 1)].insert(who);
-            p = b + 1;
+    // Crafts and runes are both "this character learned this", read into the
+    // same map from the two arrays that carry them.
+    for (const char* key : {"\"learned\":[", "\"runes\":["}) {
+        size_t pos = 0;
+        while ((pos = text.find(key, pos)) != std::string::npos) {
+            pos += strlen(key);
+            const size_t end = text.find(']', pos);
+            if (end == std::string::npos) break;
+            size_t p = pos;
+            while (p < end) {
+                const size_t a = text.find('"', p);
+                if (a == std::string::npos || a > end) break;
+                const size_t b = text.find('"', a + 1);
+                if (b == std::string::npos || b > end) break;
+                snap->learned_by[text.substr(a + 1, b - a - 1)].insert(who);
+                p = b + 1;
+            }
+            pos = end;
         }
-        pos = end;
     }
 }
 
 void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<UnitProgress>& unit_progress,
-                     const std::vector<JobState>& jobs) {
+                     const std::vector<JobState>& jobs,
+                     const RuneState& runes,
+                     const CompletionState& done) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
     auto snap = std::make_shared<OwnSnap>();
@@ -974,7 +1105,16 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
         for (const auto& craft : j.learned)
             snap->learned_by[craft].insert(snap->character);
     }
-    write_jobs_json(jobs, snap->character);
+    // Runes go into the same map: both answer "which character learned this".
+    for (const auto& rune : runes.learned)
+        snap->learned_by[rune].insert(snap->character);
+
+    // One-time sources this character has spent. Deliberately *not* merged
+    // across characters the way learned crafts are: a chest your Priest
+    // opened is still waiting for your Mage, so pooling them would hide
+    // places that are genuinely still there.
+    for (const auto& id : done.done) snap->done_sources.insert(id);
+    write_jobs_json(jobs, runes, snap->character);
     {
         const std::string skip = sanitize_name(snap->character);
         std::wstring dir = exe_dir();
@@ -1027,11 +1167,16 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
     // someone - having the paper in a bag is not the point of the page.
     // A recipe entry IS the craft: its id is the produced item, which is
     // exactly what the game records as learned.
-    for (int i = g_cat_begin[kRecipesCat]; i < g_cat_begin[kRecipesCat + 1]; i++) {
-        const Entry& e = g_entries[i];
-        auto f = snap->learned_by.find(e.id);
-        if (f == snap->learned_by.end() || f->second.empty()) continue;
-        snap->byId[kRecipesCat][e.id].unlocked = true;
+    // A rune is learned exactly the way a craft is - permanently, by one
+    // character - so the same map answers both, and a mastery id can never
+    // collide with a produced-item id.
+    for (int cat : {kRecipesCat, kRunesCat}) {
+        for (int i = g_cat_begin[cat]; i < g_cat_begin[cat + 1]; i++) {
+            const Entry& e = g_entries[i];
+            auto f = snap->learned_by.find(e.id);
+            if (f == snap->learned_by.end() || f->second.empty()) continue;
+            snap->byId[cat][e.id].unlocked = true;
+        }
     }
 
     // Finalize aggregates, then count owned ids that exist in the database.
@@ -1445,15 +1590,18 @@ void atlas_ui_draw(float screen_w, float screen_h) {
             if (clicked && !e.targets.empty() &&
                 in.click_x >= x && in.click_x < x + kIcon &&
                 in.click_y >= by0 && in.click_y < by1) {
-                if (in.click_shift || in.click_ctrl) {
-                    nav_add(e.name.c_str(), e.targets.data(),
-                            (int)e.targets.size(), in.click_shift);
+                const std::vector<NavTarget> go = live_targets(e, own.get());
+                // Nothing left that can be shown to still be there. Clicking
+                // does nothing rather than pointing at a maybe.
+                if (go.empty()) {
+                } else if (in.click_shift || in.click_ctrl) {
+                    nav_add(e.name.c_str(), go.data(), (int)go.size(),
+                            in.click_shift);
                 } else {
                     char key[192];
                     _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
                                 kCatTsv[ecat], e.id.c_str());
-                    nav_track(key, e.name.c_str(), e.targets.data(),
-                              (int)e.targets.size());
+                    nav_track(key, e.name.c_str(), go.data(), (int)go.size());
                 }
             }
         }

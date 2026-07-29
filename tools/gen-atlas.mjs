@@ -69,6 +69,12 @@ const itemTypes = new Map(sheet('itemType').lines.map((l) => [l.id, l]));
 const units = sheet('unit').lines;
 const lootTables = sheet('lootTable').lines;
 const crafts = sheet('craft').lines;
+// Runes live inside the skills they upgrade: `skill.mastery` is an array of
+// them, each with its own id, name, description and portrait.
+const skills = sheet('skill').lines;
+// Achievements hand out mounts and gliders, and are the *only* source for
+// the ones they hand out - 23 items whose acquisition is otherwise blank.
+const achievements = sheet('ach').lines;
 const rarities = sheet('rarity').lines.map((l) => l.id);   // Common..Legendary
 
 function typeChain(typeId) {
@@ -299,6 +305,14 @@ const activityOrbs = new Map();   // targetActivity id -> {x, y, z, zone}
 // invokes, so the link between the two - and the exact place you go to use
 // one - is in the world data rather than in a naming convention.
 const invocationSites = [];       // {unit, item, x, y, z, zone}
+// Every chest in the world, with the table it rolls on.
+const lootChests = [];            // {table, x, y, z, zone}
+// Items handed over outright rather than rolled for: a quest's reward, and a
+// chest with a guaranteed line in it. These are the 100% sources, and they
+// are the ones worth walking to.
+const itemGrants = [];            // {item, quest, from, x, y, z, zone}
+// Named chest contents that are *not* certain, kept for the text only.
+const chanceDrops = [];           // {item, pct, id, zone}
 
 function isSpawner(node) {
   return node.props && node.props.$cdbtype === 'spawner';
@@ -329,6 +343,57 @@ function scanWorld(pak, pathFilter) {
                              unitGroup: props.unitGroup || null, x, y, z, zone });
         return;
       }
+      // A chest names the table it rolls on, which is the other half of
+      // "where does this come from": the loot tables say what a world crate
+      // can contain, and these say where the world crates are.
+      const rolls = props.props && props.props.lootTable;
+      if (typeof rolls === 'string' && rolls)
+        lootChests.push({ table: rolls, x, y, z, zone });
+
+      const from = cleanText(props.texts?.name || props.id || '');
+      // The element's own id, which is what the game records against it once
+      // the chest is opened or the quest handed in.
+      const eid = props.id || '';
+
+      // A chest can carry named contents on top of its table. **dropRate is
+      // a percentage, not a probability**: the values in the world are 1 and
+      // 100, and reading 1 as "always" is how a 1% chest came to be offered
+      // as a guaranteed rune. Only 100 is a certainty; the rest are recorded
+      // with their odds and given no waypoint, because a 1% chest is a worse
+      // place to send someone than the crate clusters they already have.
+      for (const e of (props.props && props.props.lootItems) || []) {
+        if (!e || !e.item) continue;
+        const pct = e.dropRate ?? 0;
+        if (pct <= 0) continue;
+        chanceDrops.push({ item: e.item, pct, id: eid, zone });
+        if (pct >= 100)
+          itemGrants.push({ item: e.item, quest: null, from: 'Chest',
+                            once: eid, x, y, z, zone });
+      }
+
+      // Quest rewards. An NPC's dialogue tree hands items over on a choice,
+      // in one of two shapes depending on when the quest was authored, and
+      // the objective sitting beside them names the quest. Negative amounts
+      // are what the choice *costs*, so only gains count.
+      const grants = (node_props, quest) => {
+        if (!node_props || typeof node_props !== 'object') return;
+        if (Array.isArray(node_props)) {
+          for (const v of node_props) grants(v, quest);
+          return;
+        }
+        const here = cleanText(node_props.goal?.name || '') || quest;
+        for (const e of node_props.receiveItems || [])
+          if (e && e.kind && (e.amount ?? 0) > 0)
+            itemGrants.push({ item: e.kind, quest: here, from, once: eid,
+                             x, y, z, zone });
+        for (const e of node_props.gains?.items || [])
+          if (e && e.item && (e.count ?? 0) > 0)
+            itemGrants.push({ item: e.item, quest: here, from, once: eid,
+                             x, y, z, zone });
+        for (const k of Object.keys(node_props)) grants(node_props[k], here);
+      };
+      if (props.dialog) grants(props.dialog, null);
+
       // Shops carry their stock, and the element carries a display name.
       const stock = props.props && props.props.shop;
       if (Array.isArray(stock)) {
@@ -369,8 +434,44 @@ try {
   console.warn('res.map.pak not scanned:', e.message);
 }
 
+// Item -> the achievement that awards it. An achievement is not a place, so
+// this never produces a navigator target - but "collect all the secret orbs
+// in Skover Island" is the complete answer to how you get that glider, and
+// it points at a route the atlas already ships.
+const achById = new Map(achievements.map((a) => [a.id, a]));
+const achFor = new Map();
+for (const a of achievements) {
+  for (const r of a.reward?.items || []) {
+    if (!r.item) continue;
+    if (!achFor.has(r.item)) achFor.set(r.item, []);
+    achFor.get(r.item).push(a);
+  }
+}
+
+// What to call an achievement. The tiered collection ones ("Collect 25
+// Mounts") have no name of their own and inherit their wording from the tier
+// below, with the number kept in the objective rather than in the text - so
+// the name has to be rebuilt rather than read.
+function achTitle(a) {
+  let desc = a.desc;
+  for (let up = achById.get(a.parent), i = 0; !desc && up && i < 6; i++) {
+    desc = up.desc;
+    up = achById.get(up.parent);
+  }
+  const value = a.objectives?.[0]?.value?.v;
+  const fill = (s) => (s || '')
+    .replace(/\[(Z\d)_Region\]/g, (_, z) => regionDisplay(z))
+    .replace(/::targetValue::/g, value !== undefined ? String(value) : 'some');
+  const name = cleanText(fill(a.name));
+  const text = cleanText(fill(desc));
+  if (name && text) return `${name} - ${text}`;
+  return name || text || a.id;
+}
+
 function acquisitionOf(itemId) {
   const parts = [];
+  for (const a of achFor.get(itemId) || [])
+    parts.push(`Achievement: ${achTitle(a)}`);
   // A recipe's own line is about what it teaches, not how it is made.
   const taught = craftByRecipe.get(itemId);
   if (taught) {
@@ -386,6 +487,30 @@ function acquisitionOf(itemId) {
     if (craft.unlockSource) s += `, recipe from ${craft.unlockSource}`;
     parts.push(s);
   }
+  // Quests hand their reward over every time, so they lead - and naming them
+  // is what turns "somewhere" into somewhere you can go.
+  // With the zone, because the navigator deliberately will not walk you to a
+  // quest - the game does not record which you have finished - so this line
+  // is the only thing that tells you where to look.
+  const quests = [...new Set((grantsByItem.get(itemId) || [])
+    .filter((g) => g.quest)
+    .map((g) => `${g.quest} (${prettyZone(g.zone)})`))];
+  if (quests.length)
+    parts.push(`Quest reward: ${quests.slice(0, 3).join(', ')}` +
+               (quests.length > 3 ? ` +${quests.length - 3} more` : ''));
+  const chestGrants = (grantsByItem.get(itemId) || []).filter((g) => !g.quest);
+  if (chestGrants.length)
+    parts.push(`Always in ${chestGrants.length} chest` +
+               (chestGrants.length === 1 ? '' : 's'));
+  // Named in a specific chest, but not certainly there. Saying the odds is
+  // the difference between "go here" and "this is a lottery ticket".
+  const chances = chanceDrops.filter((c) => c.item === itemId);
+  if (chances.length) {
+    const pct = Math.max(...chances.map((c) => c.pct));
+    parts.push(`Named in ${chances.length} chest` +
+               (chances.length === 1 ? '' : 's') + ` at ${pct}%`);
+  }
+
   const loot = lootSources(itemId);
   if (loot.length) parts.push(`Drops: ${loot.join(', ')}`);
   if (soldItems.has(itemId)) parts.push('Sold by a merchant');
@@ -420,12 +545,17 @@ const pois = (() => {
   }
 })();
 const prettyZone = (z) => (z ? z.replace(/^Z\d+_/, '').replace(/_/g, ' ') : 'unknown');
-const mkTarget = (label, poi) => ({
+const mkTarget = (label, poi, once) => ({
   // '@' and ';' are the track column's own separators.
   label: cleanText(label).replace(/[@;]/g, ' ').trim(),
   x: Math.round(poi.x * 10) / 10,
   y: Math.round(poi.y * 10) / 10,
   z: Math.round(poi.z * 10) / 10,
+  // The id of the one-time thing this target *is* - the NPC whose quest pays
+  // out, or the chest that holds it. A source you have already spent is no
+  // longer somewhere to go, and only this id can say which one it was.
+  // Absent for the repeatable ones: a vendor, a spawn cluster, a crate.
+  once: once ? String(once).replace(/[@;,]/g, '') : '',
 });
 
 const vaultChests = pois.filter((e) => e.name === 'VaultChest');
@@ -454,6 +584,29 @@ for (const s of invocationSites) {
 }
 const invocationTargets = (sites) =>
   clusterTargets(sites, (c) => `Invocation site - ${prettyZone(c.zone)}`);
+
+// Chests grouped by what they roll. An item that only ever comes out of a
+// world crate has no single place, but it does have a few hundred places,
+// and the nearest handful of those is a real answer to "where do I look".
+const chestsByTable = new Map();
+for (const c of lootChests) {
+  if (!chestsByTable.has(c.table)) chestsByTable.set(c.table, []);
+  chestsByTable.get(c.table).push(c);
+}
+const chestTargets = (table) =>
+  clusterTargets(chestsByTable.get(table),
+                 (c) => `Chests - ${prettyZone(c.zone)}`);
+
+// The guaranteed sources, by item. These outrank everything: a quest that
+// always hands one over beats a table that rolls 5% for it.
+const grantsByItem = new Map();
+for (const g of itemGrants) {
+  if (!grantsByItem.has(g.item)) grantsByItem.set(g.item, []);
+  grantsByItem.get(g.item).push(g);
+}
+const grantLabel = (g) =>
+  g.quest ? `${g.quest} - ${prettyZone(g.zone)}`
+          : `${g.from} - ${prettyZone(g.zone)}`;
 const merchantPois = pois.filter((e) => e.kind === 'merchant');
 const dungeonPois = pois.filter((e) => e.kind === 'dungeon');
 
@@ -650,6 +803,18 @@ function targetsFor(itemId, sold) {
     if (targets.length < 6 && t.label && !targets.some((o) => o.label === t.label))
       targets.push(t);
   };
+  // Certain, checkable sources first: a chest the game records you opening.
+  //
+  // Quest grants are held back to the very end. The game records a chest
+  // opened and an activity finished, but *nothing anywhere* records a quest
+  // handed in - every map on Progress and HeroData was checked - so a quest
+  // target can never be retired, and must not fill the six slots ahead of a
+  // source that can be. They carry a `q:` prefix so the host knows never to
+  // navigate to one.
+  const grants = grantsByItem.get(itemId) || [];
+  for (const g of grants)
+    if (!g.quest) push(mkTarget(grantLabel(g), g, g.once));
+
   // A soulstone has two places, and they are nowhere near each other: the
   // rift it drops in, and the altar it is spent at. The altar goes first
   // because a stone you are holding is one you want to use.
@@ -665,12 +830,30 @@ function targetsFor(itemId, sold) {
         push(mkTarget(`Rift - ${prettyZone(r.zone)}`, r));
       continue;
     }
-    if ((m = id.match(/^Vault_Z(\d+)_\d+$/))) {
-      for (const c of vaultChests)
-        if ((c.zone || '').startsWith(`Z${m[1]}_`))
-          push(mkTarget(`Vault - ${prettyZone(c.zone)}`, c));
+    // A vault holds Gold and exactly one mount or glider, at 100%, and the
+    // chest itself names the table it holds - so point at *that* chest.
+    // Matching every vault in the region instead, as this used to, gave the
+    // Semeruian Dragoon three targets of which two were the wrong hidden
+    // area entirely.
+    if (/^Vault_Z\d+_\d+$/.test(id)) {
+      const exact = chestsByTable.get(id) || [];
+      for (const c of exact) push(mkTarget(`Vault - ${prettyZone(c.zone)}`, c));
+      // Only if no chest in the world claims that table - a new tier the
+      // world has not caught up with yet.
+      if (!exact.length && (m = id.match(/^Vault_Z(\d+)_\d+$/)))
+        for (const c of vaultChests)
+          if ((c.zone || '').startsWith(`Z${m[1]}_`))
+            push(mkTarget(`Vault - ${prettyZone(c.zone)}`, c));
       continue;
     }
+
+    // Ordinary chests that roll this table. After the specific branches, so
+    // a vault is named as a vault rather than twice over - and only when
+    // nothing better turned up, since "in a world crate somewhere" should
+    // never crowd out "this vendor sells it".
+    if (!targets.length)
+      for (const t of chestTargets(id)) push(t);
+
     const unit = unitById.get(id) || unitById.get(id.replace(/_?LT2$/, ''));
     if (unit) {
       // Where that creature actually is - the same answer its own bestiary
@@ -704,6 +887,11 @@ function targetsFor(itemId, sold) {
   if (sold && !targets.length)
     for (const mch of merchantPois)
       push(mkTarget(`Merchant - ${prettyZone(mch.zone)}`, mch));
+
+  // Quests last, and only in whatever room is left: they are shown, never
+  // navigated to.
+  for (const g of grants)
+    if (g.quest) push(mkTarget(grantLabel(g), g, 'q:' + g.once));
   return targets;
 }
 
@@ -730,7 +918,7 @@ function cleanText(s) {
 
 const CATEGORY_ORDER = ['appearances', 'mounts', 'pets', 'gliders',
                         'trinkets', 'weapons', 'consumables', 'materials',
-                        'recipes', 'augments', 'misc', 'creatures'];
+                        'recipes', 'augments', 'misc', 'creatures', 'runes'];
 
 // What a creature drops - the loot table read forwards, for once, since a
 // bestiary entry wants "what do I get" rather than "where is this from".
@@ -755,6 +943,10 @@ const regionDisplay = (z) =>
 
 function outfitOrigin(l) {
   const model = l.visuals?.modelPath || '';
+  // Trinkets carry their region in the id rather than the model path
+  // (`Necklace_Z2_Mp`), and the four faction ones fall through to the
+  // faction branch below like any outfit piece.
+  const inId = /_Z(\d)_/.exec(l.id);
   // Starter and World are not places you can go; Craft is already covered by
   // the craft lookup.
   if (l.faction && !['Starter', 'World', 'Craft'].includes(l.faction)) {
@@ -771,6 +963,9 @@ function outfitOrigin(l) {
   if (m)
     return { lines: [`${m[1]} gear from ${regionDisplay(`Z${m[2]}`)} enemies`],
              targets: [] };
+  if (inId)
+    return { lines: [`${l.rarity || 'Uncommon'} drop from ` +
+                     `${regionDisplay(`Z${inId[1]}`)} enemies`], targets: [] };
   return { lines: [], targets: [] };
 }
 
@@ -783,7 +978,10 @@ for (const l of items) {
   // Acquisition strings embed unit display names, which can be non-ASCII.
   let acquire = acquisitionOf(l.id).map(cleanText);
   let track = targetsFor(l.id, soldItems.has(l.id));
-  if (category === 'appearances' && !acquire.length) {
+  // Trinkets are placed the same way outfits are - a faction set, or a
+  // generic drop for a region - so they take the same fallback.
+  if ((category === 'appearances' || category === 'trinkets') &&
+      !acquire.length) {
     const o = outfitOrigin(l);
     acquire = o.lines.map(cleanText);
     if (!track.length) track = o.targets;
@@ -884,6 +1082,101 @@ for (const c of crafts) {
 
 console.log(`summons: ${invocationSites.length} altars, ` +
             `${sitesByUnit.size} units invoked from an item`);
+
+// Runes: one-use pickups that permanently teach one upgrade to one skill.
+//
+// The game calls them skill masteries and keeps them inside the skill they
+// modify rather than in the item sheet - the *item* you find is a single
+// generic `Mastery` whose name is literally "Rune: ::ref_mastery::", filled
+// in at runtime. So the 84 runes that exist are the mastery rows, and where
+// they come from is that one item's own story.
+//
+// A rune's description is written against the skill's own numbers
+// ("::name:: costs ::var1:: less [Rage]"), and the mastery carries those
+// numbers next to it. Substituting them here is the difference between
+// "name costs var1 less Rage" and something a player can read.
+{
+  // Every rune arrives through the same generic pickup, and **no loot table
+  // anywhere names a specific mastery** - which rune a `Mastery` becomes is
+  // decided when you take it. So there is no such thing as "where does
+  // Alacrity drop", and saying so is more use than an empty tooltip. What is
+  // knowable is where the pickup itself comes from, and the world-chest half
+  // of that is hundreds of known positions.
+  const runePickup = [
+    ...acquisitionOf('Mastery').map(cleanText),
+    'Which rune a pickup becomes is decided when you take it',
+  ];
+  const runeTrack = targetsFor('Mastery', soldItems.has('Mastery'));
+  const skillById = new Map(skills.map((s) => [s.id, s]));
+  let count = 0, unresolved = 0;
+
+  // `::ref_x::` and `::ref2_x::` read a value off the status the skill
+  // applies rather than off the skill itself, and a skill names its statuses
+  // in its steps. One hop is enough to catch the ones that are stored as
+  // plain vars; the rest are computed out of effect blocks, which is a long
+  // walk for a number the game shows you in the tooltip anyway.
+  const statusesOf = (s) => (s.steps || [])
+    .map((st) => st.props && st.props.status && st.props.status.ref)
+    .filter(Boolean)
+    .map((id) => skillById.get(id))
+    .filter(Boolean);
+
+  for (const s of skills) {
+    const refs = (s.mastery || []).length ? statusesOf(s) : [];
+    for (const m of s.mastery || []) {
+      if (!m.id) continue;
+      const skillName = cleanText(s.texts?.name || s.id);
+      // Most specific first: the rune's own numbers, then the skill's.
+      const own = { ...(m.props || {}), ...(s.vars || {}), ...(m.vars || {}) };
+
+      const desc = (m.text?.desc || '').replace(/::([^:]+)::/g, (_, tok) => {
+        const hop = /^ref(\d*)_/.exec(tok);
+        let key = tok.replace(/^ref\d*_/, '');
+        const pct = key.endsWith('%');
+        if (pct) key = key.slice(0, -1);
+        // A referenced status has its own name, which is what the sentence
+        // is naming when it says ref_name.
+        const ref = hop ? refs[hop[1] === '2' ? 1 : 0] : null;
+        if (key === 'name')
+          return cleanText(ref?.texts?.name || skillName);
+        const v = (ref && ref.vars ? ref.vars[key] : undefined) ?? own[key];
+        if (v === undefined || typeof v === 'object') {
+          // Say "a number we could not read" rather than print the variable
+          // name at the player - `val1%` reads as a bug, `?%` reads as
+          // missing, which is what it is.
+          unresolved++;
+          return '?';
+        }
+        return pct ? `${Math.round(v * 100)}%` : String(v);
+      });
+
+      // Class comes off the skill id, which is prefixed with it - and the
+      // count comes out even at 21 runes each, so the convention holds.
+      const cls = s.id.split('_')[0];
+      const gfx = m.gfx || {};
+      entries.push({
+        category: 'runes',
+        id: m.id,
+        // Two Priest_Miracle runes ship with an empty text block - they
+        // exist, with icons, and are simply unnamed in this build. Showing
+        // the id is how the rest of the atlas handles a nameless row, and
+        // beats hiding a rune you can actually pick up.
+        name: cleanText(m.text?.name) || m.id,
+        // The pickup is Epic, and every rune arrives through it.
+        rarity: Math.max(0, rarities.indexOf('Epic')),
+        desc: cleanText(desc),
+        acquire: [`Upgrades: ${skillName} (${cls})`, ...runePickup],
+        track: runeTrack,
+        tags: [`class:${cls}`, `skill:${skillName}`],
+        gfxFile: gfx.file || '',
+        gfxSize: gfx.size || 0,
+      });
+      count++;
+    }
+  }
+  console.log(`runes: ${count} skill masteries ` +
+              `(${unresolved} description values not in the data)`);
+}
 
 // Creatures: the bestiary. Everything the codex shows, which is the unit
 // list minus the entries flagged NoCodex, the *_Base templates and the
@@ -1123,8 +1416,11 @@ const tsvField = (s) => String(s).replace(/[\t\r\n]+/g, ' ');
 const tsv = ['# category\tid\tname\trarity\ticon\tdesc\tacquire\ttrack\ttags'];
 let tracked = 0;
 for (const e of entries) {
+  // `label@x,y,z`, with the one-time source's id appended when there is one.
+  // A reader that stops after three numbers still gets the position.
   const track = (e.track || [])
-    .map((t) => `${t.label}@${t.x},${t.y},${t.z}`).join(';');
+    .map((t) => `${t.label}@${t.x},${t.y},${t.z}${t.once ? ',' + t.once : ''}`)
+    .join(';');
   if (track) tracked++;
   tsv.push([e.category, e.id, tsvField(e.name), e.rarity, e.icon,
             tsvField(e.desc), tsvField(e.acquire.join(' | ')),

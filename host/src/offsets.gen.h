@@ -9,20 +9,20 @@
 
 // SHA-256 of the hlboot.dat these offsets came from. The reader must refuse
 // to walk pointers when the running game does not match.
-#define FMK_BUILD_SHA256 "7c3ca4dd765b50972b0eb524f82f9943a1d24d9ea52cbba97c7f87d5d840e7a0"
+#define FMK_BUILD_SHA256 "90b9874167f453aa5e8762ebfef2c6890c6a06d2b6e314608c1e9b52a4234c65"
 
 namespace fmk {
 namespace off {
 
-// ent.Hero  (sizeof=1648, extends ent.Unit)
+// ent.Hero  (sizeof=1672, extends ent.Unit)
 namespace ent_Hero {
-    constexpr uint32_t SIZEOF = 1648;
-    constexpr uint32_t player = 0x4b8;  // OBJ : st.Player
-    constexpr uint32_t lockedTarget = 0x4d0;  // I64
-    constexpr uint32_t autoTarget = 0x4d8;  // I64
-    constexpr uint32_t weaponInHand = 0x538;  // OBJ : st.item.Weapon
-    constexpr uint32_t loadout = 0x4c8;  // OBJ : st.Loadout
-    constexpr uint32_t specialization = 0x4c0;  // OBJ : st.player.HeroSpecialization
+    constexpr uint32_t SIZEOF = 1672;
+    constexpr uint32_t player = 0x4c0;  // OBJ : st.Player
+    constexpr uint32_t lockedTarget = 0x4d8;  // I64
+    constexpr uint32_t autoTarget = 0x4e0;  // I64
+    constexpr uint32_t weaponInHand = 0x540;  // OBJ : st.item.Weapon
+    constexpr uint32_t loadout = 0x4d0;  // OBJ : st.Loadout
+    constexpr uint32_t specialization = 0x4c8;  // OBJ : st.player.HeroSpecialization
 }  // namespace ent_Hero
 
 // st.player.HeroSpecialization  (sizeof=192, extends st.DBBaseState)
@@ -43,17 +43,17 @@ namespace hxbit_ObjProxy_3327ea72931d811ba796c031db6ffed0 {
     constexpr uint32_t completedCrafts = 0x18;  // OBJ : hxbit.MapData
 }  // namespace hxbit_ObjProxy_3327ea72931d811ba796c031db6ffed0
 
-// ent.Unit  (sizeof=1208, extends ent.GameObject)
+// ent.Unit  (sizeof=1216, extends ent.GameObject)
 namespace ent_Unit {
-    constexpr uint32_t SIZEOF = 1208;
-    constexpr uint32_t isInCombat = 0x2a8;  // BOOL
-    constexpr uint32_t instigatedStatuses = 0x1f0;  // OBJ : hl.types.ArrayObj
-    constexpr uint32_t skin = 0x3dc;  // I32
+    constexpr uint32_t SIZEOF = 1216;
+    constexpr uint32_t isInCombat = 0x2b0;  // BOOL
+    constexpr uint32_t instigatedStatuses = 0x1f8;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t skin = 0x3e4;  // I32
 }  // namespace ent_Unit
 
-// ent.GameObject  (sizeof=592, extends ent.Entity)
+// ent.GameObject  (sizeof=600, extends ent.Entity)
 namespace ent_GameObject {
-    constexpr uint32_t SIZEOF = 592;
+    constexpr uint32_t SIZEOF = 600;
     constexpr uint32_t posx = 0xb0;  // F64
     constexpr uint32_t posy = 0xb8;  // F64
     constexpr uint32_t posz = 0xc0;  // F64
@@ -159,6 +159,7 @@ namespace st_Player {
     constexpr uint32_t progress = 0xf0;  // OBJ : st.player.Progress
     constexpr uint32_t name = 0xc0;  // OBJ : String
     constexpr uint32_t heroData = 0xe8;  // OBJ : st.player.HeroData
+    constexpr uint32_t activityCtx = 0x128;  // OBJ : hxbit.ArrayProxyData
 }  // namespace st_Player
 
 // st.player.HeroData  (sizeof=360, extends st.DBState)
@@ -169,6 +170,8 @@ namespace st_player_HeroData {
     constexpr uint32_t currencies = 0x110;  // OBJ : hl.types.ArrayObj
     constexpr uint32_t inventory = 0x100;  // OBJ : hl.types.ArrayObj
     constexpr uint32_t name = 0xa0;  // OBJ : String
+    constexpr uint32_t worldLootLog = 0x128;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t activityProgress = 0x138;  // OBJ : hl.types.ArrayObj
 }  // namespace st_player_HeroData
 
 // st.player.Progress  (sizeof=232, extends st.DBBaseState)
@@ -180,6 +183,10 @@ namespace st_player_Progress {
     constexpr uint32_t zones = 0xc0;  // OBJ : hxbit.MapData
     constexpr uint32_t achievements = 0xc8;  // OBJ : hxbit.MapData
     constexpr uint32_t pets = 0xd0;  // OBJ : hxbit.MapData
+    constexpr uint32_t skillMasteriesLearnt = 0xd8;  // OBJ : hxbit.ArrayProxyData
+    constexpr uint32_t activities = 0x88;  // OBJ : hxbit.MapData
+    constexpr uint32_t elements = 0x90;  // OBJ : hxbit.MapData
+    constexpr uint32_t npcs = 0x98;  // OBJ : hxbit.MapData
 }  // namespace st_player_Progress
 
 // hxbit.MapData  (sizeof=48, extends hxbit.BaseProxy)
@@ -194,6 +201,27 @@ namespace hxbit_ObjProxy_OkillCount_Int_rank_Int {
     constexpr uint32_t killCount = 0x14;  // I32
     constexpr uint32_t rank = 0x18;  // I32
 }  // namespace hxbit_ObjProxy_OkillCount_Int_rank_Int
+
+// hxbit.ObjProxy_Ocompleted_Float  (sizeof=48)
+namespace hxbit_ObjProxy_Ocompleted_Float {
+    constexpr uint32_t SIZEOF = 48;
+    constexpr uint32_t completed = 0x18;  // F64
+}  // namespace hxbit_ObjProxy_Ocompleted_Float
+
+// hxbit.ObjProxy_OcompletedOnce_Bool_lastCompletion_Float  (sizeof=48)
+namespace hxbit_ObjProxy_OcompletedOnce_Bool_lastCompletion_Float {
+    constexpr uint32_t SIZEOF = 48;
+    constexpr uint32_t completedOnce = 0x14;  // BOOL
+    constexpr uint32_t lastCompletion = 0x18;  // F64
+}  // namespace hxbit_ObjProxy_OcompletedOnce_Bool_lastCompletion_Float
+
+// hxbit.ObjProxy_ad383d83eed03d0e5475cee203565222  (sizeof=56)
+namespace hxbit_ObjProxy_ad383d83eed03d0e5475cee203565222 {
+    constexpr uint32_t SIZEOF = 56;
+    constexpr uint32_t goalsMap = 0x20;  // OBJ : hxbit.MapData
+    constexpr uint32_t dialog = 0x18;  // OBJ : hxbit.ArrayProxyData
+    constexpr uint32_t bit = 0x10;  // I32
+}  // namespace hxbit_ObjProxy_ad383d83eed03d0e5475cee203565222
 
 // haxe.ds.StringMap  (sizeof=24)
 namespace haxe_ds_StringMap {

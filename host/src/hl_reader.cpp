@@ -107,6 +107,13 @@ bool reader_locate_hero(bool force_rescan) {
         }
     }
 
+    // With a live GameApp there is nothing to scan *for*: the hero is that
+    // object's own field, so a null there means "nobody is in the world yet"
+    // - the main menu, character select, a loading screen - and the answer
+    // arrives for free the moment one is. Sweeping 4.6GB to look for a hero
+    // that does not exist cost 16 seconds of every launch.
+    if (g_app && obj_is(g_app, "GameApp")) return false;
+
     // A rescan is ~8GB of memory traffic. The Hero pointer goes stale exactly
     // when the game is loading or changing zone - the worst possible moment to
     // add that pressure, while it is busy deserialising. Hold off briefly so
@@ -305,6 +312,272 @@ bool reader_read_unit_progress(std::vector<UnitProgress>* out) {
                  out->size(), nonzero, sample.c_str());
     }
     return true;
+}
+
+bool reader_read_runes(RuneState* out) {
+    *out = {};
+    void* hero = reader_hero();
+    if (!hero) return false;
+
+    // Learned runes hang off Progress, not off the specialization: learning
+    // one is permanent, and slotting it is a separate, changeable choice.
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* progress = read_ptr(player, off::st_Player::progress);
+    if (!obj_is(progress, "st.player.Progress")) return false;
+    out->learned = decode_proxy_list(
+        progress, off::st_player_Progress::skillMasteriesLearnt);
+
+    // The slotted ones are the specialization's business, and a character
+    // with none is normal rather than a failed read.
+    void* spec = read_ptr(hero, off::ent_Hero::specialization);
+    if (obj_is(spec, "st.player.HeroSpecialization"))
+        out->slotted = decode_proxy_list(
+            spec, off::st_player_HeroSpecialization::skillMasteries);
+
+    static bool once = true;
+    if (once) {
+        once = false;
+        host_log("runes: %zu learned, %zu slotted%s%s", out->learned.size(),
+                 out->slotted.size(), out->learned.empty() ? "" : " - e.g. ",
+                 out->learned.empty() ? "" : out->learned[0].c_str());
+    }
+    return true;
+}
+
+bool reader_read_completion(CompletionState* out) {
+    *out = {};
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* progress = read_ptr(player, off::st_Player::progress);
+    if (!obj_is(progress, "st.player.Progress")) return false;
+
+    auto walk = [&](uint32_t field, std::vector<MapEntry>* entries) {
+        void* data = read_ptr(progress, field);
+        if (!obj_is(data, "hxbit.MapData")) return false;
+        void* map = deref_virtual(data, off::hxbit_MapData::map);
+        if (!obj_is(map, "haxe.ds.StringMap")) return false;
+        return read_string_map(map, entries);
+    };
+
+    // Elements: a chest opened, a secret orb collected. The record is a
+    // single float, and the map only gains a key once you have touched the
+    // thing - so a non-zero value is "done with it".
+    std::vector<MapEntry> entries;
+    if (walk(off::st_player_Progress::elements, &entries)) {
+        for (const auto& e : entries) {
+            double completed = 0;
+            read(e.value, off::hxbit_ObjProxy_Ocompleted_Float::completed,
+                 &completed);
+            if (completed != 0) out->done.push_back(e.key);
+        }
+    }
+
+    // Activities: a dungeon, a rift, a camp. This one says outright whether
+    // it has ever been finished, which is the question a one-time source
+    // asks - `lastCompletion` is for the repeatable ones' cooldowns.
+    entries.clear();
+    if (walk(off::st_player_Progress::activities, &entries)) {
+        namespace act = off::hxbit_ObjProxy_OcompletedOnce_Bool_lastCompletion_Float;
+        for (const auto& e : entries) {
+            uint8_t once = 0;
+            read(e.value, act::completedOnce, &once);
+            if (once) out->done.push_back(e.key);
+        }
+    }
+
+    out->valid = true;
+    static bool said = false;
+    if (!said) {
+        said = true;
+        // Grouped by the shape of the id, because that answers the question
+        // the npcs map could not: an NPC is an element too, so if handing a
+        // quest in marks its NPC completed, these ids are already in here
+        // and quest filtering needs nothing further.
+        int npcish = 0, chest = 0, orb = 0, other = 0;
+        std::string sample_npc;
+        for (const auto& id : out->done) {
+            if (id.find("NPC") != std::string::npos) {
+                npcish++;
+                if (sample_npc.size() < 90) sample_npc += "  " + id;
+            } else if (id.find("Chest") != std::string::npos) chest++;
+            else if (id.find("Orb") != std::string::npos) orb++;
+            else other++;
+        }
+        host_log("done: %zu finished - %d npc-ish, %d chests, %d orbs, %d other%s",
+                 out->done.size(), npcish, chest, orb, other,
+                 sample_npc.c_str());
+    }
+    return true;
+}
+
+void reader_probe_completion() {
+    static bool done = false;
+    if (done) return;
+    void* hero = reader_hero();
+    if (!hero) return;
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return;
+    void* progress = read_ptr(player, off::st_Player::progress);
+    if (!obj_is(progress, "st.player.Progress")) return;
+    done = true;
+
+    // Every activity key, with whether it is finished.
+    //
+    // The npcs map turned out to hold no completion signal - all ~47 quest
+    // NPCs read the same value - so if a quest is recorded anywhere, it is
+    // here. Six keys were not enough to tell: they were all world furniture
+    // (a rift, a camp, a dungeon). The whole list settles whether a quest
+    // has an activity id at all, and what one looks like.
+    {
+        void* ad = read_ptr(progress, off::st_player_Progress::activities);
+        void* am = obj_is(ad, "hxbit.MapData")
+            ? deref_virtual(ad, off::hxbit_MapData::map) : nullptr;
+        std::vector<MapEntry> ae;
+        if (obj_is(am, "haxe.ds.StringMap") && read_string_map(am, &ae)) {
+            namespace act =
+                off::hxbit_ObjProxy_OcompletedOnce_Bool_lastCompletion_Float;
+            std::string line;
+            int n = 0;
+            for (const auto& e : ae) {
+                uint8_t once = 0;
+                read(e.value, act::completedOnce, &once);
+                line += "  " + e.key + (once ? "=done" : "=open");
+                if (++n % 6 == 0) {
+                    host_log("act:%s", line.c_str());
+                    line.clear();
+                }
+            }
+            if (!line.empty()) host_log("act:%s", line.c_str());
+            host_log("act: %zu activities total", ae.size());
+        }
+    }
+
+    void* data = read_ptr(progress, off::st_player_Progress::npcs);
+    if (!obj_is(data, "hxbit.MapData")) return;
+    void* map = deref_virtual(data, off::hxbit_MapData::map);
+    if (!obj_is(map, "haxe.ds.StringMap")) return;
+    std::vector<MapEntry> npcs;
+    if (!read_string_map(map, &npcs)) return;
+
+    // Every NPC, compactly. The interesting comparison is between one whose
+    // quest is handed in and one whose is not - with 58 of them and most of
+    // the map done, both are in here, and whatever distinguishes them is the
+    // signal a quest target needs.
+    //
+    // The value is not an object (its class name came back empty), so its
+    // raw type kind is logged instead: that separates a boxed bool from a
+    // float from a null, which the class name cannot.
+    // The per-NPC record holds more than its goals: a `bit` and a `dialog`
+    // array, neither of which has been read. If a finished quest is recorded
+    // anywhere on this character, it is one of those - every map on Progress
+    // has now been ruled out.
+    //
+    // NPC_Lora's quest is done and NPC_Beerutus's is not, so whatever
+    // differs between those two lines is the answer.
+    namespace npcf = off::hxbit_ObjProxy_ad383d83eed03d0e5475cee203565222;
+    for (const auto& e : npcs) {
+        const int32_t bit = read_i32(e.value, npcf::bit);
+        void* dlg = read_ptr(e.value, npcf::dialog);
+        void* arr = dlg ? read_ptr(dlg, off::hxbit_ArrayProxyData::array) : nullptr;
+        void* base = arr ? read_ptr(arr, off::hl_types_ArrayDyn::array) : nullptr;
+        const int32_t len =
+            base ? read_i32(base, off::hl_types_ArrayBase::length) : -1;
+        std::string seen;
+        void* varr = base ? read_ptr(base, off::hl_types_ArrayObj::array) : nullptr;
+        if (varr && len > 0) {
+            void* elems = (uint8_t*)varr + hlrt::varray_data;
+            for (int32_t i = 0; i < len && i < 8; i++) {
+                void* v = read_ptr(elems, (uint32_t)(i * 8));
+                const std::string vc = obj_class_name(v);
+                seen += " ";
+                seen += (vc == "String") ? read_hx_string(v)
+                      : (vc.empty() ? "?" : vc);
+            }
+        }
+        host_log("npc[%s]: bit=%d dialog=%d%s", e.key.c_str(), bit, len,
+                 seen.c_str());
+    }
+
+    // The two fields named for what the codex calls an activity - which
+    // includes NPC quests, even though a quest has no authored activity row
+    // anywhere and never appears in Progress.activities. If a finished quest
+    // is recorded at all, it is in one of these.
+    {
+        void* hd = read_ptr(player, off::st_Player::heroData);
+        void* ap = hd ? read_ptr(hd, off::st_player_HeroData::activityProgress)
+                      : nullptr;
+        int32_t len = ap ? read_i32(ap, off::hl_types_ArrayBase::length) : -1;
+        void* varr = ap ? read_ptr(ap, off::hl_types_ArrayObj::array) : nullptr;
+        std::string s;
+        if (varr && len > 0) {
+            void* elems = (uint8_t*)varr + hlrt::varray_data;
+            for (int32_t i = 0; i < len && i < 10; i++) {
+                void* e = read_ptr(elems, (uint32_t)(i * 8));
+                const std::string c = obj_class_name(e);
+                s += "  [" + std::to_string(i) + "]=" +
+                     (c.empty() ? "?" : c);
+                if (c == "String") s += ":" + read_hx_string(e);
+                // A record would name its own fields the way the others do.
+                std::vector<VirtualField> vf;
+                if (c.empty() && e && read_virtual_fields(e, &vf)) {
+                    s += "{";
+                    for (size_t k = 0; k < vf.size() && k < 6; k++)
+                        s += vf[k].name + ",";
+                    s += "}";
+                }
+            }
+        }
+        host_log("actprog: len=%d%s", len, s.c_str());
+
+        void* ctx = read_ptr(player, off::st_Player::activityCtx);
+        void* carr = ctx ? read_ptr(ctx, off::hxbit_ArrayProxyData::array)
+                         : nullptr;
+        void* cbase = carr ? read_ptr(carr, off::hl_types_ArrayDyn::array)
+                           : nullptr;
+        const int32_t clen =
+            cbase ? read_i32(cbase, off::hl_types_ArrayBase::length) : -1;
+        std::string cs;
+        void* cvarr = cbase ? read_ptr(cbase, off::hl_types_ArrayObj::array)
+                            : nullptr;
+        if (cvarr && clen > 0) {
+            void* elems = (uint8_t*)cvarr + hlrt::varray_data;
+            for (int32_t i = 0; i < clen && i < 10; i++) {
+                void* e = read_ptr(elems, (uint32_t)(i * 8));
+                const std::string c = obj_class_name(e);
+                cs += "  [" + std::to_string(i) + "]=" + (c.empty() ? "?" : c);
+                if (c == "String") cs += ":" + read_hx_string(e);
+            }
+        }
+        host_log("actctx: len=%d%s", clen, cs.c_str());
+    }
+
+    // The last map on Progress nobody has looked in. Counters are how a game
+    // usually records "you have done this N times", which is exactly the
+    // shape a completed quest would take if it is not an activity.
+    void* counters = read_ptr(progress, off::st_player_Progress::counters);
+    if (obj_is(counters, "haxe.ds.StringMap")) {
+        std::vector<MapEntry> ce;
+        if (read_string_map(counters, &ce)) {
+            std::string line;
+            int n = 0;
+            for (const auto& e : ce) {
+                void* v = e.value;
+                void* vt = v ? read_ptr(v, 0) : nullptr;
+                const int32_t kind = vt ? read_i32(vt, 0) : -1;
+                const int32_t val = v ? read_i32(v, hlrt::dyn_payload) : 0;
+                char one[128];
+                _snprintf_s(one, sizeof(one), _TRUNCATE, "  %s=k%d:%d",
+                            e.key.c_str(), kind, val);
+                line += one;
+                if (++n % 5 == 0) { host_log("ctr:%s", line.c_str()); line.clear(); }
+            }
+            if (!line.empty()) host_log("ctr:%s", line.c_str());
+            host_log("ctr: %zu counters total", ce.size());
+        }
+    }
 }
 
 bool reader_read_collection(Collection* out) {
@@ -767,10 +1040,31 @@ bool reader_locate_app(bool allow_scan) {
         g_app_type = find_type_by_name("GameApp");
         if (!g_app_type) return false;
     }
+    // Re-derive every time rather than trusting the cache.
+    //
+    // The game *replaces* its GameApp - character select and back builds a
+    // new one - and a dead HashLink object keeps its type pointer until the
+    // collector reuses the block, so `obj_is(g_app, "GameApp")` goes on
+    // saying yes about an object nothing else refers to any more. Everything
+    // rooted here then reads that corpse, while everything rooted at the
+    // hero (which has its own scan) carries on working. The symptom is not
+    // "the mod stopped" but "the arrow fell back to hero facing and the map
+    // is never found", which is exactly what farever-modkit.log showed.
+    //
+    // App.inst is the authority and reaching it is six pointer reads - the
+    // whole reason it is the root - so there is nothing to save by caching.
+    void* live = find_app_via_statics();
+    if (live && live != g_app) {
+        host_log("reader: GameApp %p -> %p (App.inst moved)", g_app, live);
+        g_app = live;
+        // The old app's hero belongs to the old world. Dropping it costs one
+        // pointer read on the next call, not a scan.
+        g_hero = nullptr;
+    }
     if (g_app && obj_is(g_app, "GameApp")) return true;
 
-    g_app = find_app_via_statics();
-    if (g_app) {
+    if (live) {
+        g_app = live;
         host_log("reader: GameApp %p (via App.inst)", g_app);
         return true;
     }
@@ -995,7 +1289,8 @@ bool reader_read_map_state(MapState* out) {
 }
 
 bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
-                     MapPin* out) {
+                     MapPin* out, double* miss_dist) {
+    if (miss_dist) *miss_dist = -1;
     if (!out || client_w <= 0 || client_h <= 0) return false;
     *out = {};
     void* win = find_map_window();
@@ -1021,7 +1316,7 @@ bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
 
     void* markers = read_ptr(win, off::ui_win_MapWindow::markers);
     void* best = nullptr;
-    double best_d = kReach * kReach;
+    double best_d = 1e18;
     for_each_marker(markers, [&](void* m) {
         uint8_t vis = 0;
         read(m, off::ui_win_map_MapMarker::visible, &vis);
@@ -1037,7 +1332,9 @@ bool reader_map_pick(int client_x, int client_y, float client_w, float client_h,
             best = m;
         }
     });
-    if (!best) return false;
+    // Report the nearest either way, then apply the reach.
+    if (miss_dist && best) *miss_dist = sqrt(best_d);
+    if (!best || best_d > kReach * kReach) return false;
     if (!marker_pos(best, &out->x, &out->y, &out->z)) return false;
     out->label = marker_label(best);
     return true;

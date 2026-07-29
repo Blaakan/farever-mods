@@ -144,16 +144,18 @@ void mapwatch_poll(bool in_world) {
         (g_click_mode != kClickShift || click.shift)) {
         float fw = 0, fh = 0;
         MapPin hit;
+        double missed = -1;
         if (overlay_frame_size(&fw, &fh) &&
-            reader_map_pick(click.x, click.y, fw, fh, &hit)) {
+            reader_map_pick(click.x, click.y, fw, fh, &hit, &missed)) {
             queue(hit.label.c_str(), hit.x, hit.y, hit.z, "map click");
         } else {
-            // A click on the map that found nothing is worth a line: clicks
-            // are rare enough not to spam, and this is the difference between
-            // "nothing was there" and "the hit test is looking in the wrong
-            // place", which the coordinates answer.
-            host_log("map: click at %d,%d found no marker (frame=%.0fx%.0f)",
-                     click.x, click.y, fw, fh);
+            // A click that found nothing is worth a line, with how far the
+            // nearest marker actually was: that is the difference between
+            // "you clicked empty map" and "the reach is too tight", which is
+            // not answerable from the coordinates alone.
+            host_log("map: click at %d,%d found no marker within %.0f "
+                     "(nearest %.0f, frame=%.0fx%.0f)",
+                     click.x, click.y, 26.0, missed, fw, fh);
         }
     }
 

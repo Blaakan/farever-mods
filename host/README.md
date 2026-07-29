@@ -331,11 +331,10 @@ units from it. Waypoints from a saved route are armed from the start, because
 standing on the first chest of a chest run really does mean you have done that
 one.
 
-A finished route lets go of the screen after a few seconds but **not of
-itself**: those waypoints are still the thing you might want to save or walk
-again, and deleting them just as the last one was reached threw away
-recordings at the moment they were complete. The Routes page keeps showing it,
-with Restart and Stop next to it.
+**A finished route clears itself**, exactly as Shift+F10 would: the pill
+disappears the moment the last waypoint is reached. It happens on the pose
+thread rather than in the draw callback, so it does not wait for a frame — a
+route finished while alt-tabbed is already gone when you come back.
 
 The active route persists in `farever-nav-state.txt` next to the game -
 including which waypoints are already done, so closing the game halfway
@@ -471,6 +470,97 @@ entirely, so logging back in never arrives as a wall of text.
 
 Names, icons and rarity colours come from the atlas's own database through
 `atlas_ui_lookup` - one copy of 1547 entries, not two.
+
+### Runes
+
+A rune is a one-use, one-pickup item that permanently teaches one character an
+upgrade to one skill — Alacrity cuts the cooldown of the Priest's Judgment.
+
+The game calls them **skill masteries** and does not keep them in the item
+sheet: `skill.mastery` is an array of them inside the skill they modify, and
+the *item* you find is a single generic `Mastery` whose name is literally
+`Rune: ::ref_mastery::`, filled in at pickup. So the page is built from the 84
+mastery rows — 21 per class, across 28 skills — each with its own portrait
+under `UI/Portraits/Items/Masteries/`.
+
+Ownership works exactly like recipes, because the game stores it the same way:
+`st.player.Progress.skillMasteriesLearnt` is learned-and-permanent, per
+character, so the tooltip says *Learned by Emsay* — including for characters
+who are not logged in, via the same `farever-jobs-<character>.json` the crafts
+already ride in. (`HeroSpecialization.skillMasteries` is the separate,
+changeable list of which ones are currently slotted.)
+
+Descriptions are written against the skill's own numbers — *"::name:: costs
+::var1:: less [Rage]"* — so the generator substitutes them: the rune's vars,
+then the skill's, then one hop to the status the skill applies. About a third
+of the values live in effect blocks rather than a vars map and are rendered
+`?`, which reads as "we could not find the number" rather than printing
+`val1%` at the player as if it were one.
+
+Two Priest_Miracle runes ship with an empty text block — they exist, with
+icons, and are simply unnamed in this build. They show under their id rather
+than being hidden.
+
+**There is no such thing as "where does Alacrity drop".** No loot table
+anywhere names a specific mastery: the thing that drops is the one generic
+`Mastery`, and which rune it becomes is decided when you take it. The tooltip
+says that outright, because it is more use than an empty line.
+
+What *is* knowable is where the pickup comes from, and most of it is not in a
+loot table either:
+
+- **Eight quests hand one over every time.** An NPC's dialogue grants items on
+  a choice — in one of two shapes depending on when the quest was authored,
+  `receiveItems: [{kind, amount}]` or `gains.items: [{item, count}]` — and the
+  objective beside them names the quest. So the navigator points at *Baywatch
+  - Meridion POI*, at the NPC who pays it. Negative amounts are what the
+  choice costs rather than what it gives, so only gains count.
+- **Two world chests always contain one**, through a `lootItems` line with a
+  `dropRate` of 1 sitting on top of the chest's ordinary table.
+- The 5% roll from world crates and unique foes, which is the fallback.
+
+All three are general rather than rune-specific: **101 entries across the
+atlas gained a quest-reward line**, and grouping chests by the `lootTable`
+they roll is the honest answer for anything whose only source is a crate.
+Together they took navigator coverage from 577 entries to 705.
+
+Guaranteed sources are pushed first, so a quest that always hands one over
+outranks a place it might drop.
+
+### Every source the shipped data actually contains
+
+Loot tables are the obvious source and the smallest one. Auditing every entry
+that had no acquisition text, against every CastleDB sheet and every prefab,
+turned up these — all of them general, none of them rune-specific:
+
+| Source | Where it lives | Reaches |
+|---|---|---|
+| Loot tables | `lootTable` | most drops |
+| Crafts | `craft` | 190 recipes and what they make |
+| Merchant stalls | element `props.shop` | vendors, with their own names |
+| **Quest rewards** | NPC dialogue: `receiveItems[{kind,amount}]` (older) or `gains.items[{item,count}]` (newer), with `goal.name` naming the quest | 101 entries |
+| **Guaranteed chest contents** | chest `props.lootItems[{item,dropRate}]`, `dropRate: 1` | 19 entries |
+| **Chests by the table they roll** | chest `props.lootTable` | anything a crate can hold |
+| **Vaults** | the same field — each vault holds Gold and exactly one mount or glider at 100% | 8 collectibles |
+| **Achievements** | `ach.reward.items` | 23 mounts and gliders, every one of which had no other source |
+| Faction outfits | item `faction` | 92 appearances |
+| Summon altars | element `interactible.cost` + `spawnUnit` | 8 demons |
+| Spawners, instances | `spawner`, and a level's activity orb for its entrance | 252 creatures |
+
+Two things worth knowing about the shapes:
+
+- **Negative amounts are what a dialogue choice costs**, not what it gives. A
+  quest that takes 106 gold and hands over a rune has both in one array.
+- **A vault names the exact table it holds.** Matching every vault in the
+  region instead - as this once did - gave the Semeruian Dragoon three
+  targets, two of them the wrong hidden area.
+
+After all of that, **101 entries still have no source**, and that is now a
+statement about the game rather than about the extractor: none of them is
+mentioned anywhere outside its own item row - not in a loot table, a craft, an
+achievement, a shop, a quest or a prefab. Mostly unreleased or code-granted
+(22 mounts, 24 gliders, 22 trinkets). `shopList` exists as a field and is used
+by nothing.
 
 ### Where the harder targets come from
 

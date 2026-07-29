@@ -60,6 +60,8 @@ const WANT = [
   // structure's shape, so a patch that changes a field of that struct
   // renames the class - at which point this generator fails loudly rather
   // than the reader walking a stale layout.
+  // `skillMasteries` is which runes are *slotted*; the learned ones live on
+  // Progress, because learning is permanent and slotting is a choice.
   ['st.player.HeroSpecialization', ['jobs', 'talents', 'skillMasteries']],
   ['hxbit.ObjProxy_3327ea72931d811ba796c031db6ffed0',
    ['job', 'level', 'knowledge', 'learnedCrafts', 'completedCrafts']],
@@ -109,20 +111,39 @@ const WANT = [
   ['h3d.scene.Scene', ['camera']],
   ['h3d.Camera', ['pos', 'target']],
   ['h3d.VectorImpl', ['x', 'y', 'z']],
-  ['st.Player', ['accountProgress', 'progress', 'name', 'heroData']],
+  ['st.Player', ['accountProgress', 'progress', 'name', 'heroData',
+                 'activityCtx']],
   // What the Recent Loots feed watches. There is no loot event to hook - the
   // host never calls into the game - so the feed is a diff of these between
   // polls: experience and level tick up, `currencies` gains entries, and
   // `inventory` is the same list the atlas already reads for the bags.
-  ['st.player.HeroData', ['level', 'exp', 'currencies', 'inventory', 'name']],
+  // `activityProgress` and `activityCtx` are the two fields named for the
+  // thing the codex calls an activity - which includes NPC quests, even
+  // though a quest has no authored activity row anywhere.
+  ['st.player.HeroData', ['level', 'exp', 'currencies', 'inventory', 'name',
+                          'worldLootLog', 'activityProgress']],
   // Codex progress. Every one of these is a hxbit.MapData wrapping a Haxe
   // map behind an interface, so reading them needs the virtual hop.
+  // `activities`, `elements` and `npcs` are what this character has already
+  // done: a quest handed in, a chest opened. They are what makes a one-time
+  // source disappear from the atlas once it is spent.
   ['st.player.Progress', ['counters', 'unitsProgress', 'itemProgress',
-                          'zones', 'achievements', 'pets']],
+                          'zones', 'achievements', 'pets',
+                          'skillMasteriesLearnt', 'activities', 'elements',
+                          'npcs']],
   ['hxbit.MapData', ['map']],
   // The value in the codex map: not a bare count but a small record, whose
   // class name spells out its own shape.
   ['hxbit.ObjProxy_OkillCount_Int_rank_Int', ['killCount', 'rank']],
+  // What this character has finished. Like the codex proxy above, these
+  // class names spell out their own shape, so a patch that changes the
+  // record renames the class and this generator fails loudly rather than the
+  // reader quietly deciding nothing is done.
+  ['hxbit.ObjProxy_Ocompleted_Float', ['completed']],
+  ['hxbit.ObjProxy_OcompletedOnce_Bool_lastCompletion_Float',
+   ['completedOnce', 'lastCompletion']],
+  ['hxbit.ObjProxy_ad383d83eed03d0e5475cee203565222',
+   ['goalsMap', 'dialog', 'bit']],
   ['haxe.ds.StringMap', ['h']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],

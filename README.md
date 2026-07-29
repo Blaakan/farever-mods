@@ -12,9 +12,9 @@ A completion tracker that runs as its own overlay — no other mod required.
 It answers "what exists, what do I have, and where do I get the rest" for
 every collectible category in the game.
 
-- **1547 entries across 12 pages** — appearances, mounts, pets, gliders,
-  trinkets, weapons, consumables, materials, recipes, augments, misc, and a
-  bestiary — each with the game's own icon, name and description
+- **1639 entries across 13 pages** — appearances, mounts, pets, gliders,
+  trinkets, weapons, consumables, materials, recipes, augments, misc, runes,
+  and a bestiary — each with the game's own icon, name and description
 - **Ownership read from memory**, per stack: *Bank x3 - Lv 25 - Rare*,
   *Equipped (Emsei) - Lv 5*, including characters who are not logged in
 - **How to acquire** each item, inverted from the game's own loot tables,
