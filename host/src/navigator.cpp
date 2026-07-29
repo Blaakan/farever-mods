@@ -184,6 +184,20 @@ void arm_departures_locked() {
     }
 }
 
+// A route that has run out of waypoints is finished, and a finished route
+// goes, the way it does on Shift+F10. Both the ways it can run out - walking
+// into the last one, and skipping it - end here, so the Routes page cannot
+// end up still listing something the pill has already stopped drawing.
+void clear_finished_locked(const char* how) {
+    host_log("nav: route '%s' complete (%s) - cleared", g_name.c_str(), how);
+    g_key.clear();
+    g_name.clear();
+    g_targets.clear();
+    g_done.clear();
+    g_armed.clear();
+    g_mode = kNavNearest;
+}
+
 void consume_arrivals_locked() {
     if (g_mode == kNavNearest || g_targets.empty()) return;
     for (int guard = 0; guard < 64; guard++) {
@@ -200,17 +214,10 @@ void consume_arrivals_locked() {
         host_log("nav: reached '%s' (%d of %d done)", t.label,
                  (int)g_targets.size() - left, (int)g_targets.size());
         if (left == 0) {
-            // A finished route is finished: the frame goes, the way it does
-            // on Shift+F10. Held here rather than in the draw callback so it
-            // happens the moment the last waypoint is reached, whether or
-            // not the overlay is on screen at the time.
-            host_log("nav: route '%s' complete - cleared", g_name.c_str());
-            g_key.clear();
-            g_name.clear();
-            g_targets.clear();
-            g_done.clear();
-            g_armed.clear();
-            g_mode = kNavNearest;
+            // Held here rather than in the draw callback so it happens the
+            // moment the last waypoint is reached, whether or not the
+            // overlay is on screen at the time.
+            clear_finished_locked("reached");
             break;
         }
     }
@@ -630,8 +637,11 @@ void nav_skip() {
     const int i = current_locked();
     if (i < 0) return;
     g_done[i] = 1;
-    if (remaining_locked() == 0) {
-    }
+    // Skipping the last outstanding waypoint finishes the route as surely as
+    // walking into it does. Without this the route survives with nothing to
+    // aim at: the pill stops drawing, but the Routes page goes on offering
+    // Skip and Stop for something already over.
+    if (remaining_locked() == 0) clear_finished_locked("skipped");
     InterlockedExchange(&g_dirty, 1);
 }
 

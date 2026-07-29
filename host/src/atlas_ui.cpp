@@ -387,7 +387,11 @@ int cat_index(const std::string& s) {
 bool load_tsv(const std::wstring& path) {
     std::string text;
     if (!read_file(path, &text)) {
-        host_log("atlas_ui: %ls missing - run tools/gen-atlas.mjs", path.c_str());
+        // The one failure a new install actually hits, so it names the fix
+        // rather than the tool: install.cmd runs the generator, and somebody
+        // who unzipped a release has never heard of gen-atlas.mjs.
+        host_log("atlas_ui: %ls missing - the item database was never built. "
+                 "Run install.cmd (or node tools/gen-atlas.mjs).", path.c_str());
         return false;
     }
 

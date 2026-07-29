@@ -53,6 +53,7 @@
 #include "overlay.h"
 #include "routes.h"
 #include "offsets.gen.h"
+#include "version.h"
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -111,6 +112,25 @@ void open_log() {
     // it must stay readable (tail, editors, tools/update.mjs) while the game
     // runs. Plain _wfopen takes an exclusive lock and makes it unreadable.
     g_log = _wfsopen(path, L"w", _SH_DENYNO);
+}
+
+// `[debug] probe = 1` in farever-modkit.ini. Read once: the reader's probes
+// are one-shot anyway, and a setting that can change halfway through a
+// session only makes the log harder to read.
+bool probe_enabled() {
+    static int cached = -1;
+    if (cached >= 0) return cached != 0;
+    cached = 0;
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return false;
+    slash[1] = 0;
+    wcsncat_s(path, MAX_PATH, L"farever-modkit.ini", _TRUNCATE);
+    cached = GetPrivateProfileIntW(L"debug", L"probe", 0, path) ? 1 : 0;
+    if (cached) log_line("debug: [debug] probe = 1 - dumping raw progress state");
+    return cached != 0;
 }
 
 // Resolve the genuine dxgi.dll by absolute system path. Never by bare name -
@@ -310,8 +330,19 @@ bool verify_build() {
 
     log_line("build: hlboot.dat sha256=%s", hex);
     if (!ok) {
-        log_line("build: MISMATCH - offsets were generated for %s", FMK_BUILD_SHA256);
-        log_line("build: memory reads DISABLED. Run: node tools/update.mjs");
+        // The offsets are compiled in, so this is not something the player
+        // can fix by re-running a generator: the DLL itself has to be built
+        // against the new bytecode. Say that, rather than naming a command
+        // that will not help - a stranger reading this log has no idea which
+        // of the two situations they are in.
+        log_line("build: MISMATCH - this dxgi.dll was built for %s",
+                 FMK_BUILD_SHA256);
+        log_line("build: the game has been patched since. Memory reads are "
+                 "DISABLED, so the mod does nothing at all - it will not "
+                 "misbehave.");
+        log_line("build: fix it by installing a release built for this game "
+                 "version, or from a source checkout:");
+        log_line("build:   node tools/update.mjs --fix");
     } else {
         log_line("build: verified, offsets apply");
     }
@@ -473,7 +504,13 @@ DWORD WINAPI worker(LPVOID) {
                 fmk::reader_read_completion(&done);
 
                 // The one shape still unsettled: an NPC's per-quest goals.
-                fmk::reader_probe_completion();
+                // Off unless asked for. It dumps every NPC, activity and
+                // counter this character has - seventy-odd lines, a third of
+                // the log - and the log's job is to name the reason when
+                // something looks wrong to somebody who did not write this.
+                // Research output buried that. `[debug] probe = 1` in
+                // farever-modkit.ini brings it back.
+                if (probe_enabled()) fmk::reader_probe_completion();
 
                 // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
@@ -581,7 +618,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_init = true;
             wchar_t exe[MAX_PATH] = L"?";
             GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            log_line("# farever-modkit host (dxgi.dll proxy) stage 2");
+            // The version leads, because it is the first question about any
+            // report from a machine that is not this one, and nobody can
+            // answer it from memory.
+            log_line("# farever-modkit " FMK_VERSION " (dxgi.dll proxy)");
             log_line("attach: pid=%lu exe=%ls", GetCurrentProcessId(), exe);
             log_line("libhl.dll present in process: %s",
                      GetModuleHandleW(L"libhl.dll") ? "yes" : "not yet");
