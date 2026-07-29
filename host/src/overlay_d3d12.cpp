@@ -974,16 +974,41 @@ bool overlay_install() {
     IDXGISwapChain1* sc = nullptr;
     bool ok = false;
 
-    if (SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
-                                    IID_PPV_ARGS(&dev))) && dev) {
+    // Five COM calls that can each fail on somebody else's machine, and one
+    // "install failed" line for all of them told nobody anything. Each step
+    // now says which one it was and what the driver returned - the number is
+    // the whole diagnosis, and it is the only thing that travels in a log
+    // file from a stranger's computer.
+    HRESULT hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                   IID_PPV_ARGS(&dev));
+    if (FAILED(hr) || !dev) {
+        host_log("overlay: D3D12CreateDevice failed (0x%08X) - no D3D12 "
+                 "feature level 11_0 adapter", hr);
+    } else {
         D3D12_COMMAND_QUEUE_DESC qd{};
         qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        if (SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))) && queue) {
+        hr = dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue));
+        if (FAILED(hr) || !queue) {
+            host_log("overlay: CreateCommandQueue failed (0x%08X)", hr);
+        } else {
             // Patch ExecuteCommandLists (slot 10) - every queue shares this.
+            // Failing here does not fail the install, and used to say
+            // nothing: the overlay then hooked Present successfully and
+            // returned true, but never captured the game's queue, so every
+            // frame bailed out of hooked_present in silence and the overlay
+            // simply never appeared. That is the one failure worth naming
+            // loudest, because everything else looks like it worked.
             if (patch_vtable(queue, 10, (void*)&hooked_exec, (void**)&g_exec_orig))
                 host_log("overlay: ExecuteCommandLists hooked");
+            else
+                host_log("overlay: ExecuteCommandLists (slot 10) could NOT be "
+                         "hooked - the command queue will never be captured "
+                         "and nothing will draw");
 
-            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory) {
+            hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+            if (FAILED(hr) || !factory)
+                host_log("overlay: CreateDXGIFactory1 failed (0x%08X)", hr);
+            if (SUCCEEDED(hr) && factory) {
                 DXGI_SWAP_CHAIN_DESC1 sd{};
                 sd.Width = 8;
                 sd.Height = 8;
@@ -992,15 +1017,21 @@ bool overlay_install() {
                 sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
                 sd.BufferCount = 2;
                 sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-                if (SUCCEEDED(factory->CreateSwapChainForHwnd(queue, hwnd, &sd,
-                                                              nullptr, nullptr, &sc)) &&
-                    sc) {
+                hr = factory->CreateSwapChainForHwnd(queue, hwnd, &sd, nullptr,
+                                                     nullptr, &sc);
+                if (FAILED(hr) || !sc) {
+                    host_log("overlay: CreateSwapChainForHwnd failed (0x%08X)",
+                             hr);
+                } else {
                     // Patch Present (slot 8) and ResizeBuffers (slot 13) -
                     // shared by the game's swap chain.
                     if (patch_vtable(sc, 8, (void*)&hooked_present,
                                      (void**)&g_present_orig)) {
                         host_log("overlay: Present hooked via probe swap chain");
                         ok = true;
+                    } else {
+                        host_log("overlay: Present (slot 8) could not be "
+                                 "hooked");
                     }
                     if (ok && patch_vtable(sc, 13, (void*)&hooked_resize,
                                            (void**)&g_resize_orig)) {

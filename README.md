@@ -121,8 +121,13 @@ install.cmd --game "D:\SteamLibrary\steamapps\common\Farever"
 
 **Why Node.js.** The atlas is 1639 items with the game's own names, icons,
 descriptions and loot tables. That is Shiro Games' data, not ours to put in a
-download — so the generators ship and the haul does not, and they run on Node.
-It is used once at install time and never while you play.
+download — so the generators ship and the haul does not, and they run on Node
+(18 or newer; no `npm install`, they use only Node's own libraries). It is
+used once at install time and never while you play.
+
+**Do not run this alongside farever-minimap.** That mod arrives as
+`dinput8.dll` and this one as `dxgi.dll`, so both load, and both install a
+D3D12 overlay and a window hook on the same window. Pick one.
 
 **Why Windows will complain.** It is an unsigned DLL, downloaded from the
 internet, that loads into a game. So is malware, and a scanner cannot tell the
@@ -130,25 +135,43 @@ difference by looking. SmartScreen: *More info* → *Run anyway*. If you would
 rather not take anyone's word for it, everything here is source and builds in
 one command — see below.
 
-To remove it: run `uninstall.cmd`, or delete that one `dxgi.dll`. There is no
-installer, no service and no registry key.
+To remove it: run `uninstall.cmd`, or delete that one `dxgi.dll` — the game is
+back to stock either way, because there is no installer, no service and no
+registry key. `uninstall.cmd --purge` also removes the generated data
+(`farever-atlas.tsv`, the icon atlas, `farever-routes.txt`) and the settings
+and logs beside them; routes you recorded yourself, in
+`farever-routes-custom.txt`, are kept unless you add `--force`.
 
 ### From source
 
-Needs the MSVC C++ x64 toolset — Visual Studio 2022 Community or the
-standalone Build Tools, with **Desktop development with C++**.
+Needs Node.js and the MSVC C++ x64 toolset — Visual Studio 2022 Community or
+the standalone Build Tools, with **Desktop development with C++**. Nothing
+else: the generators use only Node's own libraries, and `npm install` is for
+the Lua plugin tests alone.
+
+**Order matters, and only in one place.**
 
 ```bash
-host/build.cmd
+node tools/gen-offsets.mjs
 ```
 
 ```bash
-node tools/gen-offsets.mjs && install.cmd
+host\build.cmd
 ```
 
-`gen-offsets` reads the game's bytecode for the field offsets the reader
-needs; `install.cmd` builds the item database and the route set and puts
-everything, including the DLL, next to `Farever.exe`.
+```bash
+install.cmd
+```
+
+`gen-offsets` reads your game's bytecode and writes
+`host/src/offsets.gen.h` — the field offsets the reader walks, and the hash of
+the bytecode they came from. That header is **compiled into the DLL**, so it
+has to be written before the build, not after. Build first and you get a DLL
+carrying someone else's offsets, which the host then correctly refuses to use:
+`farever-modkit.log` says `build: MISMATCH` and F8 does nothing.
+
+`install.cmd` does the rest — the item database, the routes, and the DLL, all
+placed next to `Farever.exe`.
 
 **After a game patch**, one command does the lot:
 
@@ -157,10 +180,10 @@ node tools/update.mjs --fix
 ```
 
 It diffs the field offsets so you see exactly what moved, regenerates them,
-rebuilds and reinstalls. Until you do, the host refuses to read memory at all
-— the bytecode hash it was built against is compiled in — so a patch degrades
-to "does nothing", never to a crash. Re-run `install.cmd` afterwards to
-refresh the atlas data.
+rebuilds, reinstalls, and rebuilds the atlas and routes as well — a patch can
+add an item or move a node, not just shift a field. Until you run it the host
+refuses to read memory at all, so a patch degrades to "does nothing", never to
+a crash.
 
 ### The plugins (need farever-minimap)
 

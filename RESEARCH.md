@@ -125,9 +125,23 @@ five primaries, crit/armor/mastery, class resources: rage, spark, focus, combo
 points, poise, oxygen, `glide_speed`), `farever.player.statuses()` (active
 buffs), `farever.player.skills()` (cooldown values + icons),
 `farever.player.equipment() / inventory() / currencies()`,
-`farever.player.codex(kind)` (bestiary), `farever.target.*` (incl. a learned
+`farever.player.codex(kind)` (**bestiary only** — see below),
+`farever.target.*` (incl. a learned
 cast bar), `farever.party.*`, `farever.compass.*`, `farever.pois()`,
 `farever.waypoints.*`.
+
+**`farever.player.codex()` is not a collection reader**, which was worth
+finding out because it looked like one. The bytecode carries a whole codex
+tree — `data.CodexNode`, `ProgressCalcMode`, both `CodexUnitSheet` *and*
+`CodexActivitySheet` — and the API returns a codex tree path per entry, so if
+mounts, gliders and appearances were nodes in that tree it would have been
+account-wide ownership through the sandbox. A generated probe plugin called it
+against 428 ids across eight buckets, including fifteen taken from a live
+equipment dump so that a miss could not be blamed on not owning the thing.
+Monsters hit, as the control predicted; **every mount, glider, armour, weapon,
+companion, chest and recipe id missed**. The codex is the bestiary. That is
+what makes the host's own reader the only route to the collection, and it is
+why `st.player.Collection` is walked directly instead.
 
 **Events** — `hero_locked`, `fight_start`, `fight_end`, `damage_dealt`,
 `heal_dealt`, `shield_applied`, `target_changed`, `cast_start`, `cast_end`,

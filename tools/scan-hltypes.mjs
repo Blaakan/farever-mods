@@ -246,7 +246,13 @@ const args = process.argv.slice(2);
 const wantJson = args.includes('--json');
 const grepIdx = args.indexOf('--grep');
 const grep = grepIdx >= 0 ? args[grepIdx + 1] : null;
-const explicit = args.find((a) => !a.startsWith('--') && a !== grep && !existsSync(a));
+// The value after --game is a path, not a class to dump. Without excluding
+// it the tool reported `E:\...\Farever: not found` and offered no near
+// matches, because nothing in the type table looks like a directory.
+const gameIdx = args.indexOf('--game');
+const gameArg = gameIdx >= 0 ? args[gameIdx + 1] : null;
+const explicit = args.find((a) => !a.startsWith('--') && a !== grep &&
+                                  a !== gameArg && !existsSync(a));
 
 const bootPath = requireBoot(args);
 

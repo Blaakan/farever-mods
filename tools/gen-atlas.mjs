@@ -1119,7 +1119,15 @@ console.log(`summons: ${invocationSites.length} altars, ` +
         if (pct) key = key.slice(0, -1);
         // A referenced status has its own name, which is what the sentence
         // is naming when it says ref_name.
-        const ref = hop ? refs[hop[1] === '2' ? 1 : 0] : null;
+        // `::ref_x::` is the first status the skill applies, `::ref2_x::` the
+        // second, and so on. Treating everything that was not `ref2` as the
+        // first one did not degrade to `?` - it silently read a *different*
+        // status's variable and printed it as fact. `Rogue_UrgeToKill_M1`
+        // came out as "100%" from a `var1` that means "generate 1 combo
+        // point", telling players the rune doubled their damage. An index we
+        // do not have is undefined here, which falls through to `?`.
+        const ref = hop ? refs[Math.max(0, parseInt(hop[1] || '1', 10) - 1)]
+                        : null;
         if (key === 'name')
           return cleanText(ref?.texts?.name || skillName);
         const v = (ref && ref.vars ? ref.vars[key] : undefined) ?? own[key];
@@ -1149,7 +1157,12 @@ console.log(`summons: ${invocationSites.length} altars, ` +
         rarity: Math.max(0, rarities.indexOf('Epic')),
         desc: cleanText(desc),
         acquire: [`Upgrades: ${skillName} (${cls})`, ...runePickup],
-        track: runeTrack,
+        // A copy per rune. Every other page builds a fresh array; this one
+        // computed the pickup's targets once and handed the same array to
+        // all 84, so one `track+` line in atlas-overrides.tsv would append
+        // to every rune at once and trip the eight-target trim eighty-four
+        // times over.
+        track: runeTrack.slice(),
         tags: [`class:${cls}`, `skill:${skillName}`],
         gfxFile: gfx.file || '',
         gfxSize: gfx.size || 0,

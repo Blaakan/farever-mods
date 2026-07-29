@@ -410,8 +410,26 @@ DWORD WINAPI worker(LPVOID) {
         // permanently deaf.
         if (!ui_ready && fmk::overlay_ready()) {
             ui_ready = fmk::atlas_ui_init();
+            // Once, not every two seconds for the rest of the session. The
+            // retry is right - the device and the window arrive on their own
+            // schedule - but a missing item database never fixes itself
+            // mid-run, and repeating it fills the log that is supposed to
+            // explain it.
+            static bool said = false;
+            if (!ui_ready && !said) {
+                said = true;
+                log_line("atlas: not ready yet (see the line above for why); "
+                         "waypoints and the loot feed still work");
+            }
         }
-        if (ui_ready && !input_ready) {
+        // **Not** gated on the atlas. `input_install` is what F8, F9, F10,
+        // map clicks and dragging the pill all arrive through, and the atlas
+        // needs a generated item database that a DLL-only install does not
+        // have. Behind `ui_ready`, someone who copied one file lost every
+        // key on the mod at once - including the F8 that would have shown
+        // them nothing was loaded - which reads as "the mod does not work"
+        // rather than "one file is missing".
+        if (!input_ready && fmk::overlay_ready()) {
             input_ready = fmk::input_install(fmk::overlay_game_hwnd());
         }
         // GameApp first, and it is the only thing worth searching for: it

@@ -17,6 +17,8 @@ where node >nul 2>&1
 if errorlevel 1 (
   echo.
   echo   Node.js is required, and is not installed.
+  echo   ^(Version 18 or newer. No 'npm install' - the generators use only
+  echo    Node's own libraries.^)
   echo.
   echo   The mod's item database, icons and routes are built from YOUR copy
   echo   of the game - they are the game's own data, which is not ours to

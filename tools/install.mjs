@@ -22,7 +22,8 @@
 // installed, and "installed and silent" is the worst outcome available.
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync, copyFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, copyFileSync, unlinkSync, openSync,
+         closeSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -97,6 +98,21 @@ function buildInfo() {
 function isOurs(path) {
   try {
     return readFileSync(path).includes(Buffer.from('farever-modkit'));
+  } catch {
+    return false;
+  }
+}
+
+// Whether the DLL can be replaced at all, asked before anything slow happens.
+// Windows locks a loaded DLL, so reinstalling over a running game fails - and
+// finding that out after two minutes of generating the item database, with
+// the data files already overwritten, is a bad way to learn it. An absent
+// file is fine: that is a first install.
+function dllIsWritable(target) {
+  if (!existsSync(target)) return true;
+  try {
+    closeSync(openSync(target, 'r+'));
+    return true;
   } catch {
     return false;
   }
@@ -213,6 +229,32 @@ function install(game) {
     say('      --force given; installing a DLL that will do nothing.');
   }
 
+  // --- can we finish, before we start? ---
+  const target = join(game, 'dxgi.dll');
+  if (!dllIsWritable(target)) {
+    say('');
+    say('STOP  the game is running.');
+    say('');
+    say(`      ${target} is locked, which on Windows means it is loaded into`);
+    say('      a running process. Close Farever and run this again.');
+    say('');
+    say('      Nothing has been changed.');
+    return 1;
+  }
+  if (existsSync(target) && !isOurs(target) && !FORCE) {
+    say('');
+    say('STOP  there is already a dxgi.dll next to Farever.exe, and it is');
+    say('      not one of ours. Overwriting it could break another mod, or');
+    say('      lose a file you put there deliberately.');
+    say('');
+    say(`      ${target}`);
+    say('');
+    say('      Move it aside, or re-run with --force.');
+    say('');
+    say('      Nothing has been changed.');
+    return 1;
+  }
+
   // --- data files ---
   if (!NO_DATA) {
     for (const [script, what] of [['gen-atlas.mjs', 'the item database and icon atlas'],
@@ -238,19 +280,6 @@ function install(game) {
   }
 
   // --- the DLL, last, because it is the part that changes what loads ---
-  const target = join(game, 'dxgi.dll');
-  if (existsSync(target) && !isOurs(target) && !FORCE) {
-    say('');
-    say('STOP  there is already a dxgi.dll next to Farever.exe, and it is');
-    say('      not one of ours. Overwriting it could break another mod, or');
-    say('      lose a file you put there deliberately.');
-    say('');
-    say(`      ${target}`);
-    say('');
-    say('      Move it aside, or re-run with --force.');
-    return 1;
-  }
-
   try {
     copyFileSync(dll, target);
   } catch (e) {
@@ -282,6 +311,19 @@ function install(game) {
 // --- go ---------------------------------------------------------------------
 
 say('');
+
+// The generators use `??`, optional chaining and `matchAll` freely, and a
+// Node old enough to lack them fails with a SyntaxError halfway through
+// rather than saying what is wrong.
+const major = Number(process.versions.node.split('.')[0]);
+if (major < 18) {
+  say(`Node ${process.versions.node} is too old - 18 or newer is needed.`);
+  say('  winget install OpenJS.NodeJS.LTS');
+  say('  or https://nodejs.org/');
+  say('');
+  process.exit(1);
+}
+
 const game = requireGame(args);
 if (!existsSync(join(game, 'hlboot.dat'))) {
   say(`FAIL  ${game} has no hlboot.dat - that is not a Farever install.`);

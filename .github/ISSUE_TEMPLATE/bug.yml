@@ -1,0 +1,69 @@
+name: Something is wrong
+description: The atlas is empty, the arrow points nowhere, the game will not start
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **`farever-modkit.log`, next to `Farever.exe`, answers most of this on
+        its own.** It opens with the mod version and the game build it
+        verified against, and it says in plain words when it has disabled
+        itself. Pasting it is more use than describing it.
+
+        Two things it will tell you before you file anything:
+
+        - `build: MISMATCH` — the game was patched since this build. Every
+          read is off, so the mod is doing nothing rather than something
+          wrong. Get a release built for the current game version, or
+          `node tools/update.mjs --fix` from a checkout.
+        - `atlas_ui: ... farever-atlas.tsv missing` — the item database was
+          never built. Run `install.cmd`.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: farever-modkit.log
+      description: The whole file, or at least the first thirty lines.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The first line of the log, e.g. `farever-modkit 0.9.0`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it
+      options:
+        - A release zip and install.cmd
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: >
+        What you did, what you expected, what you got. If it is about one
+        item, name it — the id at the bottom of the tooltip is the useful
+        form.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: alone
+    attributes:
+      label: Other mods
+      options:
+        - label: >
+            farever-minimap (or any other `dinput8.dll`/`dxgi.dll`) is NOT
+            installed. Both drawing an overlay at once is not a supported
+            combination.
+          required: false

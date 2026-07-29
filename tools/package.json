@@ -5,6 +5,9 @@
   "description": "Static checks and a Lua-VM test harness for the farever-mods plugins",
   "type": "commonjs",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "check": "node check-plugins.mjs",
     "test": "node run-harness.mjs",

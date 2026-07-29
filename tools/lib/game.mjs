@@ -69,21 +69,37 @@ function fromArgv(argv) {
 // another drive.
 function steamRoots() {
   const roots = [];
-  const keys = [
-    ['HKCU\\Software\\Valve\\Steam', 'SteamPath'],
-    ['HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam', 'InstallPath'],
-    ['HKLM\\SOFTWARE\\Valve\\Steam', 'InstallPath'],
-  ];
-  for (const [key, value] of keys) {
-    try {
-      const out = execFileSync('reg', ['query', key, '/v', value],
-                               { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-      const m = out.match(/REG_SZ\s+(.+)/);
-      if (m) roots.push(m[1].trim().replace(/\\/g, '/'));
-    } catch {
-      // No Steam, or no such key. Both are ordinary.
+
+  // Through PowerShell rather than reg.exe. `reg query` writes in the
+  // console's OEM code page - CP850 here - so a Steam installed under
+  // `C:\Jeux\Stèam` or any accented path comes back with replacement
+  // characters, the directory check fails, and the root is silently dropped.
+  // Decoding it needs the active code page, which is one more thing to get
+  // wrong; PowerShell hands back UTF-8 and answers all three keys in one
+  // process, which is also cheaper than three `reg` spawns.
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "@(",
+    " (Get-ItemProperty 'HKCU:\\Software\\Valve\\Steam').SteamPath",
+    " (Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\Valve\\Steam').InstallPath",
+    " (Get-ItemProperty 'HKLM:\\SOFTWARE\\Valve\\Steam').InstallPath",
+    ") | Where-Object { $_ } | ForEach-Object { $_ }",
+  ].join('; ');
+  try {
+    const out = execFileSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-OutputEncoding', 'utf8', '-Command', script],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }
+    );
+    for (const line of out.split(/\r?\n/)) {
+      const p = line.trim();
+      if (p) roots.push(p.replace(/\\/g, '/'));
     }
+  } catch {
+    // No PowerShell, no Steam, or no such key. All ordinary, and the
+    // defaults below cover the common installs regardless.
   }
+
   const pf = process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)';
   roots.push(join(pf, 'Steam').replace(/\\/g, '/'));
   roots.push('C:/Program Files/Steam');

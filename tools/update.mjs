@@ -192,8 +192,12 @@ if (!existsSync(built)) {
 } else if (sha(built) !== sha(installed)) {
   say('host DLL    installed copy is STALE');
   if (FIX) {
-    copyFileSync(built, installed);
-    say('            -> updated');
+    // This copy is reached exactly when the installed DLL differs - which is
+    // exactly when the game is most likely to be running and holding it
+    // open. An unhandled throw here aborted the run before the rebuild
+    // below, leaving regenerated offsets and a stale DLL out of step with a
+    // raw stack trace as the only explanation.
+    if (installDll()) say('            -> updated');
   } else {
     actions.push('reinstall host DLL');
   }
@@ -201,20 +205,65 @@ if (!existsSync(built)) {
   say('host DLL    installed and current');
 }
 
+function installDll() {
+  try {
+    copyFileSync(built, installed);
+    return true;
+  } catch (e) {
+    say(`            FAILED to copy ${built}`);
+    say(`                          to ${installed}`);
+    say(`            ${e.message}`);
+    say('            Close the game if it is running - Windows holds a');
+    say('            loaded DLL open - or run this from an elevated prompt');
+    say('            if the game lives under Program Files.');
+    problems.push('host DLL could not be installed');
+    return false;
+  }
+}
+
 // --- rebuild ---------------------------------------------------------------
 if (FIX && (bootChanged || !header.sha)) {
   say('');
   say('rebuilding host...');
+  let rebuilt = false;
   try {
-    execFileSync('cmd', ['/c', join(ROOT, 'host', 'build.cmd')], { stdio: 'pipe' });
+    // 'inherit', not 'pipe'. build.cmd's most useful output is the one it
+    // prints when there is no MSVC toolset - the workload to install and the
+    // two download links - and piping it swallowed exactly that, on exactly
+    // the machine where it was the answer.
+    execFileSync('cmd', ['/c', join(ROOT, 'host', 'build.cmd')], { stdio: 'inherit' });
     say('  built');
-    if (existsSync(installed)) {
-      copyFileSync(built, installed);
-      say('  installed');
-    }
-  } catch (e) {
-    say('  FAIL  build failed - see host/build.cmd output');
+    rebuilt = true;
+  } catch {
+    say('  FAIL  build failed - the compiler output is above');
     problems.push('host rebuild failed');
+  }
+  // A copy failure is not a build failure, and saying so sent people to look
+  // at compiler output that was fine.
+  if (rebuilt && existsSync(installed) && installDll()) say('  installed');
+}
+
+// --- data files ------------------------------------------------------------
+//
+// Offsets are not the whole story. A patch that adds or renames an item
+// leaves the atlas silently missing it - lookup is by string id - and can
+// move the nodes a route points at. Nothing detected that, because nothing
+// was checking.
+if (bootChanged || !header.sha) {
+  say('');
+  if (FIX) {
+    for (const script of ['gen-atlas.mjs', 'gen-routes.mjs']) {
+      say(`regenerating ${script.replace('gen-', '').replace('.mjs', '')}...`);
+      try {
+        execFileSync(process.execPath, [join(HERE, script), '--game', game],
+                     { stdio: 'inherit' });
+      } catch {
+        say(`  FAIL  ${script} did not finish`);
+        problems.push(`${script} failed`);
+      }
+    }
+  } else {
+    actions.push('regenerate the atlas and routes (gen-atlas, gen-routes)');
   }
 }
 

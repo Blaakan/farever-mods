@@ -225,11 +225,28 @@ if (miss.length) {
   process.exit(1);
 }
 
+const text = lines.join('\n');
+const changed = !existsSync(OUT_H) || readFileSync(OUT_H, 'utf8') !== text;
+
+// Only write when something actually differs. Rewriting an identical header
+// bumps its timestamp, and anything downstream that compares it against the
+// built DLL then believes the build is stale when it is not.
 mkdirSync(dirname(OUT_H), { recursive: true });
-writeFileSync(OUT_H, lines.join('\n'), 'utf8');
+if (changed) writeFileSync(OUT_H, text, 'utf8');
 
 console.log(`wrote ${OUT_H}`);
 console.log(`  build sha256 ${hash.slice(0, 16)}...`);
 let n = 0;
 for (const [, fields] of WANT) n += fields.length;
 console.log(`  ${WANT.length} classes, ${n} fields, 0 missing`);
+
+// This header is compiled into the DLL, so writing it changes nothing until
+// something rebuilds. Saying so here is the difference between "I re-ran the
+// generator and it still does not work" and one more command - the
+// requirement was only ever stated in a comment at the top of this file.
+if (changed) {
+  console.log('');
+  console.log('  the offsets CHANGED - the DLL must be rebuilt to use them:');
+  console.log('    host\\build.cmd   (then install.cmd)');
+  console.log('  or let node tools/update.mjs --fix do the whole sequence.');
+}

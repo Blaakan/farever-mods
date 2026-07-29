@@ -523,7 +523,9 @@ loot table either:
 All three are general rather than rune-specific: **101 entries across the
 atlas gained a quest-reward line**, and grouping chests by the `lootTable`
 they roll is the honest answer for anything whose only source is a crate.
-Together they took navigator coverage from 577 entries to 705.
+Together they took navigator coverage from 577 entries to **695** — the
+number `gen-atlas.mjs` prints as `tracker targets on N entries`, which is
+where to check it rather than trusting this line after a patch.
 
 Guaranteed sources are pushed first, so a quest that always hands one over
 outranks a place it might drop.

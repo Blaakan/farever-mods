@@ -184,18 +184,27 @@ void arm_departures_locked() {
     }
 }
 
-// A route that has run out of waypoints is finished, and a finished route
-// goes, the way it does on Shift+F10. Both the ways it can run out - walking
-// into the last one, and skipping it - end here, so the Routes page cannot
-// end up still listing something the pill has already stopped drawing.
-void clear_finished_locked(const char* how) {
-    host_log("nav: route '%s' complete (%s) - cleared", g_name.c_str(), how);
-    g_key.clear();
-    g_name.clear();
-    g_targets.clear();
-    g_done.clear();
-    g_armed.clear();
-    g_mode = kNavNearest;
+// A route that has run out of waypoints stops being drawn, and does not stop
+// existing. Both ways it can run out - walking into the last one, and
+// skipping it - end here.
+//
+// The frame needs no help going away: `nav_draw` finds no current waypoint,
+// falls through to `nav_clear_frame()` and gives back the screen space on the
+// next frame it is asked for. Nothing is on screen while alt-tabbed anyway,
+// so there is no case where waiting for that frame shows a stale pill.
+//
+// **The waypoints must survive.** For an ad-hoc list - what F9 drops and what
+// a map click queues - `g_targets` is the only copy there is; `routes.cpp`
+// reaches into it through `nav_active_points` when you press Save as route,
+// and the Routes panel only draws that button while `nav_status` reports
+// active, which needs a non-empty list. Clearing here therefore did not
+// merely tidy up: walking the last waypoint of a run you had spent an evening
+// recording deleted it, silently, with the panel reverting to "Nothing
+// tracked" as if you had never dropped anything. Shift+F10 and the Stop
+// button are how a route is disposed of, and they are enough.
+void note_finished_locked(const char* how) {
+    host_log("nav: route '%s' complete (%s) - %d waypoints kept, Stop or "
+             "Save as route", g_name.c_str(), how, (int)g_targets.size());
 }
 
 void consume_arrivals_locked() {
@@ -214,10 +223,10 @@ void consume_arrivals_locked() {
         host_log("nav: reached '%s' (%d of %d done)", t.label,
                  (int)g_targets.size() - left, (int)g_targets.size());
         if (left == 0) {
-            // Held here rather than in the draw callback so it happens the
+            // Noticed here rather than in the draw callback so it happens the
             // moment the last waypoint is reached, whether or not the
             // overlay is on screen at the time.
-            clear_finished_locked("reached");
+            note_finished_locked("reached");
             break;
         }
     }
@@ -638,10 +647,8 @@ void nav_skip() {
     if (i < 0) return;
     g_done[i] = 1;
     // Skipping the last outstanding waypoint finishes the route as surely as
-    // walking into it does. Without this the route survives with nothing to
-    // aim at: the pill stops drawing, but the Routes page goes on offering
-    // Skip and Stop for something already over.
-    if (remaining_locked() == 0) clear_finished_locked("skipped");
+    // walking into it does, and says so the same way.
+    if (remaining_locked() == 0) note_finished_locked("skipped");
     InterlockedExchange(&g_dirty, 1);
 }
 

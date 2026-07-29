@@ -71,12 +71,20 @@ if (!gameSha) {
   process.exit(1);
 }
 
-// A DLL older than the offsets it is supposed to have been built from is the
-// one mistake that would ship silently: the archive would claim a game build
-// it cannot actually read.
-if (statSync(dll).mtimeMs < statSync(offsets).mtimeMs) {
-  console.error('dxgi.dll is older than offsets.gen.h - rebuild before packaging');
-  console.error('  host\\build.cmd');
+// A DLL built from different offsets than the ones we are about to advertise
+// is the one mistake that would ship silently: `build-info.json` would name a
+// game build the binary cannot actually read, and the installer - which
+// trusts that file - would happily install it into the game it does not work
+// with. Asked of the binary rather than of timestamps, because the header is
+// rewritten by every generator run and a build is not stale for being older
+// than a file whose contents did not change. `FMK_BUILD_SHA256` is a string
+// literal in dllmain.cpp, so the DLL carries it verbatim.
+if (!readFileSync(dll).includes(Buffer.from(gameSha, 'ascii'))) {
+  console.error('dxgi.dll was not built from the current offsets.gen.h.');
+  console.error(`  offsets.gen.h says  ${gameSha.slice(0, 24)}...`);
+  console.error('  and the DLL does not contain that hash.');
+  console.error('');
+  console.error('  Rebuild before packaging:  host\\build.cmd');
   process.exit(1);
 }
 

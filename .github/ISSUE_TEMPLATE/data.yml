@@ -1,0 +1,42 @@
+name: An item says the wrong thing
+description: Wrong or missing "how to acquire", a waypoint in the wrong place, a bad name
+labels: [data]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The atlas is generated out of the game's own files, so most of these
+        are a gap in what the files say rather than a mistake in reading them
+        — 101 entries genuinely have no source recorded anywhere, and the
+        atlas says so rather than inventing one.
+
+        `tools/atlas-overrides.tsv` is the escape hatch: it patches the
+        generated data per item id and survives regeneration. A pull request
+        adding a line to it is the fastest possible fix, and the file's own
+        comments explain the format.
+
+  - type: input
+    id: id
+    attributes:
+      label: Item id
+      description: The greyed-out line at the bottom of the tooltip.
+      placeholder: SparkHorse_01
+    validations:
+      required: true
+
+  - type: textarea
+    id: says
+    attributes:
+      label: What the atlas says
+    validations:
+      required: true
+
+  - type: textarea
+    id: truth
+    attributes:
+      label: What is actually true, and how you know
+      description: >
+        "I got it from X" is enough. If it is a waypoint in the wrong place,
+        the coordinates from F9 where it really is are ideal.
+    validations:
+      required: true

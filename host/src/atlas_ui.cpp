@@ -912,14 +912,22 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
             draw_text(tx + pad, yy, body_sz, kAccent, line);
             yy += 16;
         }
-        draw_text(tx + pad, yy, small_sz,
-                  tracked ? Color{1.0f, 0.75f, 0.35f, 1.0f}
-                          : Color{0.55f, 0.60f, 0.70f, 1.0f},
-                  tracked ? "Tracking - click to stop"
-                          : "Click to track this location");
+        // Only offer what a click would actually do. With every source spent
+        // or unverifiable, "Click to track this location" describes a click
+        // that goes nowhere - and a tooltip that promises three actions and
+        // performs none reads as the mod being broken rather than as the
+        // sources being gone. Stopping is still offered, because stopping
+        // still works.
+        if (tracked)
+            draw_text(tx + pad, yy, small_sz, {1.0f, 0.75f, 0.35f, 1.0f},
+                      "Tracking - click to stop");
+        else if (!live.empty())
+            draw_text(tx + pad, yy, small_sz, {0.55f, 0.60f, 0.70f, 1.0f},
+                      "Click to track this location");
         yy += 16;
-        draw_text(tx + pad, yy, small_sz, {0.45f, 0.50f, 0.60f, 1.0f},
-                  "Ctrl+click: add to route   Shift: add first");
+        if (!live.empty())
+            draw_text(tx + pad, yy, small_sz, {0.45f, 0.50f, 0.60f, 1.0f},
+                      "Ctrl+click: add to route   Shift: add first");
         yy += 16;
         if (spent) {
             // Naming what was dropped matters: silently showing fewer places
@@ -1595,16 +1603,23 @@ void atlas_ui_draw(float screen_w, float screen_h) {
                 in.click_x >= x && in.click_x < x + kIcon &&
                 in.click_y >= by0 && in.click_y < by1) {
                 const std::vector<NavTarget> go = live_targets(e, own.get());
-                // Nothing left that can be shown to still be there. Clicking
-                // does nothing rather than pointing at a maybe.
+                char key[192];
+                _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
+                            kCatTsv[ecat], e.id.c_str());
                 if (go.empty()) {
+                    // Nothing left that can be shown to still be there:
+                    // clicking points at nothing rather than at a maybe. But
+                    // untracking must still work. Track an item held in one
+                    // chest, walk over and open it, and its last source is
+                    // now spent - a plain list of alternatives never expires
+                    // on its own, so refusing the click here left the arrow
+                    // aimed at an emptied chest with no way to call it off
+                    // short of Shift+F10.
+                    if (nav_is_tracked(key)) nav_untrack();
                 } else if (in.click_shift || in.click_ctrl) {
                     nav_add(e.name.c_str(), go.data(), (int)go.size(),
                             in.click_shift);
                 } else {
-                    char key[192];
-                    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s/%s",
-                                kCatTsv[ecat], e.id.c_str());
                     nav_track(key, e.name.c_str(), go.data(), (int)go.size());
                 }
             }
