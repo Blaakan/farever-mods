@@ -39,6 +39,38 @@ const OUT = join(HERE, 'out', 'atlas');
 const game = requireGame();
 const install = !process.argv.includes('--no-install');
 
+// Which archives are actually there, said once and up front. Three of the
+// four are optional in the sense that the run completes without them - and
+// completes *quietly*, with fewer creatures and no shop or dungeon sources,
+// which looks like the atlas being wrong rather than the game being half
+// downloaded. Steam mid-download or mid-verify is the ordinary way to end up
+// here.
+{
+  const paks = [
+    ['res.light.pak', 'the CastleDB - names, descriptions, loot tables', true],
+    ['res.pak', 'item and creature portraits', true],
+    ['res.map.pak', 'the world: shops, chests, spawns, quest rewards', false],
+    ['res.levels.pak', 'dungeon interiors: where instanced bosses live', false],
+  ];
+  const missing = paks.filter(([f]) => !existsSync(join(game, f)));
+  if (missing.length) {
+    console.warn('');
+    for (const [f, what, required] of missing)
+      console.warn(`  ${required ? 'MISSING' : 'absent '}  ${f}  - ${what}`);
+    if (missing.some(([, , required]) => required)) {
+      console.error('');
+      console.error('A required archive is not there. If Steam is still');
+      console.error('downloading or verifying, let it finish and re-run.');
+      process.exit(1);
+    }
+    console.warn('');
+    console.warn('  The atlas will build without them, and will be missing');
+    console.warn('  what they carry. If Steam is still downloading or');
+    console.warn('  verifying, let it finish and re-run.');
+    console.warn('');
+  }
+}
+
 // --- load the CastleDB ------------------------------------------------------
 
 const light = openPak(join(game, 'res.light.pak'));
