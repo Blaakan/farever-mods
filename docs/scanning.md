@@ -34,11 +34,16 @@ constant, field name and type name in the game.
 node tools/scan-hlboot.mjs --lua
 ```
 
-It auto-probes the usual Steam library paths, or takes an explicit one:
+It finds the game through Steam's own library list (see
+[`tools/lib/game.mjs`](../tools/lib/game.mjs), which every tool here shares),
+or takes the install — or the bytecode itself — explicitly:
 
 ```bash
-node tools/scan-hlboot.mjs "E:/SteamLibrary/steamapps/common/Farever/hlboot.dat"
+node tools/scan-hlboot.mjs --game "D:\SteamLibrary\steamapps\common\Farever"
 ```
+
+`FAREVER_DIR` in the environment does the same thing for every tool at once,
+and a successful find is remembered.
 
 ### What came out (build `7c3ca4dd…`, July 2026)
 
