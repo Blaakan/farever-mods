@@ -40,16 +40,10 @@ import { openSync, readSync, closeSync, existsSync, mkdirSync, writeFileSync,
          statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findGame } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out', 'pak');
-
-const GAME_CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever',
-  'D:/SteamLibrary/steamapps/common/Farever',
-  'E:/SteamLibrary/steamapps/common/Farever',
-  'F:/SteamLibrary/steamapps/common/Farever',
-];
 
 const args = process.argv.slice(2);
 const argOf = (flag) => {
@@ -57,17 +51,11 @@ const argOf = (flag) => {
   return i >= 0 ? args[i + 1] : null;
 };
 
-function findGame() {
-  if (process.env.FAREVER_DIR && existsSync(process.env.FAREVER_DIR))
-    return process.env.FAREVER_DIR;
-  for (const c of GAME_CANDIDATES) if (existsSync(join(c, 'hlboot.dat'))) return c;
-  return null;
-}
-
-const game = findGame();
+const game = findGame(args);
 const pakPath = argOf('--pak') || (game ? join(game, 'res.pak') : null);
 if (!pakPath || !existsSync(pakPath)) {
-  console.error('pak not found; pass --pak <file> or set FAREVER_DIR');
+  console.error('pak not found; pass --pak <file>, --game <install dir>,');
+  console.error('or set FAREVER_DIR');
   process.exit(1);
 }
 

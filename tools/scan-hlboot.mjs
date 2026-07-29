@@ -28,29 +28,15 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireBoot } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out');
 
-const CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever/hlboot.dat',
-  'C:/Program Files/Steam/steamapps/common/Farever/hlboot.dat',
-  'D:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'E:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'F:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-];
-
 const args = process.argv.slice(2);
 const wantLua = args.includes('--lua');
-const pathArg = args.find((a) => !a.startsWith('--'));
 
-function findBoot() {
-  if (pathArg) return pathArg;
-  for (const c of CANDIDATES) if (existsSync(c)) return c;
-  console.error('hlboot.dat not found. Pass its path:');
-  console.error('  node tools/scan-hlboot.mjs "E:/SteamLibrary/steamapps/common/Farever/hlboot.dat"');
-  process.exit(1);
-}
+const findBoot = () => requireBoot(args);
 
 // --- HashLink bytecode reader ---------------------------------------------
 

@@ -29,47 +29,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { findGame } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const STATE = join(HERE, 'out', 'update-state.json');
 const FIX = process.argv.includes('--fix');
-
-const GAME_CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever',
-  'C:/Program Files/Steam/steamapps/common/Farever',
-  'D:/SteamLibrary/steamapps/common/Farever',
-  'E:/SteamLibrary/steamapps/common/Farever',
-  'F:/SteamLibrary/steamapps/common/Farever',
-];
-
-// Also honour Steam's own library list, so a library on a drive we did not
-// guess still resolves.
-function fromSteamLibraries() {
-  const vdfs = [
-    'C:/Program Files (x86)/Steam/steamapps/libraryfolders.vdf',
-    'C:/Program Files/Steam/steamapps/libraryfolders.vdf',
-  ];
-  const out = [];
-  for (const v of vdfs) {
-    if (!existsSync(v)) continue;
-    const txt = readFileSync(v, 'utf8');
-    for (const m of txt.matchAll(/"path"\s+"([^"]+)"/g)) {
-      out.push(join(m[1].replace(/\\\\/g, '/'), 'steamapps/common/Farever'));
-    }
-  }
-  return out;
-}
-
-function findGame() {
-  if (process.env.FAREVER_DIR && existsSync(process.env.FAREVER_DIR)) {
-    return process.env.FAREVER_DIR;
-  }
-  for (const c of [...GAME_CANDIDATES, ...fromSteamLibraries()]) {
-    if (existsSync(join(c, 'hlboot.dat'))) return c;
-  }
-  return null;
-}
 
 const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
 

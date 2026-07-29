@@ -22,26 +22,30 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { requireBoot } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT_H = join(HERE, '..', 'host', 'src', 'offsets.gen.h');
 
-const CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever/hlboot.dat',
-  'D:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'E:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'F:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-];
+const bootPath = requireBoot();
+const bootSha = createHash('sha256').update(readFileSync(bootPath)).digest('hex');
 
-const bootPath = process.argv[2] || CANDIDATES.find((c) => existsSync(c));
-if (!bootPath) {
-  console.error('hlboot.dat not found; pass its path');
-  process.exit(1);
-}
-
-// Reuse the type parser by asking scan-hltypes for its JSON dump.
+// Reuse the type parser by asking scan-hltypes for its JSON dump - but only
+// when the dump on disk describes *this* bytecode. A dump left over from
+// before a patch parses perfectly and yields offsets that are wrong in the
+// worst way available: plausible. Regenerating on a hash mismatch is what
+// makes "re-run the generators after a patch" actually sufficient.
 const typesPath = join(HERE, 'out', 'hl_types.json');
-if (!existsSync(typesPath)) {
+function dumpMatches() {
+  if (!existsSync(typesPath)) return false;
+  try {
+    const src = JSON.parse(readFileSync(typesPath, 'utf8')).__source;
+    return !!src && src.sha256 === bootSha;
+  } catch {
+    return false;   // unreadable, or written before __source existed
+  }
+}
+if (!dumpMatches()) {
   console.log('generating tools/out/hl_types.json ...');
   execFileSync(process.execPath, [join(HERE, 'scan-hltypes.mjs'), '--json', bootPath], {
     stdio: 'inherit',
@@ -164,7 +168,7 @@ const WANT = [
   ['String', ['bytes', 'length']],
 ];
 
-const hash = createHash('sha256').update(readFileSync(bootPath)).digest('hex');
+const hash = bootSha;
 
 const lines = [];
 const miss = [];

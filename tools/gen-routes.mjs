@@ -32,29 +32,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openPak } from './lib/pak.mjs';
 import { readHBSON, walkNodes } from './lib/hbson.mjs';
+import { requireGame } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out', 'routes');
 
-const GAME_CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever',
-  'D:/SteamLibrary/steamapps/common/Farever',
-  'E:/SteamLibrary/steamapps/common/Farever',
-  'F:/SteamLibrary/steamapps/common/Farever',
-];
-
-function findGame() {
-  if (process.env.FAREVER_DIR && existsSync(process.env.FAREVER_DIR))
-    return process.env.FAREVER_DIR;
-  for (const c of GAME_CANDIDATES) if (existsSync(join(c, 'hlboot.dat'))) return c;
-  return null;
-}
-
-const game = findGame();
-if (!game) {
-  console.error('game not found; set FAREVER_DIR');
-  process.exit(1);
-}
+const game = requireGame();
 const install = !process.argv.includes('--no-install');
 
 // --- what counts as worth walking to ----------------------------------------

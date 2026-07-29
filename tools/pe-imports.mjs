@@ -109,9 +109,11 @@ function parsePE(path) {
   return { pe32plus, imports, exports };
 }
 
-const files = process.argv.slice(2);
+// --funcs is a flag, not a file. Treating it as one printed an ENOENT above
+// the real output every time the documented invocation was used.
+const files = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 if (!files.length) {
-  console.error('usage: node tools/pe-imports.mjs <file> [...]');
+  console.error('usage: node tools/pe-imports.mjs [--funcs] <file> [...]');
   process.exit(1);
 }
 

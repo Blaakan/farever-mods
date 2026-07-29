@@ -27,17 +27,12 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { requireBoot } from './lib/game.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out');
 const WSIZE = 8; // x64
-
-const CANDIDATES = [
-  'C:/Program Files (x86)/Steam/steamapps/common/Farever/hlboot.dat',
-  'D:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'E:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-  'F:/SteamLibrary/steamapps/common/Farever/hlboot.dat',
-];
 
 // hl_type_kind, from HashLink's hl.h
 const K = {
@@ -252,13 +247,8 @@ const wantJson = args.includes('--json');
 const grepIdx = args.indexOf('--grep');
 const grep = grepIdx >= 0 ? args[grepIdx + 1] : null;
 const explicit = args.find((a) => !a.startsWith('--') && a !== grep && !existsSync(a));
-const pathArg = args.find((a) => existsSync(a) && a.endsWith('.dat'));
 
-const bootPath = pathArg || CANDIDATES.find((c) => existsSync(c));
-if (!bootPath) {
-  console.error('hlboot.dat not found; pass its path');
-  process.exit(1);
-}
+const bootPath = requireBoot(args);
 
 console.log(`reading ${bootPath}`);
 const bc = parse(bootPath);
@@ -346,11 +336,20 @@ if (grep) {
 
 if (wantJson) {
   mkdirSync(OUT, { recursive: true });
-  const out = {};
+  // Which bytecode this dump describes. Without it a dump left over from the
+  // build before a patch is indistinguishable from a fresh one, and offsets
+  // generated from it would be wrong in the one way that matters - plausible.
+  // `__source` cannot collide with a class name: Haxe has no such type.
+  const out = {
+    __source: {
+      file: bootPath,
+      sha256: createHash('sha256').update(readFileSync(bootPath)).digest('hex'),
+    },
+  };
   for (const [name, t] of byName) {
     const l = layout(bc.types, t, cache);
     out[name] = { size: l.size, super: l.superName, fields: l.fields };
   }
   writeFileSync(join(OUT, 'hl_types.json'), JSON.stringify(out), 'utf8');
-  console.log(`\nwrote ${join(OUT, 'hl_types.json')} (${Object.keys(out).length} classes)`);
+  console.log(`\nwrote ${join(OUT, 'hl_types.json')} (${byName.size} classes)`);
 }
