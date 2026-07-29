@@ -1,0 +1,101 @@
+name: build
+
+# The point of this one is narrow and worth stating: it proves the repository
+# builds on a machine that is not the author's. A clean Windows runner has no
+# Farever install, no tools/out, and whichever Visual Studio GitHub happens to
+# ship this month - so if build.cmd's toolset discovery or a committed
+# generated header ever stops being enough, this is where it shows up rather
+# than in somebody's first attempt at installing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: dxgi.dll (MSVC x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: host\build.cmd
+
+      - name: Check what it links against
+        shell: pwsh
+        # A proxy that fails to load takes the game down with it, because
+        # dx12.hdll imports dxgi.dll statically. So the imports are worth
+        # looking at: everything here must exist on a stock Windows 10/11.
+        run: |
+          node tools\pe-imports.mjs --funcs host\build\dxgi.dll
+
+      - name: Package
+        shell: cmd
+        run: node tools\package.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: farever-modkit-dev
+          path: dist/*.zip
+          if-no-files-found: error
+
+  plugins:
+    name: Lua plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - run: npm install
+        working-directory: tools
+
+      - name: Static and sandbox checks
+        run: node tools/check-plugins.mjs
+
+      - name: Harness (real Lua 5.4 VM against the mock host)
+        run: node tools/run-harness.mjs
+
+  tools:
+    name: Tools load without a game
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Every generator has to fail the same way on a machine with no game:
+      # by saying so and stopping, not by throwing a stack trace. That is the
+      # first thing a new user sees if their install is somewhere unusual.
+      - name: Every tool parses
+        shell: pwsh
+        run: |
+          Get-ChildItem tools -Filter *.mjs -Recurse | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "syntax error in $($_.Name)" }
+          }
+
+      - name: A path that is not a game is rejected, not guessed past
+        shell: pwsh
+        run: |
+          $out = node tools/gen-atlas.mjs --game "C:\definitely\not\here" 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw "expected a non-zero exit" }
+          if ($out -notmatch 'Not a Farever install') {
+            throw "expected the rejection message, got:`n$out"
+          }
+          Write-Host $out
+
+      - name: No game at all is reported, not crashed on
+        shell: pwsh
+        run: |
+          $out = node tools/gen-atlas.mjs 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw "expected a non-zero exit" }
+          if ($out -notmatch 'Farever install not found') {
+            throw "expected the not-found message, got:`n$out"
+          }
+          Write-Host $out

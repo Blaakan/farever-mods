@@ -214,10 +214,11 @@ Two lessons worth keeping:
 | 2b | Post-patch update flow (`tools/update.mjs`) | **built, verified** |
 | 3a | Swap-chain observation via the factory wrapper | **built** |
 | 3b | D3D12 renderer: Present hook, PSO, font atlas, textured quads | **built, text verified in-game** |
-| 3c | Native Collection Atlas UI (`atlas_ui.cpp` + `input.cpp`) | **working in-game** — 1547 entries across 12 pages |
-| 4a | Navigator routes (`navigator.cpp`) + the Routes page (`routes.cpp`, `tools/gen-routes.mjs`) | **built** — awaiting in-game verification |
-| 4b | Recent Loots (`loot.cpp`) | **built** — awaiting in-game verification |
-| 4c | Waypoints from the game's map (`mapwatch.cpp`) | **built** — awaiting in-game verification |
+| 3c | Native Collection Atlas UI (`atlas_ui.cpp` + `input.cpp`) | **working in-game** — 1639 entries across 13 pages |
+| 4a | Navigator routes (`navigator.cpp`) + the Routes page (`routes.cpp`, `tools/gen-routes.mjs`) | **working in-game** — 69 routes, 1001 waypoints; the log has a route reached and cleared |
+| 4b | Recent Loots (`loot.cpp`) | **built** — draws, but nothing in the log proves a diff landed |
+| 4c | Waypoints from the game's map (`mapwatch.cpp`) | **working in-game** — a map click became a waypoint |
+| 5 | Packaging: `install.cmd`, `tools/package.mjs`, CI release | **built** — a release builds on a clean runner |
 
 Stage 3c replaced the original plan of porting the Lua plugins wholesale: the
 tracker UI is now native to the host, driven by the host's own reader and the
@@ -469,7 +470,7 @@ inventory as loot on the next poll; and leaving the world drops the baseline
 entirely, so logging back in never arrives as a wall of text.
 
 Names, icons and rarity colours come from the atlas's own database through
-`atlas_ui_lookup` - one copy of 1547 entries, not two.
+`atlas_ui_lookup` - one copy of 1639 entries, not two.
 
 ### Runes
 
@@ -599,7 +600,7 @@ Data files, generated from your own game install:
 node tools/gen-atlas.mjs && node tools/gen-routes.mjs
 ```
 
-writes `farever-atlas.tsv` (1547 entries across twelve categories),
+writes `farever-atlas.tsv` (1639 entries across thirteen categories),
 `farever-atlas-icons.dds` (a 2048px BC7 atlas repacked block-for-block from
 the game's 256px portrait mips — no image decoding anywhere) and
 `farever-routes.txt`, and copies all three next to `Farever.exe`. Re-run both
@@ -607,34 +608,74 @@ after a patch, along with `tools/update.mjs`.
 
 ## Build
 
-Needs the MSVC C++ x64 toolset (Visual Studio 2022 Community or Build Tools).
+Needs the MSVC C++ x64 toolset — Visual Studio 2022 Community, or the
+standalone Build Tools, with **Desktop development with C++** (MSVC v143 x64
+and a Windows 10/11 SDK).
 
 ```bash
 host/build.cmd
 ```
 
-Output: `host/build/dxgi.dll`. The build deliberately does **not** install into
-the game — dropping a `dxgi.dll` next to `Farever.exe` changes what loads at
-the next launch, so that stays a conscious step.
+The toolset is located through `vswhere.exe`, which every VS 2017+ installer
+puts at one fixed path and which knows about every edition, channel and
+install drive. Probing for `2022\Community` finds one machine's layout;
+asking the installer finds everyone's. Failing that it falls back to the
+well-known layouts, and failing *that* it names what to install rather than
+saying "not found".
 
-## Trying stage 1
+Output: `host/build/dxgi.dll`. The build deliberately does **not** install
+into the game — dropping a `dxgi.dll` next to `Farever.exe` changes what
+loads at the next launch, so that stays a conscious step. `install.cmd` in
+the repository root is the conscious step.
 
-It only writes a log; it draws nothing. Expect no visible change in game.
+### What it links against
 
-1. Close Farever.
-2. Copy `host/build/dxgi.dll` next to `Farever.exe`.
-3. Launch, then read `farever-modkit.log` in the game folder. You should see
-   the attach line and one line per module that called through the proxy.
-4. To remove: delete that `dxgi.dll`.
+The proxy loads before the game's own renderer, and a proxy that fails to
+load takes the game with it — `dx12.hdll` imports `dxgi.dll` statically, so a
+missing dependency is a game that will not start rather than a mod that does
+not work. So the import list is worth keeping short and boring, and CI prints
+it on every build:
 
-If the game fails to start, deleting the file fully reverts it — the proxy is
-a single file with no installer and no registry writes.
+```
+ADVAPI32.dll  d3d12.dll  D3DCOMPILER_47.dll  dxgi.dll  GDI32.dll
+KERNEL32.dll  USER32.dll
+```
 
-**Coexistence.** `dinput8.dll` (farever-minimap) imports `CreateDXGIFactory1`,
-so with both installed its calls route through this proxy before reaching the
-real DLL. Stage 1 only logs and forwards, so that is harmless — but the two are
-not a supported combination, and once stage 3 adds an overlay you should run
-one or the other.
+All of them ship with Windows 10 and 11. There is **no** `VCRUNTIME` or
+`MSVCP` in that list, which is the point of `/MT`: a static CRT means the
+player does not need the Visual C++ redistributable installed. `dxgi.dll` in
+its own import list is this proxy calling `CreateDXGIFactory1` and reaching
+its own export, which forwards to the real DLL by absolute path.
+
+## Packaging a release
+
+```bash
+node tools/package.mjs --build
+```
+
+Writes `dist/farever-modkit-<version>.zip`: the DLL, `install.cmd`,
+`uninstall.cmd`, the two generators with the libraries they need, `LICENSE`,
+a standalone `README.txt`, and `build-info.json` recording which game build
+the DLL's offsets were compiled against — which is what lets the installer
+refuse to install into a game it could not read.
+
+Nothing generated from the game goes in. The item names, icons, loot tables
+and level data belong to Shiro Games; the generators ship and the haul does
+not, which is why installing needs Node and a copy of the game rather than
+being a drag and drop.
+
+Tagging `v<version>` runs the same script on a clean Windows runner and
+attaches the archive to a GitHub release, so what people download is built
+from the tag rather than uploaded from a laptop. The version lives in
+`host/src/version.h`, the release workflow refuses a tag that disagrees with
+it, and the host logs it on attach.
+
+## Coexistence
+
+`dinput8.dll` (farever-minimap) imports `CreateDXGIFactory1`, so with both
+installed its calls route through this proxy before reaching the real DLL.
+That part is harmless. But both draw an overlay, and that is not a supported
+combination — run one or the other.
 
 ## Safety notes
 
@@ -643,4 +684,16 @@ one or the other.
 - `DllMain` does the minimum under the loader lock: no dependent
   `LoadLibrary`, no thread sync. The real DLL resolves lazily on the first
   forwarded call.
-- Stage 1 does no vtable patching, no memory reads, and no writes to the game.
+- **Nothing in the game's own state is ever written.** Every read goes
+  through one function, `mem_read`, which checks the page is readable and
+  then does the copy inside `__try`/`__except`; a pointer that has gone stale
+  costs a `false`, not a crash. Candidates are validated against the type
+  they are supposed to be as they are found, and the whole reader is gated on
+  the bytecode hash the offsets were generated from — a patched game means
+  every read is disabled, not that stale pointers get walked.
+- The only memory the host writes is **three entries in two COM vtables**:
+  `Present` and `ResizeBuffers` on the swap chain, and `ExecuteCommandLists`
+  on the command queue, so the overlay can draw after the game has. That is
+  DXGI's and D3D12's memory, not the game's, and no game code is patched.
+- Clicks that fall outside the host's own rectangles are passed straight
+  through, so the game still receives them.

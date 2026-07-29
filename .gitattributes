@@ -1,0 +1,40 @@
+# Normalise line endings so a clone is the same on every machine.
+#
+# Without this, whoever clones on Windows gets CRLF in their working tree and
+# whoever clones on Linux gets LF, and the first commit from either one
+# rewrites every line of the files the other touched. Text is stored LF in
+# the repository and checked out as whatever the platform wants.
+* text=auto
+
+# The batch files are only ever run by cmd.exe, which wants CRLF - a label or
+# a `goto` target with a bare LF has been known to misbehave.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Everything else is LF on disk everywhere, including on Windows: MSVC, node
+# and every editor in use here read LF fine, and it keeps diffs honest.
+*.c    text eol=lf
+*.cpp  text eol=lf
+*.h    text eol=lf
+*.def  text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.lua  text eol=lf
+*.md   text eol=lf
+*.tsv  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Binary, so git never tries to fix their line endings or diff them as text.
+*.dll  binary
+*.exe  binary
+*.dds  binary
+*.pak  binary
+*.dat  binary
+*.png  binary
+*.zip  binary
+
+# Generated. Marking it keeps it out of diffs by default and stops it
+# skewing the language statistics on the repository page.
+host/src/offsets.gen.h linguist-generated=true

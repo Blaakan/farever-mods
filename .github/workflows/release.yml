@@ -1,0 +1,83 @@
+name: release
+
+# Tag a commit and the download appears. The archive is built by the runner
+# rather than uploaded from a laptop, so what people install is exactly what
+# is in the repository at that tag - which is the only claim worth making
+# about an unsigned DLL that loads into a game.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build
+        shell: cmd
+        run: host\build.cmd
+
+      - name: Package
+        shell: cmd
+        run: node tools\package.mjs
+
+      # The tag and host/src/version.h have to agree, or the archive people
+      # download is named one thing and reports another in the log.
+      - name: Tag matches the version in the source
+        shell: pwsh
+        run: |
+          $tag = ("${{ github.event.inputs.tag || github.ref_name }}") -replace '^v',''
+          $src = (Select-String -Path host/src/version.h -Pattern '#define FMK_VERSION "([^"]+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $src) {
+            throw "tag v$tag does not match FMK_VERSION $src in host/src/version.h"
+          }
+          Write-Host "version $src"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Install [Node.js](https://nodejs.org/) (LTS) if you do not have it.
+               The item database, icons and routes are built from **your** copy of
+               the game — that data belongs to Shiro Games and is not ours to put
+               in a download.
+            2. Close Farever.
+            3. Download the zip below, **right-click → Properties → Unblock**, extract
+               it anywhere, and run `install.cmd`.
+
+            Press **F8** in game. To remove it, run `uninstall.cmd` or delete the one
+            `dxgi.dll` next to `Farever.exe`.
+
+            ### If Windows or your antivirus complains
+
+            It will. This is an unsigned DLL, downloaded from the internet, that loads
+            into a game — the same shape as things that are not honest, and scanners
+            cannot tell the difference. The whole thing is source and builds in one
+            command if you would rather not take our word for it.
+
+            ### Game updates
+
+            The field offsets the reader walks are compiled in, so when Farever
+            updates this build stops reading rather than reading the wrong thing: the
+            atlas goes empty and `farever-modkit.log` says why. `build-info.json` in
+            the archive records which game build it was made for, and the installer
+            checks it before touching anything.

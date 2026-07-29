@@ -9,3 +9,37 @@ tools/out/
 
 # Native host build artefacts
 host/build/
+
+# Release archives, built by tools/package.mjs. The download comes from a CI
+# run against a tag, not from whatever happens to be on somebody's disk.
+dist/
+
+# Data files the generators install next to the game. If somebody runs the
+# tools from inside the repository, these must not follow the code out of it -
+# same reason as tools/out.
+farever-atlas.tsv
+farever-atlas-icons.dds
+farever-routes.txt
+farever-routes-custom.txt
+farever-collection.json
+farever-inventory-*.json
+farever-jobs-*.json
+farever-nav-state.txt
+farever-modkit.ini
+
+# MSVC and editor leavings
+.vs/
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk
+*.suo
+*.user
+.vscode/
+.idea/
+
+# Windows and macOS
+Thumbs.db
+desktop.ini
+.DS_Store

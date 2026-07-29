@@ -101,28 +101,66 @@ Tolerated for personal use, not endorsed. Read
 
 ### The Collection Atlas (standalone)
 
-Needs the MSVC C++ x64 toolset to build, and your own copy of the game to
-generate its data from.
+1. Install **[Node.js](https://nodejs.org/)** (LTS) if you do not have it —
+   `winget install OpenJS.NodeJS.LTS` does it.
+2. Download the latest zip from
+   **[Releases](https://github.com/Blaakan/farever-mods/releases)**.
+3. Right-click the zip → **Properties** → **Unblock**, then extract it
+   anywhere.
+4. Close Farever, and run **`install.cmd`**.
+
+It finds your install through Steam's own library list, builds the item
+database out of your copy of the game, and copies one `dxgi.dll` next to
+`Farever.exe`. Launch, and press **F8**.
+
+If it cannot find the game, tell it:
+
+```bash
+install.cmd --game "D:\SteamLibrary\steamapps\common\Farever"
+```
+
+**Why Node.js.** The atlas is 1639 items with the game's own names, icons,
+descriptions and loot tables. That is Shiro Games' data, not ours to put in a
+download — so the generators ship and the haul does not, and they run on Node.
+It is used once at install time and never while you play.
+
+**Why Windows will complain.** It is an unsigned DLL, downloaded from the
+internet, that loads into a game. So is malware, and a scanner cannot tell the
+difference by looking. SmartScreen: *More info* → *Run anyway*. If you would
+rather not take anyone's word for it, everything here is source and builds in
+one command — see below.
+
+To remove it: run `uninstall.cmd`, or delete that one `dxgi.dll`. There is no
+installer, no service and no registry key.
+
+### From source
+
+Needs the MSVC C++ x64 toolset — Visual Studio 2022 Community or the
+standalone Build Tools, with **Desktop development with C++**.
 
 ```bash
 host/build.cmd
 ```
 
 ```bash
-node tools/gen-offsets.mjs && node tools/gen-atlas.mjs && node tools/gen-routes.mjs
+node tools/gen-offsets.mjs && install.cmd
 ```
 
-The first reads the game's bytecode for the field offsets the reader needs;
-the second builds the item database and icon atlas out of the game's own
-files; the third reads the world's level tiles for the starter route set.
-All three copy their output next to `Farever.exe`. Then put
-`host/build/dxgi.dll` in that same folder and launch. **F8** opens it.
+`gen-offsets` reads the game's bytecode for the field offsets the reader
+needs; `install.cmd` builds the item database and the route set and puts
+everything, including the DLL, next to `Farever.exe`.
 
-Re-run all three after a game patch. The host refuses to read memory when the
-bytecode hash does not match what its offsets were generated from, so a
-patch degrades to "does nothing" rather than to a crash.
+**After a game patch**, one command does the lot:
 
-To remove it, delete that one `dxgi.dll`.
+```bash
+node tools/update.mjs --fix
+```
+
+It diffs the field offsets so you see exactly what moved, regenerates them,
+rebuilds and reinstalls. Until you do, the host refuses to read memory at all
+— the bytecode hash it was built against is compiled in — so a patch degrades
+to "does nothing", never to a crash. Re-run `install.cmd` afterwards to
+refresh the atlas data.
 
 ### The plugins (need farever-minimap)
 
@@ -137,7 +175,21 @@ To remove it, delete that one `dxgi.dll`.
 **The Atlas** takes about twenty seconds after launch to find its way around,
 then works from the main menu onward; the collection fills in once a
 character is in the world. `farever-modkit.log`, next to the game, narrates
-what it found. If something looks wrong, that file usually names the reason.
+what it found. If something looks wrong, that file usually names the reason —
+it opens with the mod version and the game build it verified against, which is
+the first thing worth quoting in a bug report.
+
+Three things it might say:
+
+| In the log | What it means |
+|---|---|
+| `build: verified, offsets apply` | working |
+| `build: MISMATCH` | the game was patched since this build. Every read is disabled, so the mod does nothing rather than something wrong. Get a newer release, or `node tools/update.mjs --fix` |
+| `atlas_ui: ... farever-atlas.tsv missing` | the item database was never built. Run `install.cmd` |
+
+**Running alongside farever-minimap** is not supported. That mod is a
+`dinput8.dll` and this one is a `dxgi.dll`, so they load together and both
+draw an overlay. Pick one.
 
 **Collection Atlas (Lua)** works immediately — it reads the POI table
 farever-minimap ships (1224 entries on Siagarta, including 147 chests and 199
@@ -202,7 +254,11 @@ Commit the tool, not the haul. Details and naming conventions:
 ## Layout
 
 ```
+install.cmd                install into your game - the front door
+uninstall.cmd              take it back out
 host/                      the standalone mod host - see host/README.md
+  build.cmd                  MSVC build, toolset found via vswhere
+  src/version.h              the version, in one place
   src/dllmain.cpp            dxgi proxy, worker threads, build-hash gate
   src/hl_runtime.*           HashLink's own structures; validated reads
   src/hl_scan.cpp            finding objects without hooks
@@ -215,19 +271,24 @@ host/                      the standalone mod host - see host/README.md
   src/mapwatch.*             waypoints from the game's own map, read-only
   src/loot.*                 the Recent Loots feed
 tools/
+  install.mjs              what install.cmd runs: find, generate, copy, check
+  package.mjs              build the release zip
   gen-offsets.mjs          field offsets -> host/src/offsets.gen.h
   gen-atlas.mjs            the Atlas database: item TSV + BC7 icon atlas
   gen-routes.mjs           the generated route set, out of the world's tiles
   scan-hlboot.mjs          HashLink bytecode string-table extractor
   scan-hltypes.mjs         HashLink type/field-offset extractor
   pak-extract.mjs          Shiro/Heaps .pak reader (list + extract)
+  pe-imports.mjs           what a PE imports and exports
   update.mjs               post-patch flow
+  lib/game.mjs             finding the install, on anyone's machine
   lib/pak.mjs              the .pak format, as a library
   lib/hbson.mjs            the prefab format, as a library
   atlas-overrides.tsv      hand-curated corrections to the generated data
   check-plugins.mjs        static/sandbox checks for the Lua plugins
   run-harness.mjs          runtime tests for the Lua plugins
   harness/mock_host.lua    mock of the plugin API
+.github/workflows/         build on a clean runner; tag -> release
 plugins/
   collection_atlas.lua     the earlier tracker, for farever-minimap
   aura_forge.lua           the HUD
