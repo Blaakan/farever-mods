@@ -13,8 +13,8 @@ It answers "what exists, what do I have, and where do I get the rest" for
 every collectible category in the game.
 
 - **1639 entries across 13 pages** — appearances, mounts, pets, gliders,
-  trinkets, weapons, consumables, materials, recipes, augments, misc, runes,
-  and a bestiary — each with the game's own icon, name and description
+  trinkets, weapons, consumables, materials, recipes, augments, misc,
+  creatures and runes — each with the game's own icon, name and description
 - **Ownership read from memory**, per stack: *Bank x3 - Lv 25 - Rare*,
   *Equipped (Emsei) - Lv 5*, including characters who are not logged in
 - **How to acquire** each item, inverted from the game's own loot tables,
@@ -64,12 +64,18 @@ never reported at all.
 
 ## Everything else
 
+The first two rows are this repo's own runtime and toolchain, and need nothing
+installed but the game. The last three are **Lua plugins**, written before the
+host existed: they run inside
+[farever-minimap](https://github.com/ramisotti13-eng/farever-minimap)'s sandbox
+and only work if you have that mod instead of this one.
+
 | Component | What it does |
 |---|---|
 | **[host/](host/README.md)** | The standalone mod host: a `dxgi.dll` proxy, a D3D12 overlay, and a HashLink memory reader. The Atlas runs on this |
 | **[tools/](docs/scanning.md)** | The extraction toolchain: `.pak` archives, the CastleDB, HashLink type offsets, the world's prefabs |
-| **[Collection Atlas (Lua)](docs/collection-atlas.md)** | The earlier version, a plugin for [farever-minimap](https://github.com/ramisotti13-eng/farever-minimap). Superseded by the host, kept because it works without it |
-| **[AuraForge](docs/aura-forge.md)** | A WeakAuras-style HUD: movable buff bars, cooldown bars, rule-driven alerts. Still a farever-minimap plugin |
+| **[Collection Atlas (Lua)](docs/collection-atlas.md)** | The original tracker. Sees only what the sandbox exposes — no account collection, no other characters' bags. Still maintained, but the host version above is the one to install |
+| **[AuraForge](docs/aura-forge.md)** | A WeakAuras-style HUD: movable buff bars, cooldown bars, rule-driven alerts. Not ported to the host yet |
 | **[id_scanner](docs/scanning.md)** | Discovery tool: probes the live plugin API, records every event and internal id your build exposes |
 
 ## Why any of this was hard
@@ -185,11 +191,16 @@ add an item or move a node, not just shift a field. Until you run it the host
 refuses to read memory at all, so a patch degrades to "does nothing", never to
 a crash.
 
-### The plugins (need farever-minimap)
+### The Lua plugins (legacy, and need farever-minimap instead)
+
+Nothing above requires these. They are the pre-host versions, and because they
+need the other mod's `dinput8.dll` you are choosing between the two — see the
+conflict note above.
 
 1. Install [farever-minimap](https://github.com/ramisotti13-eng/farever-minimap)
    (extract into the folder containing `Farever.exe`).
-2. Copy either file from [`plugins/`](plugins/) into `<Farever>\data\plugins\`.
+2. Copy any of the three files from [`plugins/`](plugins/) into
+   `<Farever>\data\plugins\`.
 3. The mod picks up new files about a second later, no restart. Editing a
    plugin while the game runs hot-reloads it on save.
 
@@ -210,14 +221,11 @@ Three things it might say:
 | `build: MISMATCH` | the game was patched since this build. Every read is disabled, so the mod does nothing rather than something wrong. Get a newer release, or `node tools/update.mjs --fix` |
 | `atlas_ui: ... farever-atlas.tsv missing` | the item database was never built. Run `install.cmd` |
 
-**Running alongside farever-minimap** is not supported. That mod is a
-`dinput8.dll` and this one is a `dxgi.dll`, so they load together and both
-draw an overlay. Pick one.
-
 **Collection Atlas (Lua)** works immediately — it reads the POI table
-farever-minimap ships (1224 entries on Siagarta, including 147 chests and 199
-red orbs). Open your bag once so it can scan your inventory for the discovery
-log.
+farever-minimap ships, 1224 entries on Siagarta: 313 plants, 283 red orbs,
+263 ore nodes, 177 chests, 132 activities and the rest respawn points,
+obelisks, dungeons and merchants. Open your bag once so it can scan your
+inventory for the discovery log.
 
 **AuraForge** needs one setting: go to the **Layout** tab and pick your
 resolution. The plugin API cannot query screen size, so anchors depend on it.
@@ -274,6 +282,13 @@ Output lands in `tools/out/`, which is gitignored — it is bulk game data.
 Commit the tool, not the haul. Details and naming conventions:
 **[docs/scanning.md](docs/scanning.md)**.
 
+CI runs all of the above plus a build of the DLL on a clean Windows runner
+with no game installed, which is what catches "works on my computer". The
+house rules that a change has to keep — reads only, generated offsets, and
+saying so when the data does not know — are in
+**[CONTRIBUTING.md](CONTRIBUTING.md)**, along with the one-line change that
+helps most: a missing source filled in in `tools/atlas-overrides.tsv`.
+
 ## Layout
 
 ```
@@ -282,11 +297,14 @@ uninstall.cmd              take it back out
 host/                      the standalone mod host - see host/README.md
   build.cmd                  MSVC build, toolset found via vswhere
   src/version.h              the version, in one place
+  src/offsets.gen.h          generated, and committed so CI can build
   src/dllmain.cpp            dxgi proxy, worker threads, build-hash gate
+  src/dxgi_wrap.*            forwarding the real dxgi.dll's exports
   src/hl_runtime.*           HashLink's own structures; validated reads
   src/hl_scan.cpp            finding objects without hooks
   src/hl_reader.*            the game-state surface: collection, items, codex, jobs
-  src/overlay_d3d12.*        Present hook, font atlas, textured quads
+  src/overlay.h              the drawing API the UI code is built out of
+  src/overlay_d3d12.cpp      Present hook, font atlas, textured quads
   src/input.*                WndProc subclass: toggle, mouse, text
   src/atlas_ui.*             the Collection Atlas window
   src/navigator.*            the waypoint arrow, and following a route
@@ -311,13 +329,17 @@ tools/
   check-plugins.mjs        static/sandbox checks for the Lua plugins
   run-harness.mjs          runtime tests for the Lua plugins
   harness/mock_host.lua    mock of the plugin API
-.github/workflows/         build on a clean runner; tag -> release
-plugins/
-  collection_atlas.lua     the earlier tracker, for farever-minimap
+.github/
+  workflows/ci.yml         proves it builds on a machine that is not mine
+  workflows/release.yml    tag -> the runner builds the zip -> release
+  ISSUE_TEMPLATE/          bug and data reports, both asking for the log
+plugins/                   the legacy Lua plugins, for farever-minimap
+  collection_atlas.lua     the original tracker
   aura_forge.lua           the HUD
   id_scanner.lua           API / event / id discovery
 docs/                      usage, design notes and limitations
 RESEARCH.md                how Farever can be modded, with sources
+CONTRIBUTING.md            setup, what CI checks, and the read-only house rules
 ```
 
 ## Licence
