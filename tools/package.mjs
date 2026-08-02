@@ -98,7 +98,7 @@ mkdirSync(join(stage, 'tools', 'lib'), { recursive: true });
 // scripts out of a player's download.
 const TOOLS = ['install.mjs', 'gen-atlas.mjs', 'gen-routes.mjs',
                'atlas-overrides.tsv'];
-const LIB = ['game.mjs', 'pak.mjs', 'hbson.mjs'];
+const LIB = ['game.mjs', 'pak.mjs', 'hbson.mjs', 'dllswap.mjs'];
 
 copyFileSync(dll, join(stage, 'dxgi.dll'));
 for (const f of ['install.cmd', 'uninstall.cmd', 'LICENSE'])
@@ -115,6 +115,35 @@ writeFileSync(join(stage, 'build-info.json'), JSON.stringify({
 }, null, 2) + '\n');
 
 writeFileSync(join(stage, 'README.txt'), readme(version, gameSha));
+
+// --- does the staged installer actually load? -------------------------------
+//
+// TOOLS and LIB above are a hand-written manifest, so adding an import to
+// install.mjs without adding its file here produces a zip that dies on
+// `Cannot find module` for everyone who downloads it - and no other check
+// catches that, because in a checkout the file is there. Running the staged
+// copy against a path that is not a game exercises every import and stops at
+// the first thing the installer does, changing nothing.
+{
+  // Rejecting the path is a non-zero exit, so the throw is the success case
+  // here and both streams have to be read out of it.
+  let probe = '';
+  try {
+    probe = execFileSync(process.execPath,
+      [join(stage, 'tools', 'install.mjs'), '--game', 'Z:\\not-a-game'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: stage });
+  } catch (e) {
+    probe = `${e.stdout || ''}${e.stderr || ''}`;
+  }
+  if (!/Not a Farever install/.test(probe)) {
+    console.error('');
+    console.error('the staged installer did not reach its own game check:');
+    console.error(probe.trim() || '(no output)');
+    console.error('');
+    console.error('something it imports is probably missing from TOOLS/LIB.');
+    process.exit(1);
+  }
+}
 
 // --- zip --------------------------------------------------------------------
 //
@@ -153,8 +182,13 @@ function readme(version, gameSha) {
     '     It is needed because the item database, icons and routes are built',
     '     from YOUR copy of the game - that data belongs to Shiro Games and',
     '     is not ours to put in a download.',
-    '  2. Close Farever.',
-    '  3. Run install.cmd.',
+    '  2. Run install.cmd.',
+    '',
+    '  You do not have to close the game first. Windows will not let a loaded',
+    '  DLL be overwritten, but it will let it be renamed - so the installer',
+    '  moves the old one aside, puts the new one in its place, and sweeps up',
+    '  the leftover on its next run. The session you have open carries on with',
+    '  the DLL it already loaded; restart the game to pick up the new one.',
     '',
     '  It finds the game through Steam, builds the data files, and copies one',
     '  dxgi.dll next to Farever.exe. If it cannot find the game:',

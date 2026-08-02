@@ -24,12 +24,13 @@
 //   install state     whether the built DLL is actually deployed and current.
 // ---------------------------------------------------------------------------
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { findGame } from './lib/game.mjs';
+import { installDll as swapDll, sweepStale } from './lib/dllswap.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -207,15 +208,21 @@ if (!existsSync(built)) {
 
 function installDll() {
   try {
-    copyFileSync(built, installed);
+    // A running game no longer stops this: the old DLL is moved aside and
+    // the new one takes its place, which the game picks up on restart.
+    const how = swapDll(built, installed);
+    if (how === 'hot') {
+      say('            the game is running, so the new DLL is in place but');
+      say('            not in use - RESTART the game to pick it up');
+    }
+    sweepStale(dirname(installed));
     return true;
   } catch (e) {
     say(`            FAILED to copy ${built}`);
     say(`                          to ${installed}`);
     say(`            ${e.message}`);
-    say('            Close the game if it is running - Windows holds a');
-    say('            loaded DLL open - or run this from an elevated prompt');
-    say('            if the game lives under Program Files.');
+    say('            Run this from an elevated prompt if the game lives');
+    say('            under Program Files.');
     problems.push('host DLL could not be installed');
     return false;
   }

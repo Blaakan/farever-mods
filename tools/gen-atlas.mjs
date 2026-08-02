@@ -102,6 +102,65 @@ function typeChain(typeId) {
   return chain;
 }
 
+// --- weapon mastery ---------------------------------------------------------
+//
+// Every weapon levels separately, and levelling one is killing things with
+// it. Nothing about the track is stored in the save: the game keeps a kill
+// count per weapon and derives the rest, so the shape of the track is a
+// property of the weapon and belongs here rather than in the reader.
+//
+//   points = min(floor(kills / killsPerPoint), maxPoints)    Progress.hx:507
+//   maxPoints = upgradeableSkills * (WeaponSkill_MaxRank - 1)  HItem.hx:308
+//
+// `killsPerPoint` is the off-hand constant for anything that can go in the
+// off-hand slot (Progress.hx:475), which in practice is the shields.
+const constants = new Map(sheet('constant').lines.map((l) => [l.id, l.v]));
+function constNumber(id) {
+  const v = constants.get(id) || {};
+  const n = v.int !== undefined ? v.int : v.float;
+  return typeof n === 'number' ? n : null;
+}
+const WEAPON_MAX_RANK = constNumber('WeaponSkill_MaxRank');
+const KILLS_PER_POINT = constNumber('WeaponKills_PerSkillRankPoint');
+const KILLS_PER_POINT_OFFHAND = constNumber('WeaponKills_PerSkillRankPoint_OffHand');
+
+// Which skills a point can be spent on. Taken by name rather than by the
+// numbers the game compares against, because those are positions in the
+// enum and a patch that inserts a type ahead of them shifts every one.
+const SKILL_TYPES = (sheet('skill').columns.find((c) => c.name === 'type') || {})
+  .typeStr?.split(':').slice(1).join(':').split(',') || [];
+const UPGRADEABLE_SKILLS = new Set(
+  ['AttackCombo', 'WeaponSkill', 'WeaponPassive']
+    .map((n) => SKILL_TYPES.indexOf(n))
+    .filter((i) => i >= 0));
+
+const skillById = new Map(skills.map((s) => [s.id, s]));
+
+const masteryKnown =
+  WEAPON_MAX_RANK !== null && KILLS_PER_POINT !== null &&
+  KILLS_PER_POINT_OFFHAND !== null && UPGRADEABLE_SKILLS.size === 3;
+if (!masteryKnown) {
+  console.warn('WARNING: the weapon mastery constants moved - the Mastery');
+  console.warn('  page will say it does not know rather than guess. Check');
+  console.warn('  WeaponSkill_MaxRank / WeaponKills_PerSkillRankPoint and');
+  console.warn('  the AttackCombo/WeaponSkill/WeaponPassive skill types.');
+}
+
+// "<levels>/<kills per level>", or null when the shape above stopped
+// holding. A weapon with no upgradeable skills has no track at all, and
+// says so with a zero rather than by going missing.
+function masteryTrack(item) {
+  if (!masteryKnown) return null;
+  let upgradeable = 0;
+  for (const s of item.skills || []) {
+    const sk = skillById.get(s.skill);
+    if (sk && UPGRADEABLE_SKILLS.has(sk.type)) upgradeable++;
+  }
+  const offhand = typeChain(item.type || '').includes('OffhandWeapon');
+  const perPoint = offhand ? KILLS_PER_POINT_OFFHAND : KILLS_PER_POINT;
+  return `${upgradeable * (WEAPON_MAX_RANK - 1)}/${perPoint}`;
+}
+
 // --- categories -------------------------------------------------------------
 
 const TRINKET_TYPES = new Set(['GearTrinket', 'GearNeck', 'GearFinger']);
@@ -183,6 +242,11 @@ function tagsFor(item, category) {
         if (cls) tags.push(`class:${cls}`);
       }
       if (!tags.length) tags.push('class:Any');
+      // How long this weapon's mastery track is, for the Mastery page. Not
+      // a facet: it is a lookup key, like `craft:`, and the atlas keeps it
+      // out of the filter row.
+      const track = masteryTrack(item);
+      if (track) tags.push(`mastery:${track}`);
       break;
     }
     case 'consumables':

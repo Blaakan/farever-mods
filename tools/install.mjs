@@ -22,13 +22,14 @@
 // installed, and "installed and silent" is the worst outcome available.
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync, copyFileSync, unlinkSync, openSync,
+import { existsSync, readFileSync, unlinkSync, openSync,
          closeSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { requireGame } from './lib/game.mjs';
+import { installDll, sweepStale } from './lib/dllswap.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -103,11 +104,9 @@ function isOurs(path) {
   }
 }
 
-// Whether the DLL can be replaced at all, asked before anything slow happens.
-// Windows locks a loaded DLL, so reinstalling over a running game fails - and
-// finding that out after two minutes of generating the item database, with
-// the data files already overwritten, is a bad way to learn it. An absent
-// file is fine: that is a first install.
+// Whether the DLL can be overwritten in place. Windows locks a loaded DLL, so
+// this is false exactly while the game is running. An absent file is fine:
+// that is a first install.
 function dllIsWritable(target) {
   if (!existsSync(target)) return true;
   try {
@@ -117,6 +116,10 @@ function dllIsWritable(target) {
     return false;
   }
 }
+
+// Replacing a DLL the game currently has loaded is its own small problem;
+// tools/lib/dllswap.mjs is where it lives, because tools/update.mjs has to
+// solve exactly the same one.
 
 // --- uninstall --------------------------------------------------------------
 
@@ -138,6 +141,11 @@ function uninstall(game) {
       return 1;
     }
   }
+  // Superseded DLLs from hot installs. Unlike the one above these can be
+  // left behind by a normal, successful run, so uninstall has to know about
+  // them or "the game is back to stock" would not be true.
+  const swept = sweepStale(game);
+  if (swept) say(`          and ${swept} superseded cop${swept === 1 ? 'y' : 'ies'}`);
 
   const removed = [];
   const kept = [];
@@ -231,15 +239,17 @@ function install(game) {
 
   // --- can we finish, before we start? ---
   const target = join(game, 'dxgi.dll');
-  if (!dllIsWritable(target)) {
+  // A locked DLL means the game is running, which is no longer a reason to
+  // stop - it only changes how the swap is done and when it takes effect.
+  // Said up front rather than at the end, because the data files below are
+  // rebuilt either way and the game will not re-read those until it restarts
+  // either.
+  const running = !dllIsWritable(target);
+  if (running) {
     say('');
-    say('STOP  the game is running.');
-    say('');
-    say(`      ${target} is locked, which on Windows means it is loaded into`);
-    say('      a running process. Close Farever and run this again.');
-    say('');
-    say('      Nothing has been changed.');
-    return 1;
+    say('note  the game is running. Installing anyway: the new DLL goes in');
+    say('      beside the running one, and the game picks it up when you');
+    say('      restart it. Nothing changes under the session you have open.');
   }
   if (existsSync(target) && !isOurs(target) && !FORCE) {
     say('');
@@ -280,21 +290,31 @@ function install(game) {
   }
 
   // --- the DLL, last, because it is the part that changes what loads ---
+  let how;
   try {
-    copyFileSync(dll, target);
+    how = installDll(dll, target);
   } catch (e) {
     say('');
     say(`FAIL  could not write ${target}`);
     say(`      ${e.message}`);
     say('');
-    say('      If the game is running, close it - Windows holds a loaded');
-    say('      DLL open. If the game lives under Program Files, run this');
-    say('      from an administrator command prompt.');
+    say('      If the game lives under Program Files, run this from an');
+    say('      administrator command prompt. Closing the game first also');
+    say('      removes any doubt.');
     return 1;
   }
+  // Leftovers from previous hot installs, once whatever had them mapped has
+  // gone. Silent when there is nothing to do, which is the normal case.
+  const swept = sweepStale(game);
+  if (swept) say(`cleaned ${swept} superseded DLL${swept === 1 ? '' : 's'}`);
 
   say('');
   say(`installed ${target}`);
+  if (how === 'hot') {
+    say('');
+    say('The game is still running on the old one. RESTART IT to pick this');
+    say('up - until then the mod behaves exactly as it did before.');
+  }
   say('');
   say('Launch the game and press F8.');
   say('');
