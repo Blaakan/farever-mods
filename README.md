@@ -97,19 +97,19 @@ anywhere in the client, and no chat command for one. This draws its own
 window over the game's message area, out of the history the game already
 keeps.
 
-**What has been seen working, and what has not.** This has now been run in a
-live session, which is worth being exact about rather than summarising. Seen
-on screen: the session's scrollback read out of `ChatClient.history`, the
-anonymous-structure decode, the channel classification, whisper targets
-resolved to a name (*To Emsey: test whisper*), the timestamps the game records
-and never shows, the channel chips, and the window drawing over the game's
-message area. Two things failed in that run and have been fixed since — the
-chat box was looked for in `ui.BaseUI.elements`, where it does not live (the
-game's own route is `gui.gameRoot.hud.chat`), and the message area was sized
-by guesswork rather than by reading the `h2d.Flow` fields that hold it.
-**The `!!` command surface is the one part still unconfirmed:** it did not
-fire in that session, the cause was found and fixed, and no command has yet
-been seen to run in game.
+**What has been seen working, and what has not.** Seen on screen across three
+live sessions: the window drawing over the game's message area and aligned to
+it, the session's scrollback out of `ChatClient.history`, the channel
+classification, whisper targets resolved to a name (*To Emsey: test whisper*),
+the timestamps the game records and never shows, the channel chips, and the
+`!!` commands themselves — `!!help`, `!!link`, and `!!ignore` / `!!unignore`,
+a player's lines leaving the window and coming back on undo, backlog included.
+Three things failed first and were fixed: the chat box was looked for in
+`ui.BaseUI.elements`, where it does not live (`gui.gameRoot.hud.chat` is the
+game's own route); the message area was sized by guesswork rather than from
+the `h2d.Flow` fields that hold it; and `!!link` searched the atlas by id, so
+`!!link Credence` missed the item whose id is `Bow_Craft`. Still unseen in
+game: `!!size`, `!!opacity`, and the `Ignored N` chip's click-to-remove panel.
 
 - **The whole session's scrollback.** `ChatClient.history` is appended to and
   never trimmed, so everything said since you logged in is still there —
@@ -126,9 +126,11 @@ been seen to run in game.
 - **Item links** — `[Copper Ore]` in anybody's message draws with that item's
   own icon and rarity colour, and `!!link <name>` copies one to the clipboard
   ready to paste. Everyone without the mod sees the plain text they always
-  did. This works from a typed name for gathered materials, consumables and
-  recipes; most of the atlas is keyed by an internal id instead, and for those
-  the id is what you type — see [docs/chat.md](docs/chat.md#item-links)
+  did. Type the **display name**, the one the atlas search box matches: an id
+  is not the name with the spaces removed, and only 182 of the 1639 entries
+  have an id you could guess from the name at all — `Credence` is `Bow_Craft`.
+  Ids still work if you have one — see
+  [docs/chat.md](docs/chat.md#item-links)
 - **An optional session log**, appended to `farever-chat-log.txt`, flushed per
   line so it can be tailed while you play
 
@@ -170,6 +172,59 @@ dangerous one.
 
 Full reference — every command, every setting, the file formats:
 **[docs/chat.md](docs/chat.md)**.
+
+## Players
+
+The game's own Manage Party window shows the players within 100 units of you
+and throws the rest away. Not filters them, throws them away:
+`ui.win.GroupWindow.init` (GroupWindow.hx:58-63) walks the layer's player
+list, splits it on a squared distance against `Const.UI.GroupWindow_NearDist`,
+builds the far bucket, and then draws it **only when `Config.prefs.admin` is
+set**, under a header reading *"(ADMIN) Other loaded players ("*. The constant
+is 100, and its own CastleDB description says what it is for: *"Other players
+within this distance are shown in the Manage Party window"*. So the whole
+roster is already in this client's memory and the distance limit is
+presentation. Live, that was **18 players against the game's own 0**.
+
+The **Players** tab lists all of it — one row per player with name, class and
+distance, sortable by each, your own row and your party members marked, and
+your party spelled out above the list. Click a row and the navigator is
+pointed at that player, re-published on every poll so the arrow follows them
+as they move. **DM** copies the game's own `!to <name> ` to the clipboard, and
+**Copy** the bare name.
+
+What the page will not claim, and states on itself rather than leaving to be
+inferred:
+
+- **It is what the server chose to send this client**, not proof of who is on
+  the shard. It is worded that way throughout
+- **A distance of `-` means that player's character has not been replicated
+  here** — `st.Player.hero` is null, so there is no position and no class to
+  read, and the class cell is left blank. That is a different fact from being
+  far away, and the two are never merged
+- **You cannot tell whether anybody else is in a party.** `st.Player.group` is
+  network property bit 12, in the conditional visibility mask, so it reads
+  null for everyone except the local player. Your own party is listed and
+  nobody else's is guessed at, which is why there is no *invitable* column
+
+**There is no invite button, and that is a decision rather than an
+oversight.** The game's own invite has no distance term at all —
+`st.Group.invitePlayerReason` (Group.hx:131-139) rejects only on not being the
+leader, the target already being grouped, already being a member, or a group
+of four — so the data model would happily invite somebody the party window
+never shows you. But every route to firing it from here is a call into the
+game, and this host does not call into the game.
+
+Worth knowing because it is not obvious: whispering somebody once adds them to
+the game's **own** channel dropdown for the rest of the session
+(`processMessage` pushes a `{name, icon, value}` into `channelOptions` and
+rebuilds the dropdown, ChatBox.hx:159-162), while being whispered *at* does
+not — `ChatBox.receiveMessage` (ChatBox.hx:126-129) is four instructions,
+build the line and scroll. So the DM button is also the quickest way to get a
+reply channel for somebody who messaged you first.
+
+Seen in game: the tab and its roster, the 18 against 0. Not yet seen running:
+click-to-follow, the sortable columns, and the DM and Copy buttons.
 
 ## Everything else
 
@@ -441,6 +496,7 @@ host/                      the standalone mod host - see host/README.md
   src/mapwatch.*             waypoints from the game's own map, read-only
   src/loot.*                 the Recent Loots feed
   src/chat.*                 the chat window, and the !! command surface
+  src/players.*              the whole replicated roster, not just the near ones
 tools/
   install.mjs              what install.cmd runs: find, generate, copy, check
   package.mjs              build the release zip
@@ -456,6 +512,7 @@ tools/
   lib/game.mjs             finding the install, on anyone's machine
   lib/pak.mjs              the .pak format, as a library
   lib/hbson.mjs            the prefab format, as a library
+  lib/dllswap.mjs          replacing a DLL the game currently has mapped
   atlas-overrides.tsv      hand-curated corrections to the generated data
   check-plugins.mjs        static/sandbox checks for the Lua plugins
   run-harness.mjs          runtime tests for the Lua plugins
@@ -469,6 +526,11 @@ plugins/                   the legacy Lua plugins, for farever-minimap
   aura_forge.lua           the HUD
   id_scanner.lua           API / event / id discovery
 docs/                      usage, design notes and limitations
+  chat.md                    the chat window: commands, settings, file formats
+  players.md                 the layer roster, and what it will not claim
+  collection-atlas.md        the legacy Lua tracker
+  aura-forge.md              the legacy Lua HUD
+  scanning.md                the extraction toolchain, and its output
 RESEARCH.md                how Farever can be modded, with sources
 CONTRIBUTING.md            setup, what CI checks, and the read-only house rules
 ```

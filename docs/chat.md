@@ -8,23 +8,32 @@ Part of the standalone host ([`host/`](../host/README.md#chat)) — it needs
 nothing installed but the game and one `dxgi.dll`. It does not need the atlas
 database; the only thing a DLL-only install costs is the icons on item links.
 
-> **What has been seen working, and what has not.** This has been run in a
-> live session once. Observed on screen: the session's scrollback read out of
+> **What has been seen working, and what has not.** This has been run in three
+> live sessions. Observed on screen: the window drawing over the game's message
+> area and aligned to it, the session's scrollback read out of
 > `ChatClient.history`, the anonymous-structure decode, the channel
 > classification, whisper targets resolved to a name (*To Emsey: test
-> whisper*), the timestamps the game records and never shows, the channel
-> filter chips, and the window drawing over the game's message area.
+> whisper*), the timestamps the game records and never shows, and the channel
+> filter chips.
 >
-> Two things failed in that run and are fixed: the chat box was looked for in
-> `ui.BaseUI.elements`, where it does not live — the game's own route is
-> `gui.gameRoot.hud.chat` — and the message area was sized by guesswork rather
-> than by reading `h2d.Flow`'s `calculatedWidth`/`calculatedHeight`, which are
-> generated now.
+> **The `!!` command surface fires.** This page used to say it was the one part
+> still unconfirmed; it no longer is. `!!help` has been seen printing its list
+> into the window, `!!ignore` and `!!unignore` seen hiding a player's lines and
+> bringing them back with their backlog, and `!!link Credence` seen putting a
+> link on the clipboard — after a fix, because the lookup searched the atlas by
+> id and *Credence* is `Bow_Craft`. See [Item links](#item-links).
 >
-> **The `!!` command surface is the one part still unconfirmed.** It did not
-> fire in that session; the cause was found and fixed, but no command has yet
-> been seen to run in game. Read [How the commands
-> work](#how-the-commands-work) as a description of what the code does.
+> **Built and compiling, but not yet seen running:** `!!size`, `!!opacity`, and
+> the `Ignored N` chip with its click-to-remove panel. Read those parts of this
+> page as a description of what the code does.
+>
+> Two things failed in the first run and are fixed: the chat box was looked for
+> in `ui.BaseUI.elements`, where it does not live — the game's own route is
+> `gui.gameRoot.hud.chat` (`ui.GameUI.get_hud`, GameUI.hx:33) — and the message
+> area was sized by guesswork rather than by reading `h2d.Flow`'s
+> `calculatedWidth`/`calculatedHeight`, which are generated now. The window is
+> also opaque by default now, which is a correctness matter rather than a look:
+> see [The window](#the-window).
 
 ## What it adds over the game's chat box
 
@@ -54,7 +63,7 @@ never sent — see [How the commands work](#how-the-commands-work).
 | `!!chat` | Turns the window off and on |
 | `!!time` | Timestamps on and off |
 | `!!align` | Follow the game's chat box, or float free |
-| `!!where` | What the navigator is following, and how far through a route |
+| `!!where` | What the navigator is following, and how far through a route. A player followed from the [Players page](players.md#following-a-player) answers here by name |
 | `!!link <text>` | Copies `[Item Name]` to the clipboard, ready to paste |
 | `!!size <9-28>` | Text size; rows and item icons scale with it |
 | `!!opacity <20-100>` | How solid the window is. Default 100 — see below for why |
@@ -87,9 +96,22 @@ name at all, so an earlier version that transformed the typed name into a
 candidate id failed for the other eight. Ids are still accepted, so
 `!!link Bow_Craft` works too.
 
-Replies are drawn in the window in blue and are never filtered by the channel
-chips. They are **not** written to the log — the log is a record of what was
-said in the game.
+Replies are drawn in the window in blue, tagged `!!`, and are never filtered by
+the channel chips. They are **not** written to the log — the log is a record of
+what was said in the game.
+
+**The game's own four commands are untouched.** `!say`, `!map`, `!group` and
+`!to <name>` are what `processMessage` matches, and a line that already starts
+with `!` picks its own channel rather than the dropdown's (ChatBox.hx:133-134)
+— so `!to Emsey hello` whispers without the channel selector being clicked.
+The [Players page](players.md#the-dm-and-copy-buttons) puts `!to <name> ` on
+the clipboard for you, which is as far as a reader can help: the paste is
+yours and the send is the game's.
+
+Whispering somebody once also adds them to the game's **own** channel dropdown
+for the rest of the session, while being whispered at does not — which is worth
+knowing before you type the same `!to` twenty times. The disassembly for that
+is on the [Players page](players.md#whispering-somebody-adds-them-to-the-games-own-dropdown).
 
 ### How the commands work
 
@@ -154,8 +176,9 @@ is still the game doing it.
 An earlier build believed a Flow's size could not be generated, derived the
 height from the gap down to the `footer` and guessed the width from the saved
 one. On screen that was visibly the wrong size. The saved width is still the
-fallback if `calculatedWidth` reads as zero — mid-layout, or before the flow
-has ever been laid out — and when the rectangle cannot be read at all the
+fallback if `calculatedWidth` comes back as nothing usable — under 120 pixels,
+which is what mid-layout or a flow that has never been laid out reads as — and
+when the rectangle cannot be read at all the
 window falls back to free placement rather than quietly appearing somewhere
 unexpected. With the atlas open it says so on itself; with the atlas closed it
 does not, because the whole chip row it belongs to is only drawn then.
@@ -167,15 +190,22 @@ the rule the waypoint pill and the loot feed already follow — so over the
 world the window never eats a click.
 
 Scrolling is the mouse wheel over the window, three lines a detent, claimed
-only when the cursor is inside it and the atlas window is not drawn over it. A
+only when the cursor is inside it and the atlas window is not drawn over it —
+but **with the atlas shut as well as open**, which dragging is not. Scrollback
+that needed a second window open would not be scrollback: reading what somebody
+said a minute ago is a thing you do mid-play. Only the wheel is taken; a click
+over the frame still reaches the game's own chat box underneath. A
 `12 newer` badge in the corner says how much is below the view. Scrolling back
 is anchored to the line you are looking at, not to an index, so a message
 arriving while you read does not yank the view down; scrolling to the bottom
 re-pins it to the newest line.
 
-With the atlas open the window also grows a row of chips: one per channel,
-plus **Time** and **Aligned**. They are the same settings the commands toggle
-and they persist the same way.
+With the atlas open the window also grows a row of chips along the bottom: one
+per channel, then **Time**, **Aligned**, and `Ignored N` — the last of which
+opens [the ignore list](#the-ignore-list) above the row. The first three are
+the same settings the commands toggle and they persist the same way. A chip
+that would not fit the window's width is not drawn, so a narrow window loses
+them from the right.
 
 Long messages wrap; a single token wider than the window breaks mid-word, so
 one pasted URL cannot push a row off the edge. Messages are truncated at 600
@@ -236,7 +266,7 @@ second after anything changes.
 | `opacity` | `100` | Window opacity, 20–100 (`!!opacity`) |
 | `log` | `0` | Write `farever-chat-log.txt` |
 | `x`, `y` | unset | Free placement, in pixels |
-| `w`, `h` | unset | Free size; `w` is also the aligned width |
+| `w`, `h` | unset | Free size; `w` is also the aligned width, but only as the fallback when the game's own does not read |
 | `show_local` | `1` | Local chat |
 | `show_all` | `1` | The All channel |
 | `show_allsystem` | `1` | All-system announcements |
@@ -246,6 +276,11 @@ second after anything changes.
 
 `log` is read once, at startup, and there is no command for it: set it, then
 restart the game.
+
+`textsize` and `opacity` are clamped on the way in as well as where they are
+set. They are two of the few keys somebody will reasonably hand-edit, and a
+2-pixel font or a window at zero opacity reads as the mod being broken rather
+than as the number being out of range.
 
 ## The ignore list
 
@@ -270,6 +305,10 @@ starts a comment, blank lines are skipped:
 
 ```
 # farever-modkit chat ignore list.
+# One character name per line; '#' starts a comment. Matching is
+# case-insensitive. Edit by hand, or use !!ignore / !!unignore in
+# the game's own chat box.
+
 Someone
 SomeoneElse
 ```
@@ -277,7 +316,13 @@ SomeoneElse
 Matching is on the **whole name**, case-insensitively — there are no wildcards
 and no substrings. Duplicates are dropped, lines over 64 characters are
 ignored, and a file over 1 MB is not read at all. `!!ignore` and `!!unignore`
-rewrite the file, which loses any comments you added below the header.
+rewrite the file, header and all, which loses any comments you added to it.
+
+`!!ignore` refuses a name that would not survive that round trip, and says
+which: nothing at all, longer than 32 characters, starting with `#` (the file
+would read it back as a comment and quietly drop it on the next start), or
+containing a control character (the file is one name to a line). Refusing and
+saying why beats writing a file that reads differently from what was typed.
 
 An ignored sender is hidden in the window **and** kept out of the log: the
 point of ignoring someone is that they leave no trace. Hiding happens when the
@@ -318,13 +363,23 @@ all.
 
 ### What actually resolves
 
-The atlas is keyed by **item id** and has no name search, so `link_lookup`
-tries three exact lookups and stops at the first hit:
+`link_lookup` tries four lookups and stops at the first hit:
 
-1. the text **exactly as typed** — which is how an id is matched;
-2. the text with every non-alphanumeric character removed —
+1. the **display name**, case-insensitively (`atlas_ui_find_by_name`) — an
+   exact name wins outright, and failing that a name that appears inside
+   exactly one entry's name is taken. A fragment several items share resolves
+   to nothing;
+2. the text **exactly as typed**, against the id index — which is how an id is
+   matched;
+3. the text with every non-alphanumeric character removed —
    `Copper Ore` → `CopperOre`;
-3. that same squashed form re-cased as CamelCase — `copper ore` → `CopperOre`.
+4. that same squashed form re-cased as CamelCase — `copper ore` → `CopperOre`.
+
+Steps 2 to 4 came first and were the whole of it. The atlas's id index matches
+exactly and the id is not the name with the spaces taken out, so `!!link
+Credence` found nothing while the atlas's own search box found it immediately;
+the name search is step 1 for that reason, and the id derivations are kept
+behind it because an id typed deliberately should still work.
 
 **The ids are mostly not the display names.** An earlier version of this page
 said they were the display names with the spaces taken out; check it and they
@@ -337,9 +392,11 @@ equipped — **not one** of the 428 appearances, 64 mounts, 73 pets, 68 gliders
 or 37 weapons is reachable by name, and only 7 of 252 creatures are. Those
 carry internal ids: *Abyssal Shoulderplates* is `Shoulders_RManfish_FigAss`.
 
-So for most of the atlas the id is what you type, and the place to read one
-off is the Atlas window itself — search by name on the relevant page and the
-entry's detail panel prints its id, faintly, at the bottom.
+That is what step 1 is the answer to: the name you would type now matches
+whatever the id happens to be, for the whole database rather than one entry in
+nine. The id is still the way to be exact when a name is shared, and the place
+to read one off is the Atlas window itself — search by name on the relevant
+page and the entry's detail panel prints its id, faintly, at the bottom.
 
 Two consequences worth knowing before you rely on this:
 
@@ -418,9 +475,20 @@ box.
 - **`!!find` searches the mod's 3000-line copy**, not the game's full history,
   which for a very long session is the older part of it.
 - **Nothing is drawn out of world.** At the main menu, character select or a
-  loading screen the window is gone and the decoded lines are dropped, because
-  the client builds a new `ChatClient` for the next session and keeping an
-  index into the old one would silently skip everything the new one holds.
+  loading screen the window is gone, and it stays gone until the poll has read
+  the history once since the world came back — until then what is held could
+  still be the last character's chat.
+
+  The lines themselves are **kept** across that, and so is the index into the
+  history. An earlier build dropped both, on the grounds that the client builds
+  a new `ChatClient` for the next session; that is true of a relog and not of a
+  loading screen or a zone handover, and on every one of those it re-decoded
+  the whole session — appending a second copy of it to the log and pushing
+  every line into the window as though it had just been said. A genuinely new
+  `ChatClient` is recognised from the history instead: `localReceiveMessage`
+  never trims, so a history shorter than the index into the old one is a
+  different history. That is confirmed over two polls before anything is
+  thrown away, because acting on it wrongly is the expensive mistake.
 - **While the developer console is open the window takes no click and no
   wheel**, anywhere. The console owns the `/` key and is a password-gated
   admin surface; the host stays out of it entirely.

@@ -5,10 +5,18 @@ ship without requiring farever-minimap (and without its minimap and DPS
 meter).
 
 **Status: running in-game.** The proxy loads, the D3D12 overlay draws, the
-reader reads, and the Collection Atlas, the navigator and the Recent Loots
-feed all run on it. The chat window is the exception: it is built and compiles
-but has never been run in game. The roadmap table at the bottom says which
-stage landed when. AuraForge is still a farever-minimap plugin.
+reader reads, and the Collection Atlas, the navigator, the chat window, its
+`!!` command surface and the Players page have all been seen working on
+screen across three sessions.
+
+Parts of it still have not. The Recent Loots feed draws, but nothing in the
+log proves a gain was ever diffed. On the Players page, clicking a row to
+follow somebody, the sortable columns and the DM and Copy buttons are built
+and compile but have not been on screen. In chat, `!!size`, `!!opacity` and the
+`Ignored N` chip are in the same position. Each section below says which of
+its claims is a live observation and which is a description of the code. The
+roadmap table at the bottom says which stage landed when. AuraForge is still
+a farever-minimap plugin.
 
 ## Why `dxgi.dll`
 
@@ -219,7 +227,8 @@ Two lessons worth keeping:
 | 4a | Navigator routes (`navigator.cpp`) + the Routes page (`routes.cpp`, `tools/gen-routes.mjs`) | **working in-game** — 69 routes, 1001 waypoints; the log has a route reached and cleared |
 | 4b | Recent Loots (`loot.cpp`) | **built** — draws, but nothing in the log proves a diff landed |
 | 4c | Waypoints from the game's map (`mapwatch.cpp`) | **working in-game** — a map click became a waypoint |
-| 4d | Chat window and the `!!` command surface (`chat.cpp`, `tools/dis-hlcode.mjs`) | **built, never run in game** — compiles clean against generated offsets; nothing of it has been seen live |
+| 4d | Chat window and the `!!` command surface (`chat.cpp`, `tools/dis-hlcode.mjs`) | **working in-game** — scrollback, channels, timestamps and filters on screen; `!!help`, `!!ignore`/`!!unignore` and `!!link` all ran |
+| 4e | The Players page (`players.cpp`) | **working in-game** — 18 players listed where the game's own Manage Party window listed 0; following, sorting and DM built but unseen |
 | 5 | Packaging: `install.cmd`, `tools/package.mjs`, CI release | **built** — a release builds on a clean runner |
 
 Stage 3c replaced the original plan of porting the Lua plugins wholesale: the
@@ -236,8 +245,9 @@ dimmed. Hovering shows name, rarity, level (for levelled gear), the item's
 description and how to acquire it (crafts, loot tables, world bosses,
 vaults, merchants — inverted from the game's own CastleDB).
 
-Two of the tabs are lists rather than grids, because what they show is not a
-collection: **Mastery** (weapon mastery, below) and **Routes**.
+Three of the tabs are lists rather than grids, because what they show is not a
+collection: **Mastery** (weapon mastery, below), **Routes**, and **Players**
+(the layer roster, below).
 
 - **F8** toggles the window, **Escape** closes it
 - drag the title bar to move it; position, and the active tab, persist in
@@ -350,9 +360,9 @@ reads into a fixed buffer.)
 
 ### The Routes page
 
-A thirteenth tab in the atlas window, listing every route with its waypoint
-count, its mode, and the distance to its nearest waypoint - the one number
-that says whether it is worth starting from where you stand.
+One of the three tabs past the thirteen category pages, listing every route
+with its waypoint count, its mode, and the distance to its nearest waypoint -
+the one number that says whether it is worth starting from where you stand.
 
 - **Start / Restart / Skip / Stop** for whatever is being followed. Skip and
   stop are also on keys — **F10** skips the waypoint being aimed at,
@@ -769,24 +779,31 @@ session's whole scrollback, timestamps, per-channel filters, an ignore list
 the game does not have, item links, and a command language typed into the
 game's own chat box.
 
-**Run in game once, and worth being exact about which parts that covers.**
+**Run in game, and worth being exact about which parts that covers.**
 
-- **Seen working on screen:** the session's scrollback out of
+- **Seen working on screen:** the window drawing over the game's own message
+  area and aligned to it, the session's scrollback out of
   `ChatClient.history`, the anonymous-structure decode, `st.Channel`
   classification, whisper target resolution (*To Emsey: test whisper*), the
-  timestamps the game records and never shows, the channel filter chips, and
-  the window drawing over the game's own message area.
-- **Failed in that run, fixed since:** the ChatBox lookup, which searched
+  timestamps the game records and never shows, and the channel filter chips.
+- **The `!!` command surface works.** `!!help` printed its list, `!!ignore`
+  and `!!unignore` made a player's lines vanish from the window and come back
+  with the backlog, and `!!link Credence` copied a link. So the mechanism this
+  section describes — an unmatched `!command` swallowed locally by
+  `processMessage` — is a live observation and not a reading of the
+  disassembly.
+- **Failed in a run, fixed since:** the ChatBox lookup, which searched
   `ui.BaseUI.elements` — the box is not there, and the game's own route is
-  `gui.gameRoot.hud.chat`; and the message-area rectangle, which was part
+  `gui.gameRoot.hud.chat`; the message-area rectangle, which was part
   guesswork because `h2d.Flow`'s `calculatedWidth`/`calculatedHeight` were
-  believed ungeneratable. They are generated and read now.
-- **Not yet confirmed working in game: the `!!` command surface.** It did not
-  fire in that session. The cause was found and fixed — see [The command
-  surface](#the-command-surface) — but no command has been seen to run.
+  believed ungeneratable, and which is read from them now; and `!!link`,
+  which searched the atlas by id, so `Credence` (the item id `Bow_Craft`)
+  found nothing — see [item links](#files-all-next-to-the-game).
+- **Built and compiles, not yet seen on screen:** `!!size`, `!!opacity`, and
+  the `Ignored N` chip with its click-to-remove panel.
 
-Read the rest of this section as a description of the code, and only the first
-bullet as a live observation.
+Read the rest of this section as a description of the code, except where it is
+one of the observations above.
 
 ### Two surfaces, answering different questions
 
@@ -1006,7 +1023,7 @@ which is the rule the navigator's pill and the loot feed already follow: over
 the world the host must never eat a click. The aligned rectangle is not
 draggable at all — it is where the game's box is. Clicks inside the window are
 claimed through **aux input rectangle 3** (0 is the navigator's pill, 1 the
-loot feed, 2 the atlas HUD panel; sharing one is silent, the module that draws
+loot feed, 2 the mastery bar; sharing one is silent, the module that draws
 last simply wins), and only while the atlas is open.
 
 The wheel is the one exception, and it has its own mechanism —
@@ -1043,35 +1060,219 @@ line arrives, so `!!unignore` brings the backlog back with it.
 only copy of the session, and throwing it away to tidy a window would lose the
 thing worth keeping — `!!find` still searches all of it.
 
-Item links resolve through the atlas's own database (`atlas_ui_lookup`), which
-indexes by **item id**, matches exactly, and has no name search. `link_lookup`
-tries three exact lookups and stops at the first hit: the text as typed, the
-text with every non-alphanumeric character removed (`Copper Ore` →
-`CopperOre`), and that squashed form re-cased as CamelCase.
+Item links resolve through the atlas's own database, and `link_lookup` tries
+four lookups in order, stopping at the first hit: the **display name**
+(`atlas_ui_find_by_name` — case-insensitive exact, then a substring that
+exactly one entry contains), then the text as an **item id**
+(`atlas_ui_lookup`), then the id with every non-alphanumeric character
+removed (`Copper Ore` → `CopperOre`), then that squashed form re-cased as
+CamelCase.
 
-That reaches a typed display name for **182 of the 1639** generated atlas
-entries — about one in nine. It holds for gathered materials, recipes and
-consumables, and for essentially nothing else: not one of the 428
-appearances, 64 mounts, 73 pets, 68 gliders or 37 weapons has an id a name
-derives, and only 7 of 252 creatures do. *Abyssal Shoulderplates* is
-`Shoulders_RManfish_FigAss`. An earlier version of this file said the ids
-*were* the display names with the spaces taken out; run the derivation over
-`farever-atlas.tsv` and it is false for about 89% of it. For the rest the id
-itself is what you type, and the atlas entry's detail panel prints it.
+**The name search is there because deriving an id from a name almost never
+works.** It reaches only **182 of the 1639** generated atlas entries — about
+one in nine. It holds for gathered materials, recipes and consumables, and for
+essentially nothing else: not one of the 428 appearances, 64 mounts, 73 pets,
+68 gliders or 37 weapons has an id a name derives, and only 7 of 252 creatures
+do. *Abyssal Shoulderplates* is `Shoulders_RManfish_FigAss`, and *Credence* is
+`Bow_Craft` — which is why `!!link Credence` found nothing in the first live
+run while the atlas's own search bar found it at once. An earlier version of
+this file said the ids *were* the display names with the spaces taken out; run
+the derivation over `farever-atlas.tsv` and it is false for about 89% of it.
+The id still works as typed, and the atlas entry's detail panel prints it.
 
-One consequence: `cmd_link` copies `"[" + info.name + "]"`, so a link made
-from an id renders through the same three lookups and, outside that one in
-nine, will not resolve — it pastes as plain text with no icon even for another
-person running this mod.
+`cmd_link` copies `"[" + info.name + "]"` — the display name, whichever of the
+four lookups found it — and an incoming link is rendered through the same
+four, so a link pasted into chat resolves for anyone else running this mod
+with the atlas installed.
 
-When no derivation resolves, `!!link` says that plainly — including that a
-DLL-only install has no `farever-atlas.tsv` and so will never match
-anything — rather than sending someone hunting for a typo that is not there.
+An ambiguous substring is a miss rather than a pick: putting one of four
+swords on somebody's clipboard on their behalf is worse than saying the name
+was not specific enough. When nothing resolves, `!!link` says all three
+reasons — no such name, several items sharing it, and a DLL-only install with
+no `farever-atlas.tsv` that will never match anything — rather than sending
+someone hunting for a typo that is not there.
 Chat is deliberately independent of the atlas otherwise: it is worth having on
 an install with no generated database, and the only thing a missing atlas
 costs is the icons on links.
 
 Every command and every ini key: **[docs/chat.md](../docs/chat.md)**.
+
+## Players
+
+`players.cpp` is a tab in the atlas window listing the whole layer roster:
+one row per player with name, distance and class, sortable by each, a marker
+for yourself and for anyone in your party, your own party spelled out, a
+**DM** button, a **Copy** button, and click-a-row to point the navigator at
+that player and keep it pointed at them as they move.
+
+**The game already has this list and shows you part of it.**
+`ui.win.GroupWindow.init` (`src/ui/win/GroupWindow.hx:58-63`) walks
+`myPlayer.layer.players`, splits it on a squared distance against
+`Const.UI.GroupWindow_NearDist`, and draws the near bucket as player cards.
+The far bucket is built too, and then drawn **only when `Config.prefs.admin`
+is set**, under a header string reading `(ADMIN) Other loaded players (`. The
+constant is 100, and its own CastleDB description says what it is for:
+*"Other players within this distance are shown in the Manage Party window"*.
+So the whole roster is in client memory already and the distance limit is
+presentation. Live, this page listed **18 players while the game's own Manage
+Party window listed 0**.
+
+### The read path
+
+```
+GameApp
+  layer            -> st.GameLayer
+    players        -> hxbit proxy array of st.Player
+                        name      the display name
+                        __uid     st.BaseState.__uid - the identity used here
+                        removed   st.BaseState tombstone; skipped
+                        hero      -> ent.Hero, or null
+                                     ent.Unit.kind
+                                     ent.GameObject.posx / posy / posz
+
+ent.Hero
+  player           -> st.Player          the local one, and the only one whose
+    group          -> st.Group           group is replicated; players[0] leads
+```
+
+Identity is `st.BaseState.__uid`, **not** `st.Player.uid`, which is a separate
+replicated String — reading one for the other would report a pointer as a
+number. Party membership is a pointer test against the local player's group
+array, which is the test the game itself makes (`GroupWindow.hx:60` does
+`indexOf` with a null comparator, i.e. reference equality), so it needs no
+assumption about a flag. `st.Player.isMe` is read only as a cross-check on the
+pointer test and never acted on; a disagreement is one line in the log.
+`st.BaseState.removed` is the tombstone the game checks before it looks at a
+roster entry at all, so a removed player is dropped rather than listed.
+
+The class is `ent.Unit.kind` read off that player's hero — the unit id that
+`Unit.set_kind` uses as the key into `Data.unit.byId`, which on a hero is the
+class — and it is shown **verbatim**. A value that is none of Warrior, Rogue,
+Mage or Priest is printed as it reads rather than rounded to the nearest known
+one. That is the opposite of what the Mastery page does with the same field,
+and deliberately: Mastery *filters* by class, where a word it does not
+understand is no basis for hiding items, and a column that only displays has
+nothing to gain from replacing a real read with a blank.
+
+### Three things it cannot know, and says so on the page
+
+- **The roster is what the server chose to replicate to this client.** It is
+  not provably everyone on the shard. The page is worded as what this client
+  can see, and nothing here defeats a protection — the data is already in the
+  process, and this only stops throwing it away.
+- **`st.Player.hero` is null for a player whose character has not been
+  replicated here.** Those rows show `-` for distance and leave the class
+  blank, and they cannot be followed. That is a different fact from being far
+  away and the two are never conflated: the game's own window happens to bucket
+  them together (`GroupWindow.hx:62` sends a null hero straight to the far
+  list) and this deliberately does not. `-` is never rendered as "far", and
+  never as a stale number.
+- **`st.Player.group` is network property bit 12, in the conditional
+  visibility mask**, so it reads null for everyone except the local player. You
+  cannot tell whether anybody else is in a party. The page shows only *your*
+  party and has no "already grouped" or "invitable" column, because there is
+  nothing truthful to put in one.
+
+A row is ordered against the others only when it has a value in the active
+column: `-` is not the largest distance and a blank class is not the last
+class in the alphabet. Both are absences and sit at the bottom in either
+direction, because reversing them would present an absence as a ranking.
+Distances are horizontal, matching what the navigator's own readout measures,
+so a row never sits above one showing a larger number.
+
+### There is no invite button, and that is a decision
+
+The game's own invite has no distance term in it at all.
+`st.Group.invitePlayerReason` (`Group.hx:131-139`) rejects only four things:
+you are not the leader, the target is already grouped, they are already a
+member, and the group is full at 4. `ui.Console.invite` invites by name and
+nothing else. So the data model permits inviting a distant player, and the
+button would work.
+
+Every route to firing it from here is a call into the game, which this host
+does not do — so it is not built. Recorded as weighed and rejected rather than
+as an oversight.
+
+Both actions a row does offer end at the clipboard. **Copy** puts the bare
+name there. **DM** puts `!to <name> ` there — the game's own whisper command,
+parsed by `ui.hud.ChatBox.processMessage` — ready to paste with your message
+typed after it. The host cannot type it for you and cannot move the channel
+dropdown; both are writes, and input synthesis is out. So the paste is yours
+and the send is the game's. It is disabled on your own row.
+
+**Whispering somebody once puts them in the game's own channel dropdown for
+the rest of the session.** `processMessage` looks for the whisper it just
+built in `channelOptions`, does not find it, pushes `{name, icon, value}` and
+rebuilds the dropdown (`ChatBox.hx:159-162`). *Receiving* a whisper does not:
+`ChatBox.receiveMessage` (`ChatBox.hx:126-129`) builds the line and scrolls,
+and that is all. So somebody can whisper you all evening without ever
+appearing in your dropdown, and the DM button is the quickest way to get a
+reply channel for whoever messaged you first.
+
+### Following one player
+
+Clicking a row publishes that player's position to the navigator under a
+`players/<uid>` key, and the poll re-publishes it every tick, so the waypoint
+arrow tracks them as they move. It is the same read the distance column
+already does, drawn bigger. Clicking the row again stops it.
+
+Identity is the uid rather than the row index, because the list re-sorts under
+the pointer and following an index would quietly become following whoever slid
+into the slot. Re-publishing is `nav_untrack` then `nav_track`: `nav_track`
+alone is a toggle and would blink the pill off every other tick,
+`nav_start_route` would cross the waypoint off the moment you reached them,
+and `nav_add`/`nav_queue` would build a 120-waypoint route out of two minutes
+of following. One consequence is that a running follow marks the navigator
+dirty, so `farever-nav-state.txt` is rewritten about once a second — which is
+also why `players_init` drops a follow target restored from that file. A
+followed player does not survive the process that read them, and coming up
+aimed at where somebody stood yesterday is worse than coming up aimed at
+nothing.
+
+Following also stops on its own, and the page says which of four things
+happened: the navigator was pointed at something else, the roster cannot be
+read at all, they are no longer in the roster this client has been sent, or
+their character is no longer replicated here. **None of those is "they left"
+and none is "they are far away"**. Neither is knowable from this process.
+
+### Threading
+
+`players_poll` runs on the **worker's once-a-second tick**, beside every other
+module's persist tick, with a 500 ms throttle of its own so a wait cut short by
+a world change does not double-read. `players_draw` runs on the render thread
+and reads only the published snapshot, copying it when a generation counter
+moves — the same shape `routes.cpp` uses for `g_view`. Sorting happens on the
+draw side so a header click lands on the frame it is made, which is sorting a
+copy and not walking game memory.
+
+**An earlier version polled from the draw callback**, in `players_count()` and
+`players_draw()`, which put a walk of the whole roster — a few hundred
+validated reads and a string per player — on the render thread. `host_draw` in
+`dllmain.cpp` states the rule it broke: the draw callback never walks game
+memory. It is recorded here because the mistake is an easy one to make again,
+the module having no file or event of its own to poll from.
+
+A failed read publishes an **empty** view rather than keeping the last one.
+The failure is overwhelmingly "no character in the world" — the main menu,
+character select, a logout — and in that state there is no roster; leaving the
+previous zone's list up with distances recomputed against wherever you now
+stand would be a screen of numbers that are all wrong.
+
+### What has been seen, and what has not
+
+The tab and the list itself ran in game — 18 rows against the Manage Party
+window's 0. Clicking a row to follow, the sortable columns including the class
+column, and the DM and Copy buttons are built and compile but have not been on
+screen.
+
+Two keys, in `farever-modkit.ini` beside the game rather than in a second file
+for two integers:
+
+```
+[players]
+sort    = 0 name, 1 distance (the default), 2 class
+reverse = 1 to reverse the active column
+```
 
 ## Build
 
