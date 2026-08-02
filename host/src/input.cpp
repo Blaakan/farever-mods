@@ -52,6 +52,10 @@ volatile LONG g_rect[4] = {0, 0, 0, 0};   // x, y, w, h
 volatile LONG g_aux[kAuxRects][4] = {};
 volatile LONG g_rect_tick = 0;            // GetTickCount of the last publish
 
+// The one rectangle that claims something while the host's own window is
+// shut. See input.h for why the wheel in particular is safe to take there.
+volatile LONG g_wheel_rect[4] = {0, 0, 0, 0};
+
 // Typed text, as a single-producer single-consumer ring: the window thread
 // writes, the render thread drains. No lock in the WndProc, which is the
 // rule the rest of this file follows.
@@ -104,6 +108,17 @@ bool ui_active() {
     if (!InterlockedCompareExchange(&g_visible, 0, 0)) return false;
     const DWORD tick = (DWORD)InterlockedCompareExchange(&g_rect_tick, 0, 0);
     return (GetTickCount() - tick) < kRectFreshMs;
+}
+
+// Whole detents out of the shared accumulator, with the fractional remainder
+// put back so a precision touchpad's small movements still add up to a step.
+// Every consumer goes through here: two of them rounding separately would
+// each throw away part of the same scroll.
+int take_wheel_detents() {
+    const LONG raw = InterlockedExchange(&g_wheel_raw, 0);
+    const LONG rem = raw % WHEEL_DELTA;
+    if (rem) InterlockedAdd(&g_wheel_raw, rem);
+    return (int)(raw / WHEEL_DELTA);
 }
 
 void clear_held_buttons() {
@@ -292,7 +307,13 @@ LRESULT CALLBACK hook_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Wheel coordinates are screen, not client.
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            if (active && in_ui_rect(pt.x, pt.y)) {
+            // With the window open, the ordinary rule. With it shut, the one
+            // exception: a frame that published a wheel rectangle. The two
+            // are mutually exclusive on purpose - the atlas window draws over
+            // these frames, so while it is up the wheel belongs to whatever
+            // the player can actually see.
+            if ((active && in_ui_rect(pt.x, pt.y)) ||
+                (!active && in_rect(g_wheel_rect, pt.x, pt.y))) {
                 // Raw delta, not detents: precision touchpads send fractions
                 // of WHEEL_DELTA and truncating them here would eat them.
                 InterlockedAdd(&g_wheel_raw, GET_WHEEL_DELTA_WPARAM(wp));
@@ -405,11 +426,25 @@ void input_peek(InputState* out) {
 
 void input_get(InputState* out) {
     input_peek(out);
-    // Consume whole detents, keep the fractional remainder accumulating.
-    const LONG raw = InterlockedExchange(&g_wheel_raw, 0);
-    const LONG rem = raw % WHEEL_DELTA;
-    if (rem) InterlockedAdd(&g_wheel_raw, rem);
-    out->wheel = raw / WHEEL_DELTA;
+    out->wheel = take_wheel_detents();
+}
+
+int input_take_wheel_in(int x, int y, int w, int h) {
+    // The cursor position the WndProc last stamped, not a fresh cursor query:
+    // it is the same one the frame is being drawn against, and the swallowing
+    // decision that let this delta accumulate was made from it too.
+    const int mx = (int)InterlockedCompareExchange(&g_mouse_x, 0, 0);
+    const int my = (int)InterlockedCompareExchange(&g_mouse_y, 0, 0);
+    if (!(w > 0 && h > 0 && mx >= x && my >= y && mx < x + w && my < y + h))
+        return 0;
+    return take_wheel_detents();
+}
+
+void input_set_wheel_rect(int x, int y, int w, int h) {
+    InterlockedExchange(&g_wheel_rect[0], x);
+    InterlockedExchange(&g_wheel_rect[1], y);
+    InterlockedExchange(&g_wheel_rect[2], w);
+    InterlockedExchange(&g_wheel_rect[3], h);
 }
 
 void input_set_visible(bool v) {

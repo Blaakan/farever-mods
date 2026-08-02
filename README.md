@@ -27,6 +27,32 @@ every collectible category in the game.
 Press **F8** in game. See **[host/README.md](host/README.md)** for how it
 works and how to build it.
 
+## Weapon Mastery
+
+Farever levels every weapon separately, and levelling one is killing things
+with it. The game shows you the weapon in your hands, one level at a time.
+The **Mastery** tab shows every weapon your character can equip, each with
+**one bar for the whole track — a notch per level, not just the level you are
+on**. Which weapons you have actually invested in, and how much of each is
+left, is one glance.
+
+The bar is the game's own arithmetic, not an estimate: a kill count per
+weapon is the only thing the save stores, and 20 kills is a level (26 for a
+shield) up to a ceiling set by how many of that weapon's own skills can take
+a point. A weapon with no upgradeable skills says *no mastery track* rather
+than drawing an empty bar.
+
+**The weapon in your hand gets its own bar on screen**, with the atlas
+closed — so you can watch a track fill while you fight instead of opening a
+window to check. Nothing to set up and nothing to choose: swap weapon and
+the bar follows, swap character and it follows that too. It goes away when
+there is nothing left to watch — an empty hand, or a weapon already
+mastered.
+
+It is the same size as the game's own XP bar, read out of the game's
+stylesheet and scaled the way the game scales it, so it matches on any
+monitor. Drag it anywhere while the atlas is open.
+
 ## Routes
 
 The waypoint arrow follows a whole list, not one place. **69 routes and 1001
@@ -61,6 +87,89 @@ There is no loot event to hook, because the host only reads, so the feed is a
 diff of your bags, purse and experience twice a second. It reports **gains to
 your bags** — a bank withdrawal reads the same as a chest, and losses are
 never reported at all.
+
+## Chat
+
+The game's chat box keeps a few lines, shows no timestamp — although it
+records one on every message — and has **no ignore list at all**. That last
+one is not an oversight of the UI: there is no ignore, mute or block function
+anywhere in the client, and no chat command for one. This draws its own
+window over the game's message area, out of the history the game already
+keeps.
+
+**What has been seen working, and what has not.** This has now been run in a
+live session, which is worth being exact about rather than summarising. Seen
+on screen: the session's scrollback read out of `ChatClient.history`, the
+anonymous-structure decode, the channel classification, whisper targets
+resolved to a name (*To Emsey: test whisper*), the timestamps the game records
+and never shows, the channel chips, and the window drawing over the game's
+message area. Two things failed in that run and have been fixed since — the
+chat box was looked for in `ui.BaseUI.elements`, where it does not live (the
+game's own route is `gui.gameRoot.hud.chat`), and the message area was sized
+by guesswork rather than by reading the `h2d.Flow` fields that hold it.
+**The `!!` command surface is the one part still unconfirmed:** it did not
+fire in that session, the cause was found and fixed, and no command has yet
+been seen to run in game.
+
+- **The whole session's scrollback.** `ChatClient.history` is appended to and
+  never trimmed, so everything said since you logged in is still there —
+  wheel over the window to scroll back, and a `12 newer` badge says what is
+  below you
+- **Timestamps**, per line, which the game records and never shows
+- **An ignore list** — `!!ignore <name>` and they are gone from the window and
+  from the log. The `Ignored N` chip along the bottom shows who is on it and
+  removes anyone with a click; it is a plain text file next to the game, so it
+  is editable and it survives a reinstall. **The game has none of this** —
+  there is no ignore, block, mute or report anywhere in the build
+- **Per-channel filters** — Local, All, All system, Whisper, Group, System,
+  each a chip you click with the atlas open
+- **Item links** — `[Copper Ore]` in anybody's message draws with that item's
+  own icon and rarity colour, and `!!link <name>` copies one to the clipboard
+  ready to paste. Everyone without the mod sees the plain text they always
+  did. This works from a typed name for gathered materials, consumables and
+  recipes; most of the atlas is keyed by an internal id instead, and for those
+  the id is what you type — see [docs/chat.md](docs/chat.md#item-links)
+- **An optional session log**, appended to `farever-chat-log.txt`, flushed per
+  line so it can be tailed while you play
+
+**The commands cost the server nothing**, and this is the whole reason they
+are typed into the game's own box rather than into a field of ours.
+`ui.hud.ChatBox.processMessage` knows exactly four commands — `!say`, `!map`,
+`!group`, `!to` — and for anything else prints *Unknown chat command* locally
+and returns; the call that actually sends sits past that return. So
+`!!ignore Someone` draws one line in your own client and stops there. The
+host reads that line rather than writing anything. The disassembly is in
+[RESEARCH.md](RESEARCH.md#can-a-mod-be-driven-by-in-game-commands).
+
+**It cannot hide the game's own chat box**, because hiding it would be a
+write. What it does instead is align to it: `h2d.Flow` records the box its own
+layout settled on, so the message flow gives all four edges of the message
+area and the window covers exactly that — leaving the footer and the text
+field underneath visible and clickable. Enter still opens the game's input,
+typing still goes to the game, and sending a message is still the game doing
+it. What the host cannot do is hide the game's own box — that would be a
+write — so the game goes on drawing its copy of every line underneath. The
+window is **opaque** for that reason rather than as a style choice;
+`!!opacity` turns it down if you would rather see the world through it, at the
+cost of reading every message twice. `!!size` sets the text size.
+
+The honest limits, all of them consequences of reading only: a sender's name
+is read when the sender is a player character and left blank otherwise; the
+far end of a whisper is best-effort and blank when it cannot be validated; the
+timestamp is when the mod first saw the line, not the game's own arrival
+stamp; and a command runs when the chat input goes empty, which Escape does as
+well as Enter — so a command abandoned, or typed and submitted inside a tenth
+of a second, runs with whatever arguments it had at that moment. Matching is
+on the first token, so `!!ignore Emsey` caught as `!!ignore Em` is a valid
+command with a shorter argument and it runs on the wrong name. Nothing a
+reader can do closes that window, so when the text did not stand still for a
+whole poll before the box emptied the window prints the string it is about to
+act on first — wrong, but never silently wrong. Every command is local and
+read-only, which is what makes that a tolerable failure rather than a
+dangerous one.
+
+Full reference — every command, every setting, the file formats:
+**[docs/chat.md](docs/chat.md)**.
 
 ## Everything else
 
@@ -113,7 +222,13 @@ Tolerated for personal use, not endorsed. Read
    **[Releases](https://github.com/Blaakan/farever-mods/releases)**.
 3. Right-click the zip → **Properties** → **Unblock**, then extract it
    anywhere.
-4. Close Farever, and run **`install.cmd`**.
+4. Run **`install.cmd`**.
+
+You do not have to close the game first. Windows will not let a loaded DLL be
+overwritten, but it will let it be *renamed* — so the installer moves the old
+one aside, puts the new one in its place, and sweeps up the leftover on its
+next run. The session you have open carries on with the DLL it already
+loaded; restart the game to pick up the new one.
 
 It finds your install through Steam's own library list, builds the item
 database out of your copy of the game, and copies one `dxgi.dll` next to
@@ -282,6 +397,20 @@ Output lands in `tools/out/`, which is gitignored — it is bulk game data.
 Commit the tool, not the haul. Details and naming conventions:
 **[docs/scanning.md](docs/scanning.md)**.
 
+```bash
+node tools/dis-hlcode.mjs ChatBox.processMessage
+```
+
+`scan-hltypes.mjs` says where a field lives and `scan-hlboot.mjs` says which
+strings exist; neither says what the game *does*. This disassembles one named
+function out of the bytecode, and because `hlboot.dat` ships full debug info
+every instruction carries its real source file and line — so a claim about the
+game's behaviour can be quoted with a line number instead of being asserted.
+`--grep` lists matching function names, `--findex` dumps by index, `--stats`
+prints the header. This is what settled that the game discards an unknown
+`!command` before sending it, which is the whole basis of the chat window's
+command surface.
+
 CI runs all of the above plus a build of the DLL on a clean Windows runner
 with no game installed, which is what catches "works on my computer". The
 house rules that a change has to keep — reads only, generated offsets, and
@@ -311,6 +440,7 @@ host/                      the standalone mod host - see host/README.md
   src/routes.*               saved routes: files, share codes, the Routes page
   src/mapwatch.*             waypoints from the game's own map, read-only
   src/loot.*                 the Recent Loots feed
+  src/chat.*                 the chat window, and the !! command surface
 tools/
   install.mjs              what install.cmd runs: find, generate, copy, check
   package.mjs              build the release zip
@@ -319,6 +449,7 @@ tools/
   gen-routes.mjs           the generated route set, out of the world's tiles
   scan-hlboot.mjs          HashLink bytecode string-table extractor
   scan-hltypes.mjs         HashLink type/field-offset extractor
+  dis-hlcode.mjs           HashLink disassembler: dump one function by name
   pak-extract.mjs          Shiro/Heaps .pak reader (list + extract)
   pe-imports.mjs           what a PE imports and exports
   update.mjs               post-patch flow

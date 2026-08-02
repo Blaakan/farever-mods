@@ -57,8 +57,11 @@ const types = JSON.parse(readFileSync(typesPath, 'utf8'));
 // a promise the reader depends on, and a missing one should fail the build
 // rather than surface as a wild pointer at runtime.
 const WANT = [
+  // `name` is the character name, and it is what a chat line's sender
+  // resolves to: a message's `sender` is an ent.Unit, and for player chat
+  // that unit is the speaker's Hero.
   ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand',
-                'loadout', 'specialization']],
+                'loadout', 'specialization', 'name']],
   // Crafting. Jobs are per-character, and each carries the crafts that
   // character knows. The proxy class name is a hash of the anonymous
   // structure's shape, so a patch that changes a field of that struct
@@ -69,21 +72,45 @@ const WANT = [
   ['st.player.HeroSpecialization', ['jobs', 'talents', 'skillMasteries']],
   ['hxbit.ObjProxy_3327ea72931d811ba796c031db6ffed0',
    ['job', 'level', 'knowledge', 'learnedCrafts', 'completedCrafts']],
-  ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin']],
+  // `kind` is the unit's id in the unit sheet, and provably so: Unit.set_kind
+  // does `inf = Data.unit.byId.get(kind)` (Unit.hx:686), so it is the key that
+  // resolves the unit's own CastleDB row. On a hero that is the class -
+  // Warrior / Rogue / Mage / Priest.
+  ['ent.Unit', ['isInCombat', 'instigatedStatuses', 'skin', 'kind']],
   // World position and facing, for the loot tracker's distance/arrow readout.
   ['ent.GameObject', ['posx', 'posy', 'posz', 'rotationZ']],
   // The application singleton: reaches the camera, and holds the hero too.
-  ['GameApp', ['gameCamera', 'camera', 'hero', 'world', 'gui']],
+  // `loadingState` is how the game itself answers "is a loading screen up":
+  // GameApp.get_isLoading is literally `loadingState != 10` (GameApp.hx:50),
+  // so 10 is the one value that means in the world and playing.
+  // `layer` reaches the whole player roster - see the st.GameLayer note below.
+  ['GameApp', ['gameCamera', 'camera', 'hero', 'world', 'gui', 'loadingState',
+               'layer']],
   // The game's own map, read while it is open so a click on a POI can become
   // a waypoint. `windows` is the short list of window instances the UI holds;
   // finding the map means walking it for the right class, not scanning
   // memory. `visible` is h2d.Object's, so it says whether the map is up.
-  ['ui.GameUI', ['windows', 'root', 's2d']],
+  // `gameRoot` is the way to the HUD, and it is the game's own route rather
+  // than a guess: ui.GameUI.get_hud (GameUI.hx:33) is literally
+  // `gameRoot?.hud`. The chat box hangs off that and NOT off `elements` -
+  // walking `elements` for a ui.hud.ChatBox finds nothing, which cost a
+  // whole test cycle to learn.
+  ['ui.GameUI', ['windows', 'root', 's2d', 'gameRoot']],
+  ['ui.GameUiRoot', ['hud']],
+  ['ui.Hud', ['chat']],
+  // A Flow's laid-out size. Every ui.BaseElement is one, so this is what
+  // gives the chat message area its real width and height instead of a
+  // guess derived from where the footer starts. `calculated*` is the box the
+  // layout settled on; `content*` is what is inside it before padding.
+  ['h2d.Flow', ['calculatedWidth', 'calculatedHeight', 'contentWidth',
+                'contentHeight']],
   // The 2D scene the whole UI lives in. Its width/height are the units
   // markers report their screen position in, which is not the same as the
   // pixels the mouse arrives in when the UI is scaled - so the ratio between
   // this and the swap chain's size is what maps one onto the other.
-  ['h2d.Scene', ['width', 'height']],
+  // `events` reaches hxd.SceneEvents, whose currentFocus is how "is the
+  // player typing in the game's own box" is answered without guessing.
+  ['h2d.Scene', ['width', 'height', 'events']],
   // `visible` alone is not "on screen": a closed window can keep the flag and
   // its last hit-test result, and acting on that would drop a waypoint at
   // whatever the player last hovered, days ago. Heaps detaches a closed
@@ -115,8 +142,28 @@ const WANT = [
   ['h3d.scene.Scene', ['camera']],
   ['h3d.Camera', ['pos', 'target']],
   ['h3d.VectorImpl', ['x', 'y', 'z']],
+  // `chatClient` is the chat history's owner, and `isMe` is what tells the
+  // local player apart when walking a group. `group` carries the party, which
+  // is the payload of the st.Channel.Group constructor.
+  // `hero` is how a player gets a world position and therefore a distance. It
+  // is null for anyone whose hero has not been replicated to this client,
+  // which is not the same thing as them being far away and must never be
+  // reported as one.
+  //
+  // There are two fields here that both look like an identity and are not the
+  // same thing. `uid` is a String and a replicated property (there is a
+  // __net_mark_uid beside it); `__uid` is the I64 that st.BaseState carries
+  // for every replicated state, assigned by the local host, and it is the one
+  // that identifies a roster row within this session. Both are taken so that
+  // a caller has to pick, rather than reading the String slot as a number.
+  //
+  // `removed` is st.BaseState's own tombstone flag, and it is what the game's
+  // Manage Party window tests first (GroupWindow.hx:62) before it looks at a
+  // roster entry at all. Reading the roster without it lists players the
+  // client has already been told are gone.
   ['st.Player', ['accountProgress', 'progress', 'name', 'heroData',
-                 'activityCtx']],
+                 'activityCtx', 'chatClient', 'isMe', 'group', 'hero',
+                 'uid', '__uid', 'removed']],
   // What the Recent Loots feed watches. There is no loot event to hook - the
   // host never calls into the game - so the feed is a diff of these between
   // polls: experience and level tick up, `currencies` gains entries, and
@@ -124,17 +171,23 @@ const WANT = [
   // `activityProgress` and `activityCtx` are the two fields named for the
   // thing the codex calls an activity - which includes NPC quests, even
   // though a quest has no authored activity row anywhere.
+  // `kind` is the character's unit id - Warrior / Rogue / Mage / Priest - and
+  // the game treats it as one: Hero.hx passes it straight to Unit.isInfElite
+  // where a unit id is expected. It is what says which weapons this character
+  // can equip, since each of those four units carries exactly one aptitude.
   ['st.player.HeroData', ['level', 'exp', 'currencies', 'inventory', 'name',
-                          'worldLootLog', 'activityProgress']],
+                          'worldLootLog', 'activityProgress', 'kind']],
   // Codex progress. Every one of these is a hxbit.MapData wrapping a Haxe
   // map behind an interface, so reading them needs the virtual hop.
   // `activities`, `elements` and `npcs` are what this character has already
   // done: a quest handed in, a chest opened. They are what makes a one-time
   // source disappear from the atlas once it is spent.
+  // `weaponProgress` is weapon mastery: keyed by the weapon's CastleDB item
+  // id, and the value counts kills made with it (Progress.hx:489).
   ['st.player.Progress', ['counters', 'unitsProgress', 'itemProgress',
                           'zones', 'achievements', 'pets',
                           'skillMasteriesLearnt', 'activities', 'elements',
-                          'npcs']],
+                          'npcs', 'weaponProgress']],
   ['hxbit.MapData', ['map']],
   // The value in the codex map: not a bare count but a small record, whose
   // class name spells out its own shape.
@@ -148,6 +201,10 @@ const WANT = [
    ['completedOnce', 'lastCompletion']],
   ['hxbit.ObjProxy_ad383d83eed03d0e5475cee203565222',
    ['goalsMap', 'dialog', 'bit']],
+  // The weapon mastery record. One field, and the class name says which:
+  // `exp` is a kill count, which the game divides by a per-weapon constant
+  // to get mastery levels (Progress.hx:507).
+  ['hxbit.ObjProxy_Oexp_Int', ['exp']],
   ['haxe.ds.StringMap', ['h']],
   ['st.player.AccountProgress', ['collection', 'bank', 'bankEquipment', 'bankNbSlots']],
   ['st.player.Collection', ['mounts', 'gliders', 'pets', 'gears', 'toys', 'emotes']],
@@ -166,6 +223,69 @@ const WANT = [
   ['hl.types.ArrayObj', ['length', 'array']],
   ['hl.types.ArrayBase', ['length']],
   ['String', ['bytes', 'length']],
+
+  // --- chat -----------------------------------------------------------------
+  //
+  // `history` is where every message the client has received lands, and it is
+  // NOT a replicated property - there is no __net_mark_history beside it.
+  // ChatClient.localReceiveMessage (ChatClient.hx:25-29) stamps localStamp
+  // with sys_time() and does a bare push, with no trim and no ring buffer. So
+  // this array is the whole session's chat, in order, and it is the durable
+  // source; the ChatBox's own `messages` flow is only what is currently drawn
+  // and gets emptied by reloadMessages.
+  ['st.player.ChatClient', ['history', 'player', 'chat']],
+  // The elements of that array are Haxe anonymous structures, so their fields
+  // are found by name at runtime through read_virtual_fields rather than by
+  // offset. The shape is
+  //   { args, channel, localStamp, localTextId, notify, sender, text }
+  // with channel an st.Channel enum: Local | All | AllSystem | Player(Player)
+  // | Group(Group) | System(Player).
+  //
+  // `messages` is the flow the game draws lines into, and it holds two
+  // classes: ChatBoxMessage for a real message and a bare ChatBoxLine for a
+  // locally generated error. Reading it is what makes a custom command
+  // possible - see chat.cpp for why an unknown `!command` never leaves the
+  // client.
+  ['ui.hud.ChatBox', ['messages', 'messageInput', 'channelDropdown',
+                      'chatClient', 'messageIndex', 'footer']],
+  ['ui.hud.ChatBoxLine', ['msgText']],
+  ['ui.hud.ChatBoxMessage', ['message']],
+  ['ui.comp.InputBox', ['input', 'hintText']],
+  // What the player is typing, live. `interactive` is how focus is answered:
+  // h2d.Interactive.hasFocus is `scene.events.currentFocus == this`
+  // (Interactive.hx:311), which is three validated reads and no guessing.
+  ['h2d.TextInput', ['interactive', 'cursorIndex']],
+  ['h2d.Text', ['text']],
+  ['hxd.SceneEvents', ['currentFocus']],
+  // absX/absY put the game's own chat box on screen in scene units, which is
+  // what lets the overlay cover exactly the message area and leave the input
+  // box below it alone. Same scene-units-to-pixels ratio the map hit test
+  // already undoes.
+  ['h2d.Object', ['absX', 'absY', 'visible', 'parent', 'children', 'alpha']],
+  // The developer console, so the host can stay out of its way. `bg.visible`
+  // is what h2d.Console.isActive reads (Console.hx:297). The host never puts
+  // anything into it - it is a password-gated admin surface (ui.Console.admin,
+  // Console.hx:338) and reading whether it is open is the entire interest.
+  ['ui.BaseUI', ['elements', 'console']],
+  ['h2d.Console', ['bg', 'tf']],
+  ['st.Group', ['players']],
+
+  // --- the layer roster -----------------------------------------------------
+  //
+  // Every player the client knows about, which is more than the game will
+  // show you. ui.win.GroupWindow.init (GroupWindow.hx:58-63) walks exactly
+  // this array, splits it on a squared distance against
+  // Const.UI.GroupWindow_NearDist - 100, whose own CastleDB description reads
+  // "Other players within this distance are shown in the Manage Party window"
+  // - and then draws the far bucket only when Config.prefs.admin is set,
+  // under a header reading "(ADMIN) Other loaded players (". So the roster is
+  // already in memory in full and the distance is presentation, not a rule.
+  //
+  // `hero` is how a player gets a world position, and so a distance; it is
+  // null for anyone whose hero has not been replicated to this client, which
+  // is a different thing from them being far away and must not be reported as
+  // one.
+  ['st.GameLayer', ['players']],
 ];
 
 const hash = bootSha;

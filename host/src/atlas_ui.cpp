@@ -29,6 +29,7 @@
 #include "input.h"
 #include "navigator.h"
 #include "overlay.h"
+#include "players.h"
 #include "routes.h"
 
 namespace fmk {
@@ -54,6 +55,7 @@ const char* kCatTsv[kCats] = {"appearances", "mounts", "pets", "gliders",
 // slot (4..10), and the bestiary, whose progress comes from the codex
 // rather than from anything you carry (11).
 constexpr int kFirstItemCat = 4;
+constexpr int kWeaponsCat = 5;
 constexpr int kRecipesCat = 8;
 constexpr int kCreaturesCat = 11;
 // Runes are neither carried nor unlocked account-wide: like a craft, a
@@ -61,12 +63,18 @@ constexpr int kCreaturesCat = 11;
 // past the bestiary so every range above keeps its meaning.
 constexpr int kRunesCat = 12;
 
-// One more tab than there are categories. Routes are not a collection of
+// Three more tabs than there are categories. None of them is a collection of
 // anything the account owns, so they have no entries, no ownership and no
-// grid - the tab strip is simply the window's navigation, and the routes
-// page draws itself into the same content band (routes.cpp).
-constexpr int kRoutesTab = kCats;
-constexpr int kTabs = kCats + 1;
+// grid - the tab strip is simply the window's navigation, and each page
+// draws itself into the same content band.
+//
+// Mastery re-reads the weapons page rather than owning entries of its own: a
+// weapon's mastery track belongs to the weapon, and what changes per
+// character is only how far along it is.
+constexpr int kMasteryTab = kCats;
+constexpr int kRoutesTab = kCats + 1;
+constexpr int kPlayersTab = kCats + 2;
+constexpr int kTabs = kCats + 3;
 
 struct Entry {
     std::string id, name, desc;
@@ -81,6 +89,12 @@ struct Entry {
     int rarity = 0;      // 0..4 = common..legendary, from the CastleDB
     int icon = -1;       // cell in the icon atlas, -1 = none
     int cat = 0;
+    // Weapons only, from the `mastery:<levels>/<kills>` tag: how many mastery
+    // levels this weapon has in total, and how many kills each one costs.
+    // Zero levels is a real answer - a capture net has no track - and a zero
+    // cost means the generator could not work it out.
+    int mastery_levels = 0;
+    int mastery_per_level = 0;
 };
 
 std::string lower(const std::string& s) {
@@ -126,6 +140,17 @@ struct OwnSnap {
     std::unordered_map<std::string, Owned> byId[kCats];
     int owned_count[kCats]{};
     std::string character;
+    // Warrior / Rogue / Mage / Priest, or empty when the reader could not
+    // make it out. Only the Mastery page uses it, and only to decide which
+    // weapons to list.
+    std::string hero_class;
+    // Weapon mastery for the character logged in: weapon item id -> the
+    // kills made with it. Absent means none, which is what the game means
+    // by leaving a weapon out of its own map.
+    std::unordered_map<std::string, int> weapon_kills;
+    // What is in the main hand right now, which is what the on-screen bar
+    // tracks. Empty for an empty hand.
+    std::string active_weapon;
     // craft id -> the characters who know it. Recipes are learned per
     // character, so "known" is a question of by whom.
     std::unordered_map<std::string, std::set<std::string>> learned_by;
@@ -224,9 +249,22 @@ std::shared_ptr<const OwnSnap> own_get() {
 std::wstring g_ini_path;
 volatile LONG g_layout_dirty = 0;
 
+// Declared with the flag it sets rather than beside its one-line body, so
+// everything that moves a persisted thing can reach it.
+void save_layout_dirty() { InterlockedExchange(&g_layout_dirty, 1); }
+
 // Written by the render thread, persisted by the worker in atlas_ui_tick.
 volatile LONG g_win_x = 140, g_win_y = 110;
 volatile LONG g_tab = 0;
+
+// Where the mastery bar sits. `kUnplaced` means "never moved", so the default
+// position can change with the screen instead of being frozen at whatever the
+// first frame was.
+//
+// Which weapon it shows is not stored at all: it is whatever is in your main
+// hand, which the game already knows and you already decided by equipping it.
+constexpr LONG kUnplaced = -100000;
+volatile LONG g_hud_x = kUnplaced, g_hud_y = kUnplaced;
 
 // --- render-thread state ----------------------------------------------------
 
@@ -446,6 +484,15 @@ bool load_tsv(const std::wstring& path) {
                 if (sep == std::string::npos) sep = tg.size();
                 if (sep > tp) e.tags.push_back(tg.substr(tp, sep - tp));
                 tp = sep + 1;
+            }
+            const std::string track = tag_value(e, "mastery:");
+            if (!track.empty()) {
+                int levels = 0, per = 0;
+                if (sscanf_s(track.c_str(), "%d/%d", &levels, &per) == 2 &&
+                    levels >= 0 && levels <= 64 && per > 0) {
+                    e.mastery_levels = levels;
+                    e.mastery_per_level = per;
+                }
             }
         }
         // track is ";"-joined label@x,y,z
@@ -960,7 +1007,409 @@ void draw_tooltip(const Entry& e, const Owned* owned, const char* track_key,
     draw_text(tx + pad, yy, 11, kTextFaint, e.id.c_str());
 }
 
-void save_layout_dirty() { InterlockedExchange(&g_layout_dirty, 1); }
+// --- the Mastery page -------------------------------------------------------
+//
+// Every weapon in the game levels separately, and levelling one is killing
+// things with it. The game's own screen shows you the weapon in your hands,
+// one level at a time; this shows the whole track for every weapon the
+// character could be carrying, so "which of these have I actually invested
+// in" is one glance rather than a tour of the inventory.
+//
+// One bar per weapon, one notch per level. The bar is the entire track, not
+// the current level, which is the difference between "Level 3, 40%" and
+// seeing that three of eight are done.
+
+struct MasteryRow {
+    const Entry* e = nullptr;
+    int levels = 0;      // notches on the bar
+    int per = 0;         // kills each notch costs
+    int kills = 0;
+    int points = 0;      // notches filled
+    float frac = 0;      // how far into the next one, 0..1
+    bool owned = false;
+};
+
+// Which weapons this character can pick up at all. The tag is the game's
+// own rule: a weapon lists the aptitudes that may wield it, and each of the
+// four classes carries exactly one. `class:Any` is a weapon that lists none.
+bool wieldable_by(const Entry& e, const std::string& hero_class) {
+    if (hero_class.empty()) return true;    // class unknown: show the lot
+    bool saw_class = false;
+    for (const auto& t : e.tags) {
+        if (t.compare(0, 6, "class:") != 0) continue;
+        saw_class = true;
+        if (t.compare(6, std::string::npos, "Any") == 0) return true;
+        if (t.compare(6, std::string::npos, hero_class) == 0) return true;
+    }
+    return !saw_class;
+}
+
+MasteryRow mastery_row_for(const Entry& e, const OwnSnap* snap) {
+    MasteryRow r;
+    r.e = &e;
+    r.levels = e.mastery_levels;
+    r.per = e.mastery_per_level;
+    if (snap) {
+        auto k = snap->weapon_kills.find(e.id);
+        if (k != snap->weapon_kills.end()) r.kills = k->second;
+        r.owned = snap->byId[kWeaponsCat].count(e.id) != 0;
+    }
+    // The game's own arithmetic (st/player/Progress.hx): kills divided by the
+    // weapon's cost per level, floored, and capped at the length of the
+    // track. Past the cap the counter keeps rising and the bar does not,
+    // which is exactly what the game does with it.
+    if (r.per > 0) {
+        const double v = (double)r.kills / (double)r.per;
+        r.points = (int)v;
+        if (r.points >= r.levels) {
+            r.points = r.levels;
+            r.frac = 0;
+        } else {
+            r.frac = (float)(v - (double)r.points);
+        }
+    }
+    return r;
+}
+
+std::vector<MasteryRow> mastery_rows(const OwnSnap* snap) {
+    std::vector<MasteryRow> rows;
+    const std::string cls = snap ? snap->hero_class : std::string();
+    for (int i = g_cat_begin[kWeaponsCat]; i < g_cat_begin[kWeaponsCat + 1]; i++) {
+        const Entry& e = g_entries[i];
+        if (!wieldable_by(e, cls)) continue;
+        rows.push_back(mastery_row_for(e, snap));
+    }
+    return rows;
+}
+
+// The one weapon the on-screen bar is about. Separate from the list above
+// because the bar draws every frame during ordinary play, with the atlas
+// closed - building all 37 rows and a vector to find one of them is work the
+// render thread should not be doing inside Present.
+//
+// The id comes from the main hand, so an id that is not on the weapons page
+// is a tool or something else that cannot be mastered, and gets no bar.
+bool mastery_row_by_id(const std::string& id, const OwnSnap* snap,
+                       MasteryRow* out) {
+    auto f = g_entry_by_id[kWeaponsCat].find(id);
+    if (f == g_entry_by_id[kWeaponsCat].end()) return false;
+    const Entry& e = g_entries[f->second];
+    if (!wieldable_by(e, snap ? snap->hero_class : std::string())) return false;
+    *out = mastery_row_for(e, snap);
+    return true;
+}
+
+// The bar: one segment per level, filled left to right, with the level in
+// progress part-filled. Gold once the whole track is done.
+//
+// This is the point of the page. A per-level bar answers "how close am I to
+// the next one" and hides the only question worth asking of a weapon you
+// have not touched in a week, which is how much of it is left.
+void draw_mastery_bar(const MasteryRow& r, float x, float y, float w, float h) {
+    const Color empty{0.09f, 0.10f, 0.14f, 1.0f};
+    if (r.levels <= 0) {
+        draw_rect(x, y, w, h, empty);
+        draw_text(x + 8, y + (h - 11) * 0.5f, 11, kTextFaint,
+                  r.per > 0 ? "no mastery track" : "track unknown");
+        return;
+    }
+
+    const bool done = r.points >= r.levels;
+    const Color fill = done ? kRarity[4] : kAccent;
+    const Color part{fill.r, fill.g, fill.b, 0.45f};
+
+    // Notches are gaps in the fill rather than lines drawn over it, so a
+    // level that is done reads as a solid block. Below about three pixels a
+    // segment stops reading as one, so a very long track drops the gaps
+    // rather than the segments.
+    const float gap = r.levels > 1 ? 2.0f : 0.0f;
+    const float probe = (w - gap * (r.levels - 1)) / (float)r.levels;
+    const float use_gap = probe >= 3.0f ? gap : 0.0f;
+    const float seg = (w - use_gap * (r.levels - 1)) / (float)r.levels;
+
+    for (int i = 0; i < r.levels; i++) {
+        const float sx = x + i * (seg + use_gap);
+        draw_rect(sx, y, seg, h, empty);
+        if (i < r.points) draw_rect(sx, y, seg, h, fill);
+        else if (i == r.points && r.frac > 0)
+            draw_rect(sx, y, seg * r.frac, h, part);
+    }
+    const Color edge = done ? Color{fill.r, fill.g, fill.b, 0.5f} : kMissEdge;
+    draw_rect(x, y, w, 1, edge);
+    draw_rect(x, y + h - 1, w, 1, edge);
+}
+
+// Trims to fit, on a character boundary, and says it trimmed.
+std::string fit_text(std::string s, float size, float max_w) {
+    if (measure_text(size, s.c_str()) <= max_w) return s;
+    while (!s.empty() && measure_text(size, (s + "...").c_str()) > max_w) {
+        s.pop_back();
+        while (!s.empty() && ((unsigned char)s.back() & 0xC0) == 0x80) s.pop_back();
+    }
+    return s + "...";
+}
+
+// --- the bar, on screen over the world --------------------------------------
+//
+// The track of the weapon in your main hand, and nothing else. There is no
+// setting: equipping a weapon is already the act of choosing it, so asking a
+// second time would only be a way to get it wrong. It goes away on its own
+// when that weapon has nothing left to earn - a full bar tells you nothing
+// you did not know a moment after it filled.
+//
+// Sized to sit alongside the game's own XP bar rather than next to it looking
+// like a different game. Those numbers are the game's, not a guess:
+// `UI/Style/style.css` in res.light.pak says
+// `exp-bar { bar-width: 619; bar-height: 17 }`, and the UI scene those units
+// belong to is 2048x1152 - which the map diagnostics confirm live, reporting
+// `scene=2048x1152 frame=2560x1440`. So the scene is a fixed design size the
+// game letterboxes onto the frame, and matching it means scaling by the same
+// factor rather than pinning pixel sizes that would only be right on one
+// monitor.
+constexpr float kUiSceneW = 2048.0f;
+constexpr float kUiSceneH = 1152.0f;
+constexpr float kXpBarW = 619.0f;
+constexpr float kXpBarH = 17.0f;
+
+bool g_hud_dragging = false;
+float g_hud_drag_dx = 0, g_hud_drag_dy = 0;
+
+void mastery_hud_draw(const InputState& in, bool clicked, float screen_w,
+                      float screen_h, const OwnSnap* snap) {
+    MasteryRow found;
+    const bool have = snap && !snap->active_weapon.empty() &&
+                      mastery_row_by_id(snap->active_weapon, snap, &found);
+    // Nothing in hand, something in hand with no track at all, or a track
+    // already full: in every one of those there is no progress left to watch,
+    // so the bar is not there rather than sitting at 100% forever.
+    if (!have || found.levels <= 0 || found.points >= found.levels) {
+        input_set_aux_rect(2, 0, 0, 0, 0);
+        g_hud_dragging = false;
+        return;
+    }
+    const MasteryRow* row = &found;
+
+    const float scale = (std::min)(screen_w / kUiSceneW, screen_h / kUiSceneH);
+    const float bar_w = kXpBarW * scale;
+    const float bar_h = kXpBarH * scale;
+    const float icon = 26 * scale;
+    const float gap = 8 * scale;
+    const float text_sz = 13 * scale;
+    const float pad = 6 * scale;
+
+    const float w = icon + gap + bar_w;
+    const float h = text_sz + 3 * scale + bar_h;
+
+    // Default: centred, sitting above where the game keeps its own hero bar,
+    // so the first sight of it is next to the thing it is modelled on rather
+    // than on top of it.
+    const LONG sx = InterlockedCompareExchange(&g_hud_x, 0, 0);
+    const LONG sy = InterlockedCompareExchange(&g_hud_y, 0, 0);
+    float x = (sx == kUnplaced) ? (screen_w - w) * 0.5f : (float)sx;
+    float y = (sy == kUnplaced) ? screen_h - 190 * scale : (float)sy;
+
+    // Movable only while the atlas is open - the same rule the waypoint pill
+    // follows, and for the same reason: over the world this must never eat a
+    // click. The panel behind it is the cue that it can be moved right now.
+    const bool movable = in.visible;
+    if (movable) {
+        const bool hit = clicked &&
+                         in.click_x >= x - pad && in.click_x < x + w + pad &&
+                         in.click_y >= y - pad && in.click_y < y + h + pad &&
+                         !input_in_main_rect(in.click_x, in.click_y);
+        if (hit) {
+            g_hud_dragging = true;
+            g_hud_drag_dx = in.click_x - x;
+            g_hud_drag_dy = in.click_y - y;
+        }
+        if (g_hud_dragging) {
+            if (in.lbutton) {
+                x = in.mouse_x - g_hud_drag_dx;
+                y = in.mouse_y - g_hud_drag_dy;
+            } else {
+                g_hud_dragging = false;
+                save_layout_dirty();
+            }
+        }
+    } else {
+        g_hud_dragging = false;
+    }
+
+    if (x < pad) x = pad;
+    if (y < pad) y = pad;
+    if (x > screen_w - w - pad) x = screen_w - w - pad;
+    if (y > screen_h - h - pad) y = screen_h - h - pad;
+    InterlockedExchange(&g_hud_x, (LONG)x);
+    InterlockedExchange(&g_hud_y, (LONG)y);
+    input_set_aux_rect(2, movable ? (int)(x - pad) : 0,
+                       movable ? (int)(y - pad) : 0,
+                       movable ? (int)(w + 2 * pad) : 0,
+                       movable ? (int)(h + 2 * pad) : 0);
+
+    if (movable) {
+        draw_rect(x - pad, y - pad, w + 2 * pad, h + 2 * pad,
+                  {0.05f, 0.06f, 0.09f, 0.80f});
+        draw_rect_outline(x - pad, y - pad, w + 2 * pad, h + 2 * pad, 1.0f,
+                          {0.35f, 0.75f, 1.0f, 0.8f});
+    }
+
+    // Name on the left, the numbers on the right, the way the game labels its
+    // own bars - then the track underneath, full width.
+    const float bar_x = x + icon + gap;
+    draw_text(bar_x, y, text_sz, {0.88f, 0.91f, 0.96f, 1.0f},
+              fit_text(row->e->name, text_sz, bar_w * 0.6f).c_str());
+
+    // Only ever a partly-filled track gets here, so there is always a next
+    // level and always a number of kills to it.
+    char right[96];
+    _snprintf_s(right, sizeof(right), _TRUNCATE, "%d/%d  -  %d to next",
+                row->points, row->levels, row->per - (row->kills % row->per));
+    const float rw = measure_text(text_sz, right);
+    draw_text(bar_x + bar_w - rw, y, text_sz, {0.62f, 0.68f, 0.78f, 1.0f},
+              right);
+
+    const float by = y + text_sz + 3 * scale;
+    draw_icon_clipped(*row->e, x, by + (bar_h - icon) * 0.5f, icon,
+                      by - icon, by + bar_h + icon, kOwnTint);
+    draw_mastery_bar(*row, bar_x, by, bar_w, bar_h);
+}
+
+float g_mastery_scroll = 0;
+
+void mastery_draw(const InputState& in, float x, float y, float w, float h,
+                  const OwnSnap* snap) {
+    constexpr float kRowH = 34;
+    constexpr float kRowIcon = 26;
+    constexpr float kNameW = 250;
+    constexpr float kReadW = 150;
+
+    char line[224];
+    if (!snap) {
+        draw_text(x, y + 4, 13, kTextDim,
+                  "Waiting for the reader - mastery appears once a character "
+                  "is in the world.");
+        return;
+    }
+
+    const std::vector<MasteryRow> rows = mastery_rows(snap);
+
+    int total_points = 0, total_levels = 0, started = 0;
+    for (const auto& r : rows) {
+        total_points += r.points;
+        total_levels += r.levels;
+        if (r.kills > 0) started++;
+    }
+
+    // --- header -------------------------------------------------------------
+    if (snap->hero_class.empty()) {
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "%s - every weapon in the game (the class did not read "
+                    "back, so nothing is filtered out)",
+                    snap->character.c_str());
+    } else {
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "%s the %s - %d weapon%s this class can equip, %d started",
+                    snap->character.c_str(), snap->hero_class.c_str(),
+                    (int)rows.size(), rows.size() == 1 ? "" : "s", started);
+    }
+    draw_text(x, y + 3, 13, kText, line);
+
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "%d / %d levels",
+                total_points, total_levels);
+    float lw = measure_text(13, line);
+    draw_text(x + w - lw, y + 3, 13,
+              total_levels > 0 && total_points >= total_levels ? kRarity[4]
+                                                               : kAccent,
+              line);
+
+    draw_text(x, y + 21, 11, kTextFaint,
+              "One notch is one mastery level, and a level is kills made with "
+              "that weapon. The weapon in your hand gets its own bar on "
+              "screen - drag it while this window is open.");
+
+    const float list_y = y + 40;
+    const float list_h = h - 40;
+    if (list_h < kRowH) return;
+
+    if (rows.empty()) {
+        draw_text(x, list_y + 6, 13, kTextDim,
+                  "No weapons on this page - the atlas database has none this "
+                  "character can equip.");
+        return;
+    }
+
+    // --- the list -----------------------------------------------------------
+    //
+    // Whole rows only, the way the Routes page does it: the overlay cannot
+    // clip text, so a half-drawn row would paint over the header above or
+    // past the window's bottom edge.
+    const int per_page = (int)(list_h / kRowH);
+    const int max_top = (int)rows.size() - per_page;
+    const float max_scroll = max_top > 0 ? max_top * kRowH : 0;
+    g_mastery_scroll -= in.wheel * kRowH * 2;
+    if (g_mastery_scroll > max_scroll) g_mastery_scroll = max_scroll;
+    if (g_mastery_scroll < 0) g_mastery_scroll = 0;
+
+    const float bar_x = x + kRowIcon + 8 + kNameW + 8;
+    const float bar_w = w - (kRowIcon + 8 + kNameW + 8) - kReadW - 8;
+
+    const int first = (int)(g_mastery_scroll / kRowH);
+    for (int i = first; i < (int)rows.size(); i++) {
+        const MasteryRow& r = rows[i];
+        const float ry = list_y + (i - first) * kRowH;
+        if (ry + kRowH > list_y + list_h) break;
+
+        const bool hot = in.mouse_x >= x && in.mouse_x < x + w &&
+                         in.mouse_y >= ry && in.mouse_y < ry + kRowH - 2;
+        // The one in your hand, which is the one the on-screen bar is
+        // following. The same left-edge stripe the Routes page uses for the
+        // route being run, because it answers the same question: which of
+        // these is live right now.
+        const bool equipped = !snap->active_weapon.empty() &&
+                              r.e->id == snap->active_weapon;
+        if (equipped) draw_rect(x, ry, w, kRowH - 2, {0.13f, 0.22f, 0.32f, 1.0f});
+        else if (hot) draw_rect(x, ry, w, kRowH - 2, {0.12f, 0.14f, 0.20f, 1.0f});
+        if (equipped) draw_rect(x, ry, 3, kRowH - 2, kAccent);
+
+        // A weapon can be mastered and not owned - sold, or left on another
+        // character - so the icon dims for "not in the vault", never for
+        // "no progress". The bar already says that.
+        draw_icon_clipped(*r.e, x, ry + (kRowH - 2 - kRowIcon) * 0.5f, kRowIcon,
+                          ry, ry + kRowH, r.owned ? kOwnTint : kMissTint);
+
+        draw_text(x + kRowIcon + 8, ry + 8, 13,
+                  r.owned ? kRarity[r.e->rarity] : kTextDim,
+                  fit_text(r.e->name, 13, kNameW - 6).c_str());
+
+        if (bar_w > 40) draw_mastery_bar(r, bar_x, ry + 8, bar_w, 15);
+
+        if (r.levels <= 0) {
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "-");
+        } else if (r.points < r.levels) {
+            // What the next notch costs, which is the number that decides
+            // whether it is worth another few minutes with this weapon.
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "%d/%d  -  %d to next",
+                        r.points, r.levels, r.per - (r.kills % r.per));
+        } else {
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "%d/%d  -  %d kills",
+                        r.points, r.levels, r.kills);
+        }
+        lw = measure_text(12, line);
+        draw_text(x + w - lw, ry + 9, 12,
+                  r.levels > 0 && r.points >= r.levels ? kRarity[4] : kTextDim,
+                  line);
+    }
+
+    if (max_scroll > 0) {
+        const float track_x = x + w + 4;
+        const float total_h = rows.size() * kRowH;
+        draw_rect(track_x, list_y, 6, list_h, {0.10f, 0.11f, 0.16f, 1.0f});
+        const float thumb_h = list_h * (list_h / total_h);
+        const float thumb_y =
+            list_y + (list_h - thumb_h) * (g_mastery_scroll / max_scroll);
+        draw_rect(track_x, thumb_y, 6, thumb_h, {0.30f, 0.38f, 0.52f, 1.0f});
+    }
+}
 
 }  // namespace
 
@@ -982,6 +1431,16 @@ bool atlas_ui_init() {
     g_win_y = GetPrivateProfileIntW(L"atlas", L"y", 110, g_ini_path.c_str());
     LONG tab = GetPrivateProfileIntW(L"atlas", L"tab", 0, g_ini_path.c_str());
     g_tab = (tab >= 0 && tab < kTabs) ? tab : 0;
+
+    // Where the on-screen mastery bar was left.
+    g_hud_x = GetPrivateProfileIntW(L"mastery", L"x", kUnplaced,
+                                    g_ini_path.c_str());
+    g_hud_y = GetPrivateProfileIntW(L"mastery", L"y", kUnplaced,
+                                    g_ini_path.c_str());
+    // Pinning is gone: which weapon the bar shows is decided by what is in
+    // your hand, so there is nothing left to remember but where it sits.
+    // Anything an older build wrote under this section is cleared on the
+    // next save rather than left to mean nothing.
 
     g_ready_tick = GetTickCount();
     InterlockedExchange(&g_loaded, 1);
@@ -1081,11 +1540,19 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<UnitProgress>& unit_progress,
                      const std::vector<JobState>& jobs,
                      const RuneState& runes,
-                     const CompletionState& done) {
+                     const CompletionState& done,
+                     const std::vector<WeaponMastery>& mastery) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
     auto snap = std::make_shared<OwnSnap>();
     snap->character = inv.valid ? inv.character : "";
+    snap->hero_class = inv.valid ? inv.hero_class : "";
+    snap->active_weapon = inv.valid ? inv.active_weapon : "";
+
+    // Weapon mastery is per character and never merged across them: the
+    // kills your Warrior made with a sword are not your Priest's, and the
+    // page says which character it is describing.
+    for (const auto& wm : mastery) snap->weapon_kills[wm.weapon] = wm.kills;
 
     if (c.valid) {
         merge_collection_list(c.gears, 0, snap.get());
@@ -1136,9 +1603,17 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
             do {
                 std::string text;
                 if (!read_file(dir + fd.cFileName, &text)) continue;
-                // farever-jobs-<name>.json
-                std::wstring wname(fd.cFileName);
-                std::string who(wname.begin(), wname.end());
+                // farever-jobs-<name>.json. The name is ASCII by
+                // construction - sanitize_name wrote it - so a wide
+                // character here is a hand-placed file, and skipping it
+                // beats truncating it into some other character's name.
+                std::string who;
+                bool ascii = true;
+                for (const wchar_t* p = fd.cFileName; *p && ascii; p++) {
+                    if (*p < 32 || *p > 126) ascii = false;
+                    else who.push_back((char)*p);
+                }
+                if (!ascii) continue;
                 const size_t dash = who.find("jobs-");
                 const size_t dot = who.rfind(".json");
                 if (dash == std::string::npos || dot == std::string::npos) continue;
@@ -1230,6 +1705,33 @@ void atlas_ui_tick() {
     WritePrivateProfileStringW(L"atlas", L"y", buf, g_ini_path.c_str());
     swprintf_s(buf, L"%d", (int)InterlockedCompareExchange(&g_tab, 0, 0));
     WritePrivateProfileStringW(L"atlas", L"tab", buf, g_ini_path.c_str());
+
+    swprintf_s(buf, L"%d", (int)InterlockedCompareExchange(&g_hud_x, 0, 0));
+    WritePrivateProfileStringW(L"mastery", L"x", buf, g_ini_path.c_str());
+    swprintf_s(buf, L"%d", (int)InterlockedCompareExchange(&g_hud_y, 0, 0));
+    WritePrivateProfileStringW(L"mastery", L"y", buf, g_ini_path.c_str());
+    // Sweep out what the pin feature used to write. Done once per run rather
+    // than every tick: the keys are gone after the first save, and a config
+    // file that keeps a setting nothing reads is a puzzle for whoever opens
+    // it next.
+    static bool swept = false;
+    if (!swept) {
+        swept = true;
+        std::vector<wchar_t> buf(8192, 0);
+        const DWORD n = GetPrivateProfileSectionW(L"mastery", buf.data(),
+                                                  (DWORD)buf.size(),
+                                                  g_ini_path.c_str());
+        if (n > 0 && n < buf.size() - 2) {
+            for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+                const wchar_t* eq = wcschr(p, L'=');
+                if (!eq) continue;
+                std::wstring key(p, eq);
+                if (key != L"pin" && key.compare(0, 4, L"pin.") != 0) continue;
+                WritePrivateProfileStringW(L"mastery", key.c_str(), nullptr,
+                                           g_ini_path.c_str());
+            }
+        }
+    }
 }
 
 // --- render-thread draw -----------------------------------------------------
@@ -1248,10 +1750,22 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     InputState in;
     input_get(&in);
 
+    // Computed here rather than after the visibility check, because the
+    // pinned mastery bar is drawn either way and needs to know about a click
+    // to be draggable. Consuming it once, up front, keeps a click from being
+    // seen twice by two different widgets.
+    const bool clicked = in.clicks != g_seen_clicks;
+    g_seen_clicks = in.clicks;
+
+    auto own = own_get();
+
+    // The pinned bar lives over the world, so it draws whether or not the
+    // atlas window is open - that is the whole point of pinning one.
+    mastery_hud_draw(in, clicked, screen_w, screen_h, own.get());
+
     if (!in.visible) {
         input_set_ui_rect(0, 0, 0, 0);
         g_dragging = false;
-        g_seen_clicks = in.clicks;
         // Discoverability: a quiet hint for the first minute of a session.
         if (GetTickCount() - g_ready_tick < 60000) {
             draw_text(24, screen_h - 46, 13, {0.7f, 0.75f, 0.85f, 0.65f},
@@ -1260,8 +1774,6 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         return;
     }
 
-    auto own = own_get();
-
     // --- window placement ---------------------------------------------------
     float win_w = kWinW, win_h = kWinH;
     if (win_w > screen_w - 40) win_w = screen_w - 40;
@@ -1269,9 +1781,6 @@ void atlas_ui_draw(float screen_w, float screen_h) {
 
     float wx = (float)(LONG)InterlockedCompareExchange(&g_win_x, 0, 0);
     float wy = (float)(LONG)InterlockedCompareExchange(&g_win_y, 0, 0);
-
-    const bool clicked = in.clicks != g_seen_clicks;
-    g_seen_clicks = in.clicks;
 
     // Dragging: a press on the title bar picks the window up; releasing the
     // button anywhere drops it.
@@ -1344,6 +1853,21 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         for (int c = 0; c < kTabs; c++) {
             if (c == kRoutesTab) {
                 sprintf_s(labels[c], "Routes %d", routes_count());
+            } else if (c == kPlayersTab) {
+                sprintf_s(labels[c], "Players %d", players_count());
+            } else if (c == kMasteryTab) {
+                // The tab carries the same total the page opens with, so the
+                // whole answer is on the strip before you click it.
+                if (own) {
+                    int pts = 0, lvls = 0;
+                    for (const auto& r : mastery_rows(own.get())) {
+                        pts += r.points;
+                        lvls += r.levels;
+                    }
+                    sprintf_s(labels[c], "Mastery %d/%d", pts, lvls);
+                } else {
+                    sprintf_s(labels[c], "Mastery");
+                }
             } else {
                 const int total = g_cat_begin[c + 1] - g_cat_begin[c];
                 if (own)
@@ -1390,6 +1914,19 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         }
     }
 
+    // --- mastery ------------------------------------------------------------
+    //
+    // Like Routes: not a collection page, so no grid, no search and no
+    // filters. It reads the weapons page and the live character rather than
+    // owning entries of its own.
+    if (tab == kMasteryTab) {
+        const float mx = wx + kPad;
+        const float my = wy + kTitleH + tabs_h + 4;
+        mastery_draw(in, mx, my, win_w - 2 * kPad - 10,
+                     win_h - (kTitleH + tabs_h + 4) - kPad, own.get());
+        return;
+    }
+
     // --- routes -------------------------------------------------------------
     //
     // Not a collection page: no grid, no search, no filters. It takes the
@@ -1399,6 +1936,19 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         const float ry = wy + kTitleH + tabs_h + 4;
         routes_draw(in, clicked, rx, ry, win_w - 2 * kPad,
                     win_h - (kTitleH + tabs_h + 4) - kPad);
+        return;
+    }
+
+    // --- players ------------------------------------------------------------
+    //
+    // Same shape as Routes: a list page that takes the whole content band and
+    // scrolls itself. It lists the players this client has been sent, which is
+    // not the same thing as every player on the shard.
+    if (tab == kPlayersTab) {
+        const float px = wx + kPad;
+        const float py = wy + kTitleH + tabs_h + 4;
+        players_draw(in, clicked, px, py, win_w - 2 * kPad,
+                     win_h - (kTitleH + tabs_h + 4) - kPad);
         return;
     }
 
@@ -1469,8 +2019,10 @@ void atlas_ui_draw(float screen_w, float screen_h) {
         std::vector<std::string> tags;
         for (int i = g_cat_begin[tab]; i < g_cat_begin[tab + 1]; i++) {
             for (const auto& t : g_entries[i].tags) {
-                // `craft:` is a lookup key, not something to filter on.
+                // `craft:` and `mastery:` are lookup keys, not something to
+                // filter on - nobody wants a chip that says "8/20".
                 if (t.compare(0, 6, "craft:") == 0) continue;
+                if (t.compare(0, 8, "mastery:") == 0) continue;
                 if (std::find(tags.begin(), tags.end(), t) == tags.end())
                     tags.push_back(t);
             }
@@ -1676,6 +2228,41 @@ bool atlas_ui_lookup(const std::string& id, AtlasItemInfo* out) {
         return true;
     }
     return false;
+}
+
+bool atlas_ui_find_by_name(const std::string& name, AtlasItemInfo* out) {
+    if (!out || !InterlockedCompareExchange(&g_loaded, 0, 0)) return false;
+    std::string want;
+    for (char c : name) want += (char)tolower((unsigned char)c);
+    while (!want.empty() && want.back() == ' ') want.pop_back();
+    if (want.empty()) return false;
+
+    // Exact first, and only then a substring - otherwise "Credence" would
+    // lose to "Credence of the Deep" whenever both exist, and the item the
+    // player named is the one they meant.
+    const Entry* best = nullptr;
+    int partial = 0;
+    for (const Entry& e : g_entries) {
+        std::string lower_name;
+        for (char c : e.name) lower_name += (char)tolower((unsigned char)c);
+        if (lower_name == want) {
+            best = &e;
+            partial = 0;
+            break;
+        }
+        if (lower_name.find(want) != std::string::npos) {
+            if (!partial) best = &e;
+            partial++;
+        }
+    }
+    // An ambiguous substring is a miss. Picking one of four swords for
+    // somebody and putting it on their clipboard is worse than saying that
+    // the name was not specific enough.
+    if (!best || partial > 1) return false;
+    out->name = best->name;
+    out->rarity = best->rarity;
+    out->icon = best->icon;
+    return true;
 }
 
 void atlas_ui_draw_icon(int icon, float x, float y, float size, float alpha) {

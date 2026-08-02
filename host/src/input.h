@@ -37,6 +37,30 @@ void input_get(InputState* out);
 // same frame.
 void input_peek(InputState* out);
 
+// Consumes the accumulated wheel delta only when the cursor is inside the
+// given rectangle, and returns the detents taken.
+//
+// `input_get`'s wheel has exactly one consumer, the atlas grid, because a
+// consumed wheel is gone for every other reader that frame. A second frame
+// with scrollback of its own has to be able to claim the wheel while the
+// pointer is over it without taking it away everywhere else - so the claim
+// is bounded by where the cursor is, and a miss leaves the accumulator
+// untouched for the grid. An empty rect never matches.
+int input_take_wheel_in(int x, int y, int w, int h);
+
+// The one rectangle that claims anything while the host's window is SHUT, and
+// it claims only the wheel - no clicks, no keys. Everything else the host
+// draws is interactive only with the atlas open, which is what keeps it from
+// taking a click during play; but a chat window you cannot scroll until you
+// open another window is not a chat window. The wheel is the input where that
+// trade is worth making: the frame is opaque and drawn over the game's own
+// chat, so a wheel over it is meant for it.
+//
+// Ignored while the atlas window is open - that window stacks above these
+// frames, and input priority has to follow what the player can see. Publish
+// an empty rectangle to give the wheel back.
+void input_set_wheel_rect(int x, int y, int w, int h);
+
 void input_set_visible(bool v);
 
 // The keys the host owns besides the F8 toggle. All are counters rather than

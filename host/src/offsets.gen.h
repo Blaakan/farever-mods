@@ -23,6 +23,7 @@ namespace ent_Hero {
     constexpr uint32_t weaponInHand = 0x540;  // OBJ : st.item.Weapon
     constexpr uint32_t loadout = 0x4d0;  // OBJ : st.Loadout
     constexpr uint32_t specialization = 0x4c8;  // OBJ : st.player.HeroSpecialization
+    constexpr uint32_t name = 0x500;  // OBJ : String
 }  // namespace ent_Hero
 
 // st.player.HeroSpecialization  (sizeof=192, extends st.DBBaseState)
@@ -49,6 +50,7 @@ namespace ent_Unit {
     constexpr uint32_t isInCombat = 0x2b0;  // BOOL
     constexpr uint32_t instigatedStatuses = 0x1f8;  // OBJ : hl.types.ArrayObj
     constexpr uint32_t skin = 0x3e4;  // I32
+    constexpr uint32_t kind = 0x258;  // OBJ : String
 }  // namespace ent_Unit
 
 // ent.GameObject  (sizeof=600, extends ent.Entity)
@@ -68,6 +70,8 @@ namespace GameApp {
     constexpr uint32_t hero = 0xd0;  // OBJ : ent.Hero
     constexpr uint32_t world = 0x98;  // OBJ : world.World
     constexpr uint32_t gui = 0xa0;  // OBJ : ui.GameUI
+    constexpr uint32_t loadingState = 0xf8;  // I32
+    constexpr uint32_t layer = 0xe0;  // OBJ : st.GameLayer
 }  // namespace GameApp
 
 // ui.GameUI  (sizeof=296, extends ui.BaseUI)
@@ -76,13 +80,36 @@ namespace ui_GameUI {
     constexpr uint32_t windows = 0x90;  // OBJ : hl.types.ArrayObj
     constexpr uint32_t root = 0x18;  // OBJ : ui.BaseUIRoot
     constexpr uint32_t s2d = 0x8;  // OBJ : h2d.Scene
+    constexpr uint32_t gameRoot = 0x110;  // OBJ : ui.GameUiRoot
 }  // namespace ui_GameUI
+
+// ui.GameUiRoot  (sizeof=1112, extends ui.UIElement)
+namespace ui_GameUiRoot {
+    constexpr uint32_t SIZEOF = 1112;
+    constexpr uint32_t hud = 0x448;  // OBJ : ui.Hud
+}  // namespace ui_GameUiRoot
+
+// ui.Hud  (sizeof=1408, extends ui.UIElement)
+namespace ui_Hud {
+    constexpr uint32_t SIZEOF = 1408;
+    constexpr uint32_t chat = 0x498;  // OBJ : ui.hud.ChatBox
+}  // namespace ui_Hud
+
+// h2d.Flow  (sizeof=512, extends h2d.Object)
+namespace h2d_Flow {
+    constexpr uint32_t SIZEOF = 512;
+    constexpr uint32_t calculatedWidth = 0x1a0;  // F64
+    constexpr uint32_t calculatedHeight = 0x1a8;  // F64
+    constexpr uint32_t contentWidth = 0x1b0;  // F64
+    constexpr uint32_t contentHeight = 0x1b8;  // F64
+}  // namespace h2d_Flow
 
 // h2d.Scene  (sizeof=360, extends h2d.Layers)
 namespace h2d_Scene {
     constexpr uint32_t SIZEOF = 360;
     constexpr uint32_t width = 0xbc;  // I32
     constexpr uint32_t height = 0xc0;  // I32
+    constexpr uint32_t events = 0x140;  // OBJ : hxd.SceneEvents
 }  // namespace h2d_Scene
 
 // ui.win.MapWindow  (sizeof=1808, extends ui.win.TitleWindow)
@@ -160,6 +187,13 @@ namespace st_Player {
     constexpr uint32_t name = 0xc0;  // OBJ : String
     constexpr uint32_t heroData = 0xe8;  // OBJ : st.player.HeroData
     constexpr uint32_t activityCtx = 0x128;  // OBJ : hxbit.ArrayProxyData
+    constexpr uint32_t chatClient = 0x148;  // OBJ : st.player.ChatClient
+    constexpr uint32_t isMe = 0x138;  // BOOL
+    constexpr uint32_t group = 0x100;  // OBJ : st.Group
+    constexpr uint32_t hero = 0x130;  // OBJ : ent.Hero
+    constexpr uint32_t uid = 0xb8;  // OBJ : String
+    constexpr uint32_t __uid = 0x20;  // I64
+    constexpr uint32_t removed = 0x8;  // BOOL
 }  // namespace st_Player
 
 // st.player.HeroData  (sizeof=360, extends st.DBState)
@@ -172,6 +206,7 @@ namespace st_player_HeroData {
     constexpr uint32_t name = 0xa0;  // OBJ : String
     constexpr uint32_t worldLootLog = 0x128;  // OBJ : hl.types.ArrayObj
     constexpr uint32_t activityProgress = 0x138;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t kind = 0xa8;  // OBJ : String
 }  // namespace st_player_HeroData
 
 // st.player.Progress  (sizeof=232, extends st.DBBaseState)
@@ -187,6 +222,7 @@ namespace st_player_Progress {
     constexpr uint32_t activities = 0x88;  // OBJ : hxbit.MapData
     constexpr uint32_t elements = 0x90;  // OBJ : hxbit.MapData
     constexpr uint32_t npcs = 0x98;  // OBJ : hxbit.MapData
+    constexpr uint32_t weaponProgress = 0xb0;  // OBJ : hxbit.MapData
 }  // namespace st_player_Progress
 
 // hxbit.MapData  (sizeof=48, extends hxbit.BaseProxy)
@@ -222,6 +258,12 @@ namespace hxbit_ObjProxy_ad383d83eed03d0e5475cee203565222 {
     constexpr uint32_t dialog = 0x18;  // OBJ : hxbit.ArrayProxyData
     constexpr uint32_t bit = 0x10;  // I32
 }  // namespace hxbit_ObjProxy_ad383d83eed03d0e5475cee203565222
+
+// hxbit.ObjProxy_Oexp_Int  (sizeof=40)
+namespace hxbit_ObjProxy_Oexp_Int {
+    constexpr uint32_t SIZEOF = 40;
+    constexpr uint32_t exp = 0x14;  // I32
+}  // namespace hxbit_ObjProxy_Oexp_Int
 
 // haxe.ds.StringMap  (sizeof=24)
 namespace haxe_ds_StringMap {
@@ -311,6 +353,100 @@ namespace String {
     constexpr uint32_t bytes = 0x8;  // BYTES
     constexpr uint32_t length = 0x10;  // I32
 }  // namespace String
+
+// st.player.ChatClient  (sizeof=200, extends st.State)
+namespace st_player_ChatClient {
+    constexpr uint32_t SIZEOF = 200;
+    constexpr uint32_t history = 0xb8;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t player = 0xb0;  // OBJ : st.Player
+    constexpr uint32_t chat = 0xc0;  // OBJ : st.ChatServer
+}  // namespace st_player_ChatClient
+
+// ui.hud.ChatBox  (sizeof=1160, extends ui.UIElement)
+namespace ui_hud_ChatBox {
+    constexpr uint32_t SIZEOF = 1160;
+    constexpr uint32_t messages = 0x468;  // OBJ : ui.BaseElement
+    constexpr uint32_t messageInput = 0x480;  // OBJ : ui.comp.InputBox
+    constexpr uint32_t channelDropdown = 0x478;  // OBJ : ui.comp.Dropdown
+    constexpr uint32_t chatClient = 0x448;  // OBJ : st.player.ChatClient
+    constexpr uint32_t messageIndex = 0x450;  // I32
+    constexpr uint32_t footer = 0x470;  // OBJ : ui.BaseElement
+}  // namespace ui_hud_ChatBox
+
+// ui.hud.ChatBoxLine  (sizeof=1104, extends ui.UIElement)
+namespace ui_hud_ChatBoxLine {
+    constexpr uint32_t SIZEOF = 1104;
+    constexpr uint32_t msgText = 0x448;  // OBJ : ui.comp.FmtText
+}  // namespace ui_hud_ChatBoxLine
+
+// ui.hud.ChatBoxMessage  (sizeof=1112, extends ui.hud.ChatBoxLine)
+namespace ui_hud_ChatBoxMessage {
+    constexpr uint32_t SIZEOF = 1112;
+    constexpr uint32_t message = 0x450;  // VIRTUAL
+}  // namespace ui_hud_ChatBoxMessage
+
+// ui.comp.InputBox  (sizeof=1128, extends ui.UIElement)
+namespace ui_comp_InputBox {
+    constexpr uint32_t SIZEOF = 1128;
+    constexpr uint32_t input = 0x458;  // OBJ : ui.comp.FmtTextInput
+    constexpr uint32_t hintText = 0x448;  // OBJ : String
+}  // namespace ui_comp_InputBox
+
+// h2d.TextInput  (sizeof=712, extends h2d.Text)
+namespace h2d_TextInput {
+    constexpr uint32_t SIZEOF = 712;
+    constexpr uint32_t interactive = 0x1e0;  // OBJ : h2d.Interactive
+    constexpr uint32_t cursorIndex = 0x188;  // I32
+}  // namespace h2d_TextInput
+
+// h2d.Text  (sizeof=392, extends h2d.Drawable)
+namespace h2d_Text {
+    constexpr uint32_t SIZEOF = 392;
+    constexpr uint32_t text = 0xe0;  // OBJ : String
+}  // namespace h2d_Text
+
+// hxd.SceneEvents  (sizeof=152)
+namespace hxd_SceneEvents {
+    constexpr uint32_t SIZEOF = 152;
+    constexpr uint32_t currentFocus = 0x30;  // VIRTUAL
+}  // namespace hxd_SceneEvents
+
+// h2d.Object  (sizeof=176)
+namespace h2d_Object {
+    constexpr uint32_t SIZEOF = 176;
+    constexpr uint32_t absX = 0x98;  // F64
+    constexpr uint32_t absY = 0xa0;  // F64
+    constexpr uint32_t visible = 0x50;  // BOOL
+    constexpr uint32_t parent = 0x18;  // OBJ : h2d.Object
+    constexpr uint32_t children = 0x8;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t alpha = 0x58;  // F64
+}  // namespace h2d_Object
+
+// ui.BaseUI  (sizeof=264)
+namespace ui_BaseUI {
+    constexpr uint32_t SIZEOF = 264;
+    constexpr uint32_t elements = 0x70;  // OBJ : hl.types.ArrayObj
+    constexpr uint32_t console = 0x60;  // OBJ : ui.Console
+}  // namespace ui_BaseUI
+
+// h2d.Console  (sizeof=281, extends h2d.Object)
+namespace h2d_Console {
+    constexpr uint32_t SIZEOF = 281;
+    constexpr uint32_t bg = 0xb8;  // OBJ : h2d.Bitmap
+    constexpr uint32_t tf = 0xc0;  // OBJ : h2d.TextInput
+}  // namespace h2d_Console
+
+// st.Group  (sizeof=216, extends st.State)
+namespace st_Group {
+    constexpr uint32_t SIZEOF = 216;
+    constexpr uint32_t players = 0xb8;  // OBJ : hxbit.ArrayProxyData
+}  // namespace st_Group
+
+// st.GameLayer  (sizeof=400, extends st.State)
+namespace st_GameLayer {
+    constexpr uint32_t SIZEOF = 400;
+    constexpr uint32_t players = 0xe0;  // OBJ : hxbit.ArrayProxyData
+}  // namespace st_GameLayer
 
 }  // namespace off
 }  // namespace fmk

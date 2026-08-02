@@ -314,6 +314,60 @@ bool reader_read_unit_progress(std::vector<UnitProgress>* out) {
     return true;
 }
 
+bool reader_read_weapon_mastery(std::vector<WeaponMastery>* out) {
+    out->clear();
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* progress = read_ptr(player, off::st_Player::progress);
+    if (!obj_is(progress, "st.player.Progress")) return false;
+
+    void* data = read_ptr(progress, off::st_player_Progress::weaponProgress);
+    if (!obj_is(data, "hxbit.MapData")) return false;
+
+    void* map = deref_virtual(data, off::hxbit_MapData::map);
+    if (!obj_is(map, "haxe.ds.StringMap")) {
+        static bool once = true;
+        if (once) {
+            once = false;
+            host_log("mastery: weaponProgress map is %s, not a StringMap",
+                     obj_class_name(map).c_str());
+        }
+        return false;
+    }
+
+    std::vector<MapEntry> entries;
+    if (!read_string_map(map, &entries)) return false;
+
+    // A weapon absent from the map has simply never killed anything, which
+    // is the same as zero - so nothing here has to invent a missing entry.
+    out->reserve(entries.size());
+    for (const auto& e : entries) {
+        WeaponMastery wm;
+        wm.weapon = e.key;
+        wm.kills = read_i32(e.value, off::hxbit_ObjProxy_Oexp_Int::exp);
+        // The game clamps this to zero itself on the way in (Progress.hx:498);
+        // a negative here would mean the field is not the one we think.
+        if (wm.kills < 0 || wm.kills > 100000000) continue;
+        out->push_back(std::move(wm));
+    }
+
+    static bool once = true;
+    if (once && !out->empty()) {
+        once = false;
+        std::string sample;
+        for (size_t i = 0; i < out->size() && i < 3; i++) {
+            char one[96];
+            _snprintf_s(one, sizeof(one), _TRUNCATE, " %s=%d",
+                        (*out)[i].weapon.c_str(), (*out)[i].kills);
+            sample += one;
+        }
+        host_log("mastery: %zu weapons used:%s", out->size(), sample.c_str());
+    }
+    return true;
+}
+
 bool reader_read_runes(RuneState* out) {
     *out = {};
     void* hero = reader_hero();
@@ -739,6 +793,60 @@ void read_item_array(void* array_obj, const char* source,
 }
 
 // st.Inventory / st.Equipment both hold their items in `content`.
+// The weapon in the main hand, as the game defines it.
+//
+// `ent.Hero.get_activeWeapon` is `get_weapon1`, which is
+// `Equipment.getSlot("Slot_Weapon1")` (Hero.hx:64), and `getSlot` indexes the
+// equipment inventory by that slot's position in `DataCache.EQUIPMENT_SLOTS`
+// (Equipment.hx:159). That list is the itemType sheet's `isSlot` rows in
+// order, and `Slot_Weapon1` is the first of them - so the main hand is slot
+// zero. The live array confirms it: it is exactly 30 long, which is how many
+// `isSlot` rows the CastleDB has.
+//
+// Deliberately not `ent.Hero.weaponInHand`, which is the weapon the *skill
+// being cast* belongs to and only falls back to this one (Hero.hx:1420-1422).
+// That is a truer answer to "what is swinging right now" and a worse one to
+// "what am I wielding": it flips to the shield for the length of a shield
+// skill, and a progress bar that swaps weapon mid-fight is noise.
+std::string read_active_weapon(void* hero) {
+    void* loadout = hero ? read_ptr(hero, off::ent_Hero::loadout) : nullptr;
+    void* equip = loadout ? read_ptr(loadout, off::st_Loadout::equipment)
+                          : nullptr;
+    void* content = equip ? read_ptr(equip, off::st_Inventory::content)
+                          : nullptr;
+    if (!content) return {};
+
+    const int32_t len = read_i32(content, off::hl_types_ArrayBase::length);
+    void* varr = read_ptr(content, off::hl_types_ArrayObj::array);
+    if (len <= 0 || !varr) return {};
+    // The array's own length can outrun the storage behind it; the item walk
+    // guards the same way, and a slot read past the end would be a wild read
+    // rather than an empty hand.
+    const int32_t cap = read_i32(varr, hlrt::varray_size);
+    if (cap <= 0) return {};
+
+    void* slot = read_ptr((uint8_t*)varr + hlrt::varray_data, 0);
+    if (!slot) return {};
+
+    // The slot is a structural value, the same shape the inventory walk
+    // decodes: the item hangs off `item` (or `it` in the bank's spelling).
+    std::vector<VirtualField> vf;
+    if (!read_virtual_fields(slot, &vf)) return {};
+    for (const auto& f : vf) {
+        if (!f.value_ptr) continue;
+        if ((f.name != "item" && f.name != "it") || f.kind != hlrt::HOBJ)
+            continue;
+        void* item = read_ptr(f.value_ptr, 0);
+        if (!item) return {};
+        // No class check: whatever can sit in the main hand, the caller
+        // resolves the id against the atlas's weapons page and finds nothing
+        // for anything that is not one. That is a narrower filter than a
+        // class-name test and it cannot be fooled by a subclass.
+        return read_hx_string(read_ptr(item, off::st_item_Gear::kind));
+    }
+    return {};
+}
+
 void read_inventory(void* inv, const char* source, std::vector<Item>* out) {
     if (!inv) {
         if (g_item_diag) host_log("items[%s]: inventory is null", source);
@@ -775,6 +883,47 @@ bool reader_read_inventories(Inventories* out) {
     // Character-scoped: only the logged-in character exists in this process.
     out->character = read_hx_string(read_ptr(player, off::st_Player::name));
 
+    // The class, for the pages that ask what this character can equip.
+    //
+    // Straight off the Hero: `ent.Unit.kind` is the unit's id in the unit
+    // sheet, and Unit.hx:686 proves it - `set_kind` uses that very string as
+    // the key into `Data.unit.byId` to resolve the unit's own row. For a hero
+    // that row is the class. HeroData carries the same id and is the fallback,
+    // but it is two more hops through an object this walk does not otherwise
+    // need.
+    std::string kind = read_hx_string(read_ptr(hero, off::ent_Unit::kind));
+    if (kind.empty()) {
+        void* hero_data = read_ptr(player, off::st_Player::heroData);
+        // A null check rather than an exact class-name test, for the same
+        // reason the loadout walk below uses one: a subclass would fail the
+        // name comparison and silently skip the read.
+        if (hero_data)
+            kind = read_hx_string(read_ptr(hero_data,
+                                           off::st_player_HeroData::kind));
+    }
+
+    // The four player classes are the only unit ids that can legitimately show
+    // up on a hero, so anything else is a wrong read rather than a new class,
+    // and saying nothing beats filtering a list by a word we do not
+    // understand. Reported either way - the first version logged only the
+    // unrecognised case, so an empty read said nothing at all and the page
+    // could only report that something had gone wrong, not what.
+    if (kind == "Warrior" || kind == "Rogue" || kind == "Mage" ||
+        kind == "Priest") {
+        out->hero_class = kind;
+    }
+    {
+        static std::string said;
+        if (said != kind) {
+            said = kind;
+            if (out->hero_class.empty())
+                host_log("items: character class reads '%s' - not one of the "
+                         "four, so class filters stay off", kind.c_str());
+            else
+                host_log("items: character class is %s", kind.c_str());
+        }
+    }
+
     void* loadout = read_ptr(hero, off::ent_Hero::loadout);
     if (g_item_diag) {
         host_log("items: loadout=%p cls=%s", loadout,
@@ -788,6 +937,16 @@ bool reader_read_inventories(Inventories* out) {
                        "equipped", &out->equipped);
         read_inventory(read_ptr(loadout, off::st_Loadout::inventory),
                        "bags", &out->bags);
+    }
+    out->active_weapon = read_active_weapon(hero);
+    {
+        static std::string said;
+        if (said != out->active_weapon) {
+            said = out->active_weapon;
+            host_log("items: main hand is %s", out->active_weapon.empty()
+                                                   ? "empty"
+                                                   : out->active_weapon.c_str());
+        }
     }
 
     g_item_diag = false;   // one round of diagnostics is enough
@@ -1007,7 +1166,15 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
 //
 // This is what makes startup quick. Scanning for the instance is a full
 // pass over ~8GB of private memory; this is four dereferences.
-void* find_app_via_statics() {
+// `saw_foreign`, when given, reports that App.inst resolved to a live
+// application object that is NOT a GameApp - the main menu's MenuApp. That
+// is positive evidence of having left the world, and it has to be told apart
+// from a walk that simply failed: both used to come back as null, so the main
+// menu kept the previous GameApp cached, and a dead HashLink object goes on
+// passing a class-name check until the collector reuses its block. Everything
+// gated on "is a character in the world" therefore stayed true at the menu.
+void* find_app_via_statics(bool* saw_foreign = nullptr) {
+    if (saw_foreign) *saw_foreign = false;
     if (!g_app_type) return nullptr;
 
     // GameApp's own statics do not hold `inst` - it is declared on App, the
@@ -1019,6 +1186,9 @@ void* find_app_via_statics() {
     void* statics = slot ? read_ptr(slot, 0) : nullptr;
     void* inst = statics ? read_ptr(statics, off::_App::inst) : nullptr;
     if (obj_is(inst, "GameApp")) return inst;
+
+    // A live object that is not a GameApp is an answer, not a failure.
+    if (saw_foreign && inst && !obj_class_name(inst).empty()) *saw_foreign = true;
 
     // Name the link that broke rather than silently falling back to a scan
     // that costs ~8GB of reads. Logged once; a null `inst` early on is
@@ -1053,13 +1223,26 @@ bool reader_locate_app(bool allow_scan) {
     //
     // App.inst is the authority and reaching it is six pointer reads - the
     // whole reason it is the root - so there is nothing to save by caching.
-    void* live = find_app_via_statics();
+    bool foreign = false;
+    void* live = find_app_via_statics(&foreign);
     if (live && live != g_app) {
         host_log("reader: GameApp %p -> %p (App.inst moved)", g_app, live);
         g_app = live;
         // The old app's hero belongs to the old world. Dropping it costs one
         // pointer read on the next call, not a scan.
         g_hero = nullptr;
+    }
+    // The main menu: App.inst is a MenuApp, so there is no GameApp to be had
+    // and the one we cached belongs to a session that has ended. Letting it
+    // stand is what kept the overlay on screen at the menu, because the
+    // corpse still answers to its class name and still holds a hero pointer.
+    if (!live && foreign) {
+        if (g_app || g_hero) {
+            host_log("reader: App.inst is no longer a GameApp - left the world");
+            g_app = nullptr;
+            g_hero = nullptr;
+        }
+        return false;
     }
     if (g_app && obj_is(g_app, "GameApp")) return true;
 
@@ -1140,6 +1323,27 @@ bool reader_read_hero_pose(double* x, double* y, double* z, double* rot_z) {
            read(hero, off::ent_GameObject::posy, y) &&
            read(hero, off::ent_GameObject::posz, z) &&
            read(hero, off::ent_GameObject::rotationZ, rot_z);
+}
+
+bool reader_is_loading() {
+    // No GameApp is not a loading screen - it is the main menu, and that is
+    // the other question's business (see reader_read_hero_pose above, which
+    // returns nothing once App.inst stops being a GameApp).
+    if (!g_app || !obj_is(g_app, "GameApp")) return false;
+
+    const int32_t state = read_i32(g_app, off::GameApp::loadingState);
+    const bool playing = state == 10;
+
+    // One line per transition, not per intermediate state: a single load
+    // steps through several of them, and this is called at 20Hz.
+    static int was_playing = -1;
+    if (was_playing != (int)playing) {
+        was_playing = (int)playing;
+        if (playing) host_log("reader: in the world (loadingState=10)");
+        else host_log("reader: loading screen (loadingState=%d) - overlay "
+                      "hidden until it ends", state);
+    }
+    return !playing;
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,6 +1551,805 @@ bool reader_read_unit_state(UnitState* out) {
     uint8_t in_combat = 0;
     read(hero, off::ent_Unit::isInCombat, &in_combat);
     out->in_combat = in_combat != 0;
+    out->valid = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Chat
+//
+// Two surfaces, answering different questions - see the chat section of
+// hl_reader.h. `st.player.ChatClient.history` is the durable record and is
+// never trimmed, so tailing it is a length read and a decode of what is new.
+// `ui.hud.ChatBox` is only what the game happens to have drawn, and is read
+// for the three things history cannot say: where the box is, what is being
+// typed into it, and whether the last line was one the client made up itself.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Chat is the one thing this host reads that a person typed, so it is the one
+// place where narrowing the text is not acceptable.
+//
+// read_hx_string goes through read_utf16, which replaces every code unit past
+// 0x7f with '?'. That is right for what it was written for - class names,
+// field names, CDB ids, all of which are ASCII by construction - and it
+// destroys an accented character in a player's name, or a whole sentence in a
+// language that is not English. There is no recovering it afterwards: the
+// original code unit is gone by the time the caller sees the string.
+//
+// This is added BESIDE read_utf16 rather than replacing it. read_utf16 is
+// shared with hl_scan and with obj_class_name, and its callers compare the
+// result against literal ASCII names; changing what all of them get to fix
+// chat would be a much wider change for no gain anywhere else. So only the
+// chat reads use this, and every other caller is untouched.
+//
+// What a player with an accented name will see on screen: the overlay's font
+// atlas is rasterised for ASCII 32..126 only (overlay_d3d12.cpp, kFirstChar /
+// kLastChar), so draw_text skips any byte outside that range and advances a
+// blank. "Renée" therefore draws as "Ren" followed by two blank gaps and "e".
+// That is the renderer degrading visibly, which is the correct failure: the
+// string itself is now proper UTF-8, so farever-chat-log.txt records the name
+// as the player actually spells it, and widening the atlas later fixes the
+// screen without another pass over the reader.
+std::string read_hx_string_u8(const void* str_obj) {
+    if (!str_obj) return {};
+    const void* bytes = read_ptr(str_obj, off::String::bytes);
+    if (!bytes) return {};
+    int32_t len = read_i32(str_obj, off::String::length);
+    if (len <= 0 || len > 4096) return {};
+
+    std::string out;
+    out.reserve((size_t)len + 8);
+    for (int32_t i = 0; i < len; i++) {
+        uint16_t c = 0;
+        if (!mem_read((const uint16_t*)bytes + i, &c, sizeof(c))) break;
+        if (c == 0) break;
+
+        uint32_t cp = c;
+        if (c >= 0xd800 && c <= 0xdbff) {
+            // A high surrogate only means anything paired with the low one
+            // that follows. An unpaired half is a broken string rather than a
+            // character, and U+FFFD says that out loud instead of emitting an
+            // invalid sequence for something downstream to choke on.
+            uint16_t lo = 0;
+            if (i + 1 < len &&
+                mem_read((const uint16_t*)bytes + i + 1, &lo, sizeof(lo)) &&
+                lo >= 0xdc00 && lo <= 0xdfff) {
+                cp = 0x10000u + ((uint32_t)(c - 0xd800) << 10) +
+                     (uint32_t)(lo - 0xdc00);
+                i++;
+            } else {
+                cp = 0xfffd;
+            }
+        } else if (c >= 0xdc00 && c <= 0xdfff) {
+            cp = 0xfffd;
+        }
+
+        if (cp < 0x80) {
+            out.push_back((char)cp);
+        } else if (cp < 0x800) {
+            out.push_back((char)(0xc0 | (cp >> 6)));
+            out.push_back((char)(0x80 | (cp & 0x3f)));
+        } else if (cp < 0x10000) {
+            out.push_back((char)(0xe0 | (cp >> 12)));
+            out.push_back((char)(0x80 | ((cp >> 6) & 0x3f)));
+            out.push_back((char)(0x80 | (cp & 0x3f)));
+        } else {
+            out.push_back((char)(0xf0 | (cp >> 18)));
+            out.push_back((char)(0x80 | ((cp >> 12) & 0x3f)));
+            out.push_back((char)(0x80 | ((cp >> 6) & 0x3f)));
+            out.push_back((char)(0x80 | (cp & 0x3f)));
+        }
+    }
+    return out;
+}
+
+// A HashLink enum value is { hl_type*; int index; <constructor params> }. The
+// index sits at a fixed place in that native layout, but where a
+// constructor's parameters land does not: hl_init_enum pads each one
+// individually and records it in the enum's construct table, which
+// gen-offsets.mjs does not emit. So the parameter slots below are probes, not
+// offsets. st.Channel's Player, Group and System each carry a single pointer,
+// and nothing reached through a probe is believed until obj_is has named the
+// class it points at. A probe that does not validate leaves the far end of a
+// whisper empty, which is the honest answer to a thing that cannot be read.
+constexpr uint32_t kEnumParamProbe[] = {0x10, 0x18};
+
+void* enum_param_obj(void* env, const char* cls) {
+    if (!env) return nullptr;
+    for (uint32_t probe : kEnumParamProbe) {
+        void* p = read_ptr(env, probe);
+        if (obj_is(p, cls)) return p;
+    }
+    return nullptr;
+}
+
+// localStamp is Null<Float>, and genhl boxes that: the field holds a pointer
+// to a { hl_type*; double } rather than the double itself. Both shapes are
+// accepted, and the box's own tag is checked before its payload is trusted.
+// A message the client never stamped has to come back as "no time" - a
+// made-up arrival time would sort the log wrongly and look authoritative
+// while doing it.
+bool read_boxed_f64(void* storage, int32_t kind, double* out) {
+    if (!storage) return false;
+    if (kind == hlrt::HF64) return read(storage, 0, out);
+    void* box = read_ptr(storage, 0);
+    void* type = box ? read_ptr(box, 0) : nullptr;
+    if (!type || read_i32(type, hlrt::type_kind) != hlrt::HF64) return false;
+    return read(box, hlrt::dyn_payload, out);
+}
+
+bool g_chat_diag = true;
+
+// One history entry. The element is a Haxe anonymous structure, so its fields
+// are matched by name: the order of a structure's fields is not guaranteed
+// and there is no generated offset for any of them.
+//
+// Always produces a message, even when nothing decodes. A caller tailing this
+// counts what it got, and dropping an unreadable line would shift every later
+// index by one - an empty message says "this line was there and would not
+// read", which is the truth.
+void decode_chat_message(void* elem, void* hero, const std::string& me,
+                         ChatMessage* out) {
+    *out = {};
+
+    std::vector<VirtualField> vf;
+    if (!read_virtual_fields(elem, &vf)) {
+        // Name what it was instead. The whole decode rests on these being
+        // structures, so if that ever stops being true one line in the log
+        // says so rather than the feed silently going blank.
+        if (g_chat_diag) {
+            g_chat_diag = false;
+            const std::string cls = obj_class_name(elem);
+            host_log("chat: history element %p is %s, not a structure", elem,
+                     cls.empty() ? "<not an object>" : cls.c_str());
+        }
+        return;
+    }
+
+    std::string local_id;
+    void* sender = nullptr;
+    for (const auto& f : vf) {
+        if (!f.value_ptr) continue;
+        if (f.name == "text") {
+            out->text = read_hx_string_u8(read_ptr(f.value_ptr, 0));
+        } else if (f.name == "localTextId") {
+            local_id = read_hx_string_u8(read_ptr(f.value_ptr, 0));
+        } else if (f.name == "localStamp") {
+            double s = 0;
+            if (read_boxed_f64(f.value_ptr, f.kind, &s)) out->stamp = s;
+        } else if (f.name == "sender") {
+            sender = read_ptr(f.value_ptr, 0);
+        } else if (f.name == "channel") {
+            // The field is declared st.Channel - ChatBoxMessage.init reads it
+            // straight into an st.Channel register (ChatBox.hx:209) - so it is
+            // an HENUM and anything else in this slot is not a channel. The
+            // kind was not checked before, which meant a slot holding
+            // something else entirely was still decoded as one.
+            if (f.kind != hlrt::HENUM) continue;
+            void* env = read_ptr(f.value_ptr, 0);
+            if (!env) continue;
+            // read_i32 hands back 0 on a failed read and 0 is Local, so an
+            // unreadable enum used to come out labelled as local chat -
+            // a plausible default in place of a failure, which is the one
+            // thing this reader must never do. Check the read: an unread
+            // channel stays kChatUnknown.
+            int32_t idx = 0;
+            if (!read(env, hlrt::venum_index, &idx)) continue;
+            if (idx < kChatLocal || idx > kChatSystem) continue;
+            out->channel = (ChatChannel)idx;
+            if (out->channel == kChatPlayer || out->channel == kChatSystem) {
+                void* p = enum_param_obj(env, "st.Player");
+                if (p)
+                    out->other =
+                        read_hx_string_u8(read_ptr(p, off::st_Player::name));
+            }
+            // Group is left alone deliberately. Its parameter is an st.Group,
+            // and st.Group has no name field among the generated offsets -
+            // only its player list - so there is nothing to put in `other`
+            // that would not be invented. The channel already says it was a
+            // group message.
+        }
+    }
+
+    if (out->text.empty() && !local_id.empty()) {
+        // A line the client generated for itself carries a localisation id
+        // instead of drawn text, and resolving one needs the language table,
+        // which this host does not read. Reporting the id says exactly what
+        // is known; inventing a sentence for it would not.
+        out->text = local_id;
+    }
+
+    if (obj_is(sender, "ent.Hero")) {
+        out->sender = read_hx_string_u8(read_ptr(sender, off::ent_Hero::name));
+    }
+    // Anything else leaves the sender empty. A null sender is a system line,
+    // and any other kind of ent.Unit has no name field in the generated
+    // offsets - only its unit id, which is not what anybody is called.
+
+    // Identity, not st.Player.isMe: that flag belongs to a Player object this
+    // walk never validated, and the sender is a Unit in any case. The pointer
+    // test settles it outright for anything received in this world instance;
+    // the name comparison covers the rest of the session, whose sender
+    // objects belong to worlds that have since been torn down.
+    out->mine = (sender && sender == hero) ||
+                (!out->sender.empty() && out->sender == me);
+}
+
+}  // namespace
+
+bool reader_read_chat(int32_t from, int32_t max, std::vector<ChatMessage>* out,
+                      int32_t* total) {
+    if (out) out->clear();
+    if (total) *total = 0;
+
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* player = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(player, "st.Player")) return false;
+    void* client = read_ptr(player, off::st_Player::chatClient);
+    if (!obj_is(client, "st.player.ChatClient")) return false;
+    void* hist = read_ptr(client, off::st_player_ChatClient::history);
+    if (!hist) return false;
+
+    // Both of these used to go through read_i32, which cannot tell a length of
+    // nought from a read that failed. That is not a cosmetic distinction here:
+    // `total` is how chat.cpp recognises a relog, so a single failed read
+    // reported the whole session as a brand new empty history and made the
+    // caller destructively reset. A read that fails has to say so.
+    int32_t len = 0;
+    if (!read(hist, off::hl_types_ArrayObj::length, &len)) return false;
+    void* varr = read_ptr(hist, off::hl_types_ArrayObj::array);
+    if (!varr) return false;
+    // A session's chat is thousands of lines, not millions: a length past
+    // this is a bad read of a repointed array, the same way find_map_window
+    // treats a window list of two hundred. The varray's own capacity is the
+    // second opinion, and the smaller of the two is the one worth trusting.
+    if (len < 0 || len > 100000) return false;
+    int32_t cap = 0;
+    if (!read(varr, hlrt::varray_size, &cap) || cap < 0) return false;
+    if (cap < len) len = cap;
+
+    if (total) *total = len;
+
+    static bool once = true;
+    if (once) {
+        once = false;
+        host_log("chat: ChatClient %p history at %p, %d lines already there",
+                 client, hist, len);
+    }
+
+    if (!out) return true;
+    // A `from` past the end is what a relog looks like from here: the client
+    // builds a new ChatClient with an empty history, so the caller's tail
+    // index outruns it. Being ahead is not a failure and must not read past
+    // the array - the caller sees `total` go backwards and resets.
+    //
+    // `max` is a bound, not a hint: nought or less asks for no messages, and
+    // `total` has already been reported, so that is still success.
+    if (from < 0) from = 0;
+    if (from >= len || max <= 0) return true;
+
+    int32_t end = len;
+    if ((int64_t)from + max < (int64_t)end) end = from + max;
+
+    // The same decoder as the sender names it is compared against - if one of
+    // the two narrowed and the other did not, an accented character name would
+    // never match itself and `mine` would be false for everything that player
+    // said.
+    const std::string me =
+        read_hx_string_u8(read_ptr(hero, off::ent_Hero::name));
+    void* elems = (uint8_t*)varr + hlrt::varray_data;
+    out->reserve((size_t)(end - from));
+    for (int32_t i = from; i < end; i++) {
+        ChatMessage m;
+        decode_chat_message(read_ptr(elems, (uint32_t)(i * 8)), hero, me, &m);
+        out->push_back(std::move(m));
+    }
+    return true;
+}
+
+namespace {
+
+void* g_chatbox = nullptr;
+void* g_chatbox_gui = nullptr;
+
+// The ChatBox is a HUD element rather than a window, so it is not in
+// ui.BaseUI.windows - it lives in `elements`, which is everything the UI
+// built. That walk is cheap but it happens on every poll, so the pointer is
+// cached and re-checked by class name the way the hero is.
+//
+// The cache is keyed on the ui.GameUI that owned it, because a class-name
+// check alone is not enough: a dead HashLink object goes on answering to its
+// name until the collector reuses its block, which is the lesson App.inst
+// taught further up this file. Without the key, a character select would
+// leave this pointing at the previous session's box - still validating, no
+// longer on screen.
+void* find_chat_box() {
+    if (!g_app || !obj_is(g_app, "GameApp")) return nullptr;
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    if (!gui) return nullptr;
+    if (g_chatbox && gui == g_chatbox_gui &&
+        obj_is(g_chatbox, "ui.hud.ChatBox"))
+        return g_chatbox;
+
+    g_chatbox = nullptr;
+    g_chatbox_gui = nullptr;
+
+    // The game's own route, not one worked out from the type table:
+    // ui.GameUI.get_hud (GameUI.hx:33) is `gameRoot?.hud`, and the box is
+    // ui.Hud.chat. Every hop is validated by class name, because a null or a
+    // repointed field here has to read as "no chat box" rather than as a
+    // pointer to walk.
+    //
+    // `ui.BaseUI.elements` looked like the obvious answer and is not - it
+    // holds no ui.hud.ChatBox at all, so the first version of this found
+    // nothing, in a way that showed up only as the command surface silently
+    // never firing. Recorded here so nobody spends that test cycle again.
+    void* root = read_ptr(gui, off::ui_GameUI::gameRoot);
+    if (!obj_is(root, "ui.GameUiRoot")) return nullptr;
+    void* hud = read_ptr(root, off::ui_GameUiRoot::hud);
+    if (!obj_is(hud, "ui.Hud")) return nullptr;
+    void* box = read_ptr(hud, off::ui_Hud::chat);
+    if (!obj_is(box, "ui.hud.ChatBox")) return nullptr;
+
+    g_chatbox = box;
+    g_chatbox_gui = gui;
+    static bool once = true;
+    if (once) {
+        once = false;
+        host_log("chat: ChatBox %p via gui.gameRoot.hud.chat", box);
+    }
+    return box;
+}
+
+// Whether h2d would actually be drawing `obj`. That is three things at once:
+// the object's own visible flag, the same flag on every ancestor - h2d skips a
+// whole subtree at the first invisible object on the way down - and the chain
+// arriving at the scene that is being rendered.
+//
+// Rooting it in the scene is the part that matters and is not decoration. A
+// detached subtree keeps its children and keeps its flags, so "parent is not
+// null" passes on a box that was pulled out of the scene entirely. The chain
+// is known to end at s2d: ui.$BaseUIRoot.__constructor__ adds the UI root to
+// BaseUI.s2d directly (BaseUI.hx:24, via h2d.Layers.add) and everything the
+// HUD builds hangs off it.
+//
+// The hop bound is there so a cycle produced by a bad read cannot spin here.
+// Not reaching the scene within it reports "not drawn", which is the safe way
+// round: the caller then leaves its own window where it is rather than moving
+// it onto bounds nothing is under.
+bool drawn_in_scene(void* obj, void* scene) {
+    if (!obj || !scene) return false;
+    void* cur = obj;
+    for (int hop = 0; hop < 32; hop++) {
+        uint8_t vis = 0;
+        if (!read(cur, off::h2d_Object::visible, &vis)) return false;
+        if (!vis) return false;
+        if (cur == scene) return true;
+        cur = read_ptr(cur, off::h2d_Object::parent);
+        if (!cur) break;
+    }
+    // Say it once. If this ever fires the chain is not what the constructor
+    // says it is, and the symptom - chat bounds that never update - would
+    // otherwise look like nothing at all.
+    static bool once = true;
+    if (once) {
+        once = false;
+        host_log("chat: the messages flow does not walk up to the UI scene "
+                 "%p - reporting it as not drawn", scene);
+    }
+    return false;
+}
+
+}  // namespace
+
+bool reader_read_chatbox(ChatBoxState* out) {
+    *out = {};
+    void* box = find_chat_box();
+    if (!box) return false;
+    out->found = true;
+
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    void* scene = gui ? read_ptr(gui, off::ui_GameUI::s2d) : nullptr;
+    if (scene) {
+        out->scene_w = read_i32(scene, off::h2d_Scene::width);
+        out->scene_h = read_i32(scene, off::h2d_Scene::height);
+    }
+
+    void* msgs = read_ptr(box, off::ui_hud_ChatBox::messages);
+
+    // `visible` describes the MESSAGE AREA - the `messages` flow - because
+    // that is the rectangle the caller draws over. It used to be the ChatBox's
+    // own flag and the ChatBox's own parent, which answers a different
+    // question: a box can be visible and attached while the flow inside it is
+    // collapsed or hidden, and the caller then held an opaque window over
+    // bounds with nothing under them. chat.cpp's alignment is deliberately
+    // sticky, so once that happened the window stayed pinned there.
+    //
+    // One walk covers both objects. It starts on the flow, so the flow's own
+    // flag is the first thing read; it goes up through the ChatBox, so the
+    // box's flag is read on the way; and it ends at the UI scene, which is
+    // what says any of it is attached to something being drawn.
+    out->visible = drawn_in_scene(msgs, scene);
+
+    // Where the message area is, and how big. Both come from the flow
+    // itself: `ui.BaseElement` extends `h2d.Flow`, and a Flow records the box
+    // its own layout settled on in calculatedWidth/calculatedHeight.
+    //
+    // An earlier version of this derived the height from the gap between the
+    // messages and the footer and left the width at 0 for the caller to
+    // guess, on the belief that a Flow's size was not available to generate.
+    // It is - this is one read, it is the game's own number, and the guess it
+    // replaces was visibly the wrong size on screen.
+    if (msgs) {
+        // All four reads are checked. absX/absY used to have their returns
+        // dropped, so a failed read left the origin at whatever it had been
+        // initialised to and the caller placed its window on that - a
+        // rectangle at 0,0 that is not the game's, reported as though it
+        // were. Nothing is reported unless the whole rectangle read.
+        double ax = 0, ay = 0, w = 0, h = 0;
+        const bool origin_ok = read(msgs, off::h2d_Object::absX, &ax) &&
+                               read(msgs, off::h2d_Object::absY, &ay);
+        const bool size_ok =
+            read(msgs, off::h2d_Flow::calculatedWidth, &w) &&
+            read(msgs, off::h2d_Flow::calculatedHeight, &h);
+        if (origin_ok && size_ok) {
+            out->msg_x = ax;
+            out->msg_y = ay;
+            // A zero or absurd dimension means the read landed mid-layout, or
+            // before the flow has ever been laid out. No rectangle is better
+            // than a wrong one drawn over the game's own chat, so leave it at
+            // 0 and let the caller fall back to its own placement.
+            const double lim_w =
+                out->scene_w > 0 ? (double)out->scene_w : 8192.0;
+            const double lim_h =
+                out->scene_h > 0 ? (double)out->scene_h : 8192.0;
+            if (w > 0 && w <= lim_w) out->msg_w = w;
+            if (h > 0 && h <= lim_h) out->msg_h = h;
+        }
+
+        static bool once = true;
+        if (once && out->msg_w > 0) {
+            once = false;
+            host_log("chat: message area %.0f,%.0f %.0fx%.0f in a %dx%d scene",
+                     out->msg_x, out->msg_y, out->msg_w, out->msg_h,
+                     out->scene_w, out->scene_h);
+        }
+    }
+
+    void* input_box = read_ptr(box, off::ui_hud_ChatBox::messageInput);
+    void* input = input_box
+                      ? read_ptr(input_box, off::ui_comp_InputBox::input)
+                      : nullptr;
+    if (input) {
+        // No exact class-name test here: the field is declared
+        // ui.comp.FmtTextInput, and requiring that name would skip the read
+        // outright if a subclass ever went in - the mistake the loadout walk
+        // records further up.
+        out->input = read_hx_string_u8(read_ptr(input, off::h2d_Text::text));
+
+        // h2d.Interactive.hasFocus() is `scene.events.currentFocus == this`
+        // (Interactive.hx:311). h2d.Object has no generated `scene` field, so
+        // the scene comes down from the UI instead and the comparison is the
+        // same one the game makes.
+        void* inter = read_ptr(input, off::h2d_TextInput::interactive);
+        void* events =
+            scene ? read_ptr(scene, off::h2d_Scene::events) : nullptr;
+        if (inter && events) {
+            // currentFocus is declared as an interface, so it holds a
+            // vvirtual whose value is the object; a build that stores the
+            // object directly is accepted too. If neither shape resolves,
+            // this reports "not focused" rather than guessing - being wrong
+            // the other way means the host eating a keystroke meant for the
+            // game.
+            void* raw = read_ptr(events, off::hxd_SceneEvents::currentFocus);
+            void* cur =
+                deref_virtual(events, off::hxd_SceneEvents::currentFocus);
+            out->focused = (cur && cur == inter) || (raw && raw == inter);
+        }
+    }
+
+    // The newest line the game drew. ChatBoxMessage extends ChatBoxLine, so
+    // the message test comes first and "is a line and is not a message" is
+    // precisely the locally generated echo - which is the whole signal behind
+    // the command surface. The flow is appended to, so the last child that is
+    // one of the two is the newest.
+    void* kids = msgs ? read_ptr(msgs, off::h2d_Object::children) : nullptr;
+    if (kids) {
+        int32_t n = 0;
+        const bool len_ok =
+            read(kids, off::hl_types_ArrayBase::length, &n) && n >= 0 &&
+            n <= 100000;
+        void* kvarr = read_ptr(kids, off::hl_types_ArrayObj::array);
+        int32_t cap = 0;
+        const bool cap_ok = kvarr && read(kvarr, hlrt::varray_size, &cap) &&
+                            cap >= 0;
+        if (len_ok && n > 0) {
+            // The flow is appended to and nothing trims it.
+            // ChatBox.receiveMessage (ChatBox.hx:126-129) constructs one
+            // ChatBoxMessage into `messages` per message and removes nothing;
+            // the only thing that clears it is reloadMessages, which calls
+            // h2d.Flow.removeChildren (ChatBox.hx:120). Both read out of the
+            // shipped bytecode, not assumed.
+            //
+            // The comment that used to sit here said the flow held the lines
+            // the box had room for rather than the session, and on the
+            // strength of that this walked the first 512 children. It is the
+            // wrong end. Children are appended, so past 512 lines that walk
+            // inspected a frozen prefix: line_count stopped at 512 for the
+            // rest of the session and `newest` was pinned to whatever was
+            // said at line 512, hours ago.
+            //
+            // So: walk the TAIL, and report the array's own length. The bound
+            // below limits how much work this does per poll. It must not
+            // limit what gets reported, which is what the old cap did.
+            out->line_count = n;
+        }
+
+        // The varray's capacity bounds the INDEXING and nothing else. It was
+        // gating the count as well, which put the same defect back by a
+        // shorter route: one failed capacity read and the header's promise
+        // that line_count is the flow's own child count became a reported
+        // nought - a caller watching for growth would have seen an empty chat
+        // box rather than a read that did not work.
+        if (len_ok && cap_ok && n > 0) {
+            int32_t end = n;
+            if (cap < end) end = cap;   // the varray's own second opinion
+            constexpr int32_t kInspect = 64;
+            int32_t start = end - kInspect;
+            if (start < 0) start = 0;
+
+            void* kelems = (uint8_t*)kvarr + hlrt::varray_data;
+            void* newest = nullptr;
+            bool newest_is_msg = false;
+            for (int32_t i = start; i < end; i++) {
+                void* e = read_ptr(kelems, (uint32_t)(i * 8));
+                if (!e) continue;
+                const bool is_msg = obj_is(e, "ui.hud.ChatBoxMessage");
+                if (!is_msg && !obj_is(e, "ui.hud.ChatBoxLine")) continue;
+                newest = e;
+                newest_is_msg = is_msg;
+            }
+            if (newest) {
+                out->last_is_error = !newest_is_msg;
+                void* t = read_ptr(newest, off::ui_hud_ChatBoxLine::msgText);
+                // FmtText extends h2d.HtmlText extends h2d.Text, so the drawn
+                // string is h2d.Text.text however it was marked up.
+                if (t)
+                    out->last_line =
+                        read_hx_string_u8(read_ptr(t, off::h2d_Text::text));
+            } else if (end > 0) {
+                // Children, but not one line among the ones inspected. Name
+                // what is in there: the command surface reads nothing but
+                // this, and a silent zero would look exactly like an empty
+                // chat box.
+                static bool once = true;
+                if (once) {
+                    once = false;
+                    const std::string cls = obj_class_name(
+                        read_ptr(kelems, (uint32_t)((end - 1) * 8)));
+                    host_log("chat: messages flow has %d children, last is %s "
+                             "- no ChatBoxLine in the last %d", n,
+                             cls.empty() ? "<not an object>" : cls.c_str(),
+                             end - start);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool reader_console_open() {
+    // ui.Console extends h2d.Console, so no exact class-name test - only the
+    // null checks, and a broken link means "not open" rather than a guess.
+    if (!g_app || !obj_is(g_app, "GameApp")) return false;
+    void* gui = read_ptr(g_app, off::GameApp::gui);
+    if (!gui) return false;
+    void* console = read_ptr(gui, off::ui_BaseUI::console);
+    if (!console) return false;
+    void* bg = read_ptr(console, off::h2d_Console::bg);
+    if (!bg) return false;
+    uint8_t vis = 0;
+    if (!read(bg, off::h2d_Object::visible, &vis)) return false;
+    return vis != 0;
+}
+
+// ---------------------------------------------------------------------------
+// The layer roster
+//
+// GameApp.layer -> st.GameLayer.players is every player this client has been
+// sent. The game's Manage Party window walks that same array and hides most
+// of it: ui.win.GroupWindow.init squares Const.UI.GroupWindow_NearDist (100)
+// and buckets each player on it, then draws the far bucket only under
+// Config.prefs.admin. Nothing here defeats a protection - the data is already
+// in the process, and this only stops throwing it away.
+//
+// Three deliberate refusals, all of them things the memory does not say:
+//
+//  * A player with no hero has no position. GroupWindow.hx:62 pushes that
+//    player into the far bucket, which reads as a claim about distance; this
+//    reader reports "no position" instead and lets the page say so.
+//  * Another player's `group` is network bit 12 and conditionally visible, so
+//    it is null here for everyone but oneself. There is therefore no honest
+//    "is that player already in a party" and none is computed.
+//  * The array is what the server sent us. Nothing in it says it is the whole
+//    shard.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A roster past this is a bad read of a repointed array, not a busy shard -
+// the same judgement find_map_window makes about a window list of two
+// hundred. Clamped rather than rejected: the first entries of an array whose
+// length went wrong are still usually the real ones, and the log says it
+// happened.
+constexpr int32_t kRosterMax = 4096;
+
+// A party is a handful of people. Same reasoning, tighter bound.
+constexpr int32_t kGroupMax = 64;
+
+}  // namespace
+
+bool reader_read_roster(RosterState* out) {
+    if (!out) return false;
+    *out = {};
+
+    // The local hero is the only route to the local st.Player, and that
+    // player is the only one whose `group` is replicated to us.
+    void* hero = reader_hero();
+    if (!hero) return false;
+    void* me = read_ptr(hero, off::ent_Hero::player);
+    if (!obj_is(me, "st.Player")) return false;
+
+    if (!g_app || !obj_is(g_app, "GameApp")) return false;
+    void* layer = read_ptr(g_app, off::GameApp::layer);
+    if (!obj_is(layer, "st.GameLayer")) return false;
+    void* proxy = read_ptr(layer, off::st_GameLayer::players);
+    if (!proxy) return false;
+
+    void* elems = nullptr;
+    int32_t count = 0;
+    if (!read_proxy_array(proxy, &elems, &count)) return false;
+
+    bool clamped = false;
+    if (count > kRosterMax) {
+        count = kRosterMax;
+        clamped = true;
+    }
+
+    // --- the local player's own party ---------------------------------------
+    //
+    // Read first, because membership is then a pointer test on each roster
+    // row rather than a second walk. `group` is null whenever the local
+    // player is not in one, which is the ordinary case and not a failure.
+    //
+    // The order is the game's own: st.Group.get_leader (findex 4182) is
+    // literally players[0], with a length check that returns null on an empty
+    // array, so reading the array in order already puts the leader first.
+    std::vector<void*> party;
+    void* group = read_ptr(me, off::st_Player::group);
+    if (obj_is(group, "st.Group")) {
+        void* gproxy = read_ptr(group, off::st_Group::players);
+        void* gelems = nullptr;
+        int32_t gcount = 0;
+        if (gproxy && read_proxy_array(gproxy, &gelems, &gcount)) {
+            if (gcount > kGroupMax) gcount = kGroupMax;
+            for (int32_t i = 0; i < gcount; i++) {
+                void* p = read_ptr(gelems, (uint32_t)(i * 8));
+                if (!obj_is(p, "st.Player")) continue;
+                party.push_back(p);
+                // A member whose name has not arrived is left as an empty
+                // string rather than as "Unknown": the caller can tell an
+                // absent name from a player called anything at all.
+                out->group.push_back(
+                    read_hx_string_u8(read_ptr(p, off::st_Player::name)));
+            }
+            out->i_am_leader = !party.empty() && party.front() == me;
+        }
+    }
+
+    // --- the roster ---------------------------------------------------------
+    int32_t with_hero = 0;
+    int32_t skipped_removed = 0;
+    out->players.reserve((size_t)count);
+    for (int32_t i = 0; i < count; i++) {
+        void* p = read_ptr(elems, (uint32_t)(i * 8));
+        if (!obj_is(p, "st.Player")) continue;
+
+        // st.BaseState.removed is the tombstone the game itself checks before
+        // it looks at a roster entry at all (GroupWindow.hx:62). A removed
+        // player is one the client has already been told is gone.
+        uint8_t removed = 0;
+        if (read(p, off::st_Player::removed, &removed) && removed) {
+            skipped_removed++;
+            continue;
+        }
+
+        RosterPlayer r;
+        r.name = read_hx_string_u8(read_ptr(p, off::st_Player::name));
+
+        // st.BaseState.__uid, not st.Player.uid - the latter is a String and
+        // reading it here would report a pointer as an identity.
+        read(p, off::st_Player::__uid, &r.uid);
+
+        // Identity by pointer, which is also the test the game uses when it
+        // asks whether a roster entry is already in the party
+        // (GroupWindow.hx:60 does ArrayObj.indexOf with a null comparator,
+        // i.e. reference equality). It needs no assumption about a flag.
+        r.me = (p == me);
+        for (void* g : party) {
+            if (g == p) { r.in_my_group = true; break; }
+        }
+
+        // st.Player.isMe is not a replicated property - there is no
+        // __net_mark_isMe beside it - so it is the client's own bookkeeping
+        // rather than anything the server said. It is read only as a
+        // cross-check on the pointer test above; if the two ever disagree,
+        // that is worth one line in the log and nothing else.
+        uint8_t is_me = 0;
+        if (read(p, off::st_Player::isMe, &is_me) && (is_me != 0) != r.me) {
+            static bool once = true;
+            if (once) {
+                once = false;
+                host_log("roster: st.Player %p has isMe=%d but %s the local "
+                         "player by pointer - the pointer is what is used",
+                         p, (int)is_me, r.me ? "is" : "is not");
+            }
+        }
+
+        // No hero means no position. It does NOT mean far away: the hero
+        // simply has not been replicated to this client. A partial coordinate
+        // read is treated the same way, because half a position placed at the
+        // origin is a location, not a failure.
+        void* h = read_ptr(p, off::st_Player::hero);
+        if (obj_is(h, "ent.Hero")) {
+            // The class, off the same field the inventory walk uses:
+            // ent.Unit.kind is the unit id, and on a hero that is the class.
+            // Read before the position and kept whatever the position does,
+            // because the two are separate absences - a hero that is here but
+            // whose coordinates did not come back still has a readable class,
+            // and pretending otherwise would blank a column for a reason that
+            // has nothing to do with it.
+            r.hero_kind = read_hx_string_u8(read_ptr(h, off::ent_Unit::kind));
+
+            if (read(h, off::ent_GameObject::posx, &r.x) &&
+                read(h, off::ent_GameObject::posy, &r.y) &&
+                read(h, off::ent_GameObject::posz, &r.z)) {
+                r.has_hero = true;
+                with_hero++;
+            }
+        }
+        // Clears whatever a partial coordinate read left behind - see above.
+        if (!r.has_hero) r.x = r.y = r.z = 0;
+
+        out->players.push_back(std::move(r));
+    }
+
+    // The gap between these two numbers is the whole diagnostic: it is how
+    // many rows this client can name but cannot place, and it is the first
+    // thing to look at when the page shows a screenful of dashes. Logged once
+    // on the first success, because this is polled.
+    static bool once = true;
+    if (once) {
+        once = false;
+        host_log("roster: %d players in st.GameLayer.players, %d with a hero "
+                 "(%d without - not replicated to us, not 'far'), %d removed, "
+                 "party of %d%s", (int)out->players.size(), with_hero,
+                 (int)out->players.size() - with_hero, skipped_removed,
+                 (int)out->group.size(), out->i_am_leader ? " (I lead)" : "");
+    }
+    if (clamped) {
+        static bool once_clamp = true;
+        if (once_clamp) {
+            once_clamp = false;
+            host_log("roster: players array reported more than %d entries - "
+                     "clamped, so this list is a prefix, not the whole array",
+                     kRosterMax);
+        }
+    }
+
     out->valid = true;
     return true;
 }

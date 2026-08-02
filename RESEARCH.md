@@ -206,32 +206,208 @@ files rather than from a wiki:
 
 ## Can a mod be driven by in-game commands?
 
-Short answer: it can be driven by *typing*, but not by the game's own command
-system, and the difference matters.
+Yes — by typing into the game's own chat box, and it costs the server nothing.
 
-The build ships two text surfaces, both fully mapped in
-`tools/out/hl_types.json`:
+**An earlier draft of this document said otherwise.** It claimed that a
+`/whatever` typed into the chat box "is still sent to the server as a chat
+message, so it is not free either". That was a guess, written before there was
+any way to read the game's code, and it was wrong. Disassembling one function
+settles it.
 
-| Class | What it is | Fields that matter |
-|---|---|---|
-| `h2d.Console` / `ui.Console` | Heaps' developer console, with the game's own commands registered into it | `commands : haxe.ds.StringMap` `+0xe0`, `tf : h2d.TextInput` `+0xc0`, `curCmd : String` `+0x108` |
-| `ui.hud.ChatBox` | The player-facing chat | `messageInput : ui.comp.InputBox` `+0x480`, `messages : ui.BaseElement` `+0x468` |
+### What the chat box does with a command
 
-`ui.Console`'s static fields name the dev commands still compiled in —
-`loadLevel`, `tpElement`, `lootDrops`, `physTree`, `highlightObject`,
-`allFxs`. Registering a command into that map, or pushing text into either
-input, means **writing to game memory and calling into the game** — which is
-the one thing this host does not do, and in the console's case it would also
-be a cheat surface. Reading the chat box's input as you type is possible
-read-only, but a `/whatever` typed there is still sent to the server as a chat
-message, so it is not free either.
+`ui.hud.ChatBox.processMessage`, at `src/ui/hud/ChatBox.hx:132`, dumped with
+[`tools/dis-hlcode.mjs`](tools/dis-hlcode.mjs) — `hlboot.dat` carries full
+debug info, so every instruction names its own source line:
 
-The route taken instead: the host already owns a `WndProc` subclass
-(`input.cpp`), so **it can own keys and text of its own** without the game
-being involved at all. That is what F8 already was; **F9** (drop a waypoint)
-and the Routes page's text field are the same mechanism. A full `/`-style
-command line for the host would be the next step on that same path, and would
-need nothing new from the game.
+1. trims what you typed (hx:132);
+2. if it does not already start with `!`, rewrites it as
+   `"!" + <the channel dropdown's selected value> + " " + text` (hx:133-134);
+3. splits on spaces and shifts the first token off (hx:136-137);
+4. compares that token against exactly four strings — `!group`, `!map`,
+   `!say`, `!to` (hx:140-157);
+5. and for anything else takes the default case at hx:165-166:
+
+```
+63  GetGlobal  5, 5212            = "Unknown chat command "
+64  Call2      5, 21, 5, 2        -> $String.__add__
+65  Call2      3, 12237, 0, 5     -> ui.hud.ChatBox.chatError
+66  Ret        3
+```
+
+The single call to `st.player.ChatClient.sendMessage` is at hx:169,
+instruction 180 — *past* that `Ret`, and reachable only from the four branches
+that matched.
+
+`chatError` (hx:177-178) is nine instructions long and does one thing:
+constructs a **bare `ui.hud.ChatBoxLine`** into the box's `messages` flow and
+sets its `msgText` in the `Chat_Error` colour. No send, no state.
+
+That looked like a read-back signal, and it is not one — see [the mechanism
+the chat mod uses](#the-mechanism-the-chat-mod-uses) below. On paper a real
+message is a `ui.hud.ChatBoxMessage`, which extends `ChatBoxLine`, so "is a
+line and is not a message" ought to be precisely a locally generated echo. In
+a live session the flow's children do not read back as either class.
+
+So **an unrecognised `!command` never leaves the machine.** No packet, no
+other player, no server. That is
+what makes a chat command surface possible for a host that only reads: the
+game discards the command by itself, so nothing has to be cancelled — and the
+host has no way to cancel a send in any case.
+
+Two details that follow from the same dump: `!to` with a name that matches no
+player in `st.GameLayer.players` also errors out and returns (hx:153-155), and
+`sendMessage` is additionally guarded on the remaining argument list being
+non-empty (hx:168).
+
+### The mechanism the chat mod uses
+
+`host/src/chat.cpp` takes `!!` as its prefix. Any unmatched `!x` would behave
+identically; `!!` is chosen because forgetting one `!` still leaves an
+unrecognised command, whereas forgetting the only `!` broadcasts what you
+typed on whatever channel the dropdown has selected.
+
+Reading the command back was designed around two signals, because neither
+looked sufficient on its own:
+
+- the echo carries only the first token (`"Unknown chat command " + cmd`), so
+  it cannot tell you what the arguments were;
+- polling `ChatBox.messageInput` alone races with Enter clearing the field,
+  and cannot distinguish a submit from an Escape.
+
+So the first version kept the last non-empty input and waited for *input went
+empty* **together with** *a new bare `ChatBoxLine` in the `messages` flow*.
+**The second signal is not available.** The first live run showed the flow's
+children reading back as `ui.UIElement` — not as `ChatBoxLine`, not as
+`ChatBoxMessage` — so that test never once passed and no command ever ran.
+
+It is not needed either, which is the more useful half. All the second signal
+bought was declining to act on a command the player cancelled, and every `!!`
+token is unmatched by `processMessage` and swallowed locally at hx:165
+whatever the host does. So the surface now buffers the input while it has text
+and runs the command when the input goes empty, gated only on the `!!` prefix.
+The worst an over-eager trigger can do is run a local read-only command
+somebody meant to abandon.
+
+Two consequences follow, and both are consequences of reading only:
+
+- **An abandoned command runs.** Escape empties the field exactly as Enter
+  does, and nothing distinguishes them.
+- **A half-typed command can run with the arguments it had at that moment.**
+  What is buffered is the last sample before the field empties, so a command
+  typed and submitted inside a single 100 ms poll can be caught mid-word.
+  Matching is on the first token, so `!!ignore Emsey` sampled as
+  `!!ignore Em` is a complete command with a truncated argument and does what
+  it says. The old design's half-typed command matched nothing; this one runs.
+
+Nothing available to a reader closes either window, so what the module does is
+count whether the text stood still for a whole poll interval before the box
+emptied — the difference between *they had stopped typing* and *no idea* — and
+announce the string it is about to act on whenever there is no such evidence.
+Closing the gap itself would mean writing to the game.
+
+Nothing above involves a write, a hook or a call into game code. The host also
+still owns a `WndProc` subclass (`input.cpp`), so it can own keys of its own —
+F8, F9, F10 and the Routes page's text field are that mechanism, and it
+remains the right one for anything that must work with the chat box closed.
+
+### The developer console, and why the mod stays out of it
+
+`ui.Console` extends Heaps' `h2d.Console`. What can be said about it factually:
+
+- **It opens on `/`.** `h2d.Console.onEvent` (h2d/Console.hx:245-246) matches
+  the text event's `charCode` against `shortKeyChar`, which the constructor
+  sets to `47` — `/`. It opens only when `bg.visible` is false **and**
+  `scene.getFocus()` is null, so a focused text field swallows the key. That
+  same `bg.visible` is what `h2d.Console.isActive` reads (h2d/Console.hx:297),
+  and it is what `reader_console_open()` reads to stay out of the way.
+- **It registers a lot.** `--grep 'ui\.Console\.'` lists **221 functions** —
+  a handful are plumbing (`addCommand`, `getMyPlayer`, `admin`), the rest are
+  a command each, and a great many of them are cheats: `gold`, `item`,
+  `level`, `levelUp`, `tp`, `tpAll`, `tpFoe`, `tpToBoss`, `killAll`,
+  `spawnMob`, `setHealth`, `clearInventory`, `clearCollection`,
+  `completeAllObjectives`, alongside the ordinary debug ones (`allFxs`,
+  `physTree`, `aiDebug`, `allocStats`).
+- **`ui.Console.admin` (src/ui/Console.hx:338)** takes a password, builds
+  `pw + "$*@" + pw + "-" + pw.length`, SHA-1s it with `haxe.crypto.Sha1` and
+  compares against a hash compiled into the build (a `Macros.hx` global, not
+  reproduced here). The literal sits **between** the two copies of the
+  password, not in front of them — instructions 10-20 of the dump are
+  `add(pw, "$*@")`, `add(that, pw)`, `add(that, "-")`, then
+  `add(that, itos(pw.length))`, and an earlier draft of this document had that
+  order wrong. It short-circuits if
+  `Config.prefs.admin`, `Main.hasAdminPermission` or `Main.isPrivilegeBranch`
+  is already true. On a match it sets `DevPrefs.admin` and calls
+  `st.Player.setAdmin`, which is a networked call on a `st.Player`; the debug
+  effects then route through `st.LayerDebugHelper` on `st.GameLayer`, which is
+  replicated state.
+
+**What cannot be determined from the client bytecode:** whether any of those
+commands does anything for a normal player. No client-side gate on command
+*dispatch* was found — the commands are registered unconditionally, and
+`admin` only guards the admin flag, not the command list. Whether the server
+honours `gold` or `tp` from an account that has not been granted admin is a
+server-side question, and the server's code is not in this download. Do not
+read the list above as a list of things that work.
+
+The mod deliberately does not use the console as its command surface, for
+three reasons and none of them is difficulty:
+
+1. **It is a cheat surface.** Typing into it, or registering into
+   `h2d.Console.commands`, would be writing to game memory and calling into
+   game code — the one thing this host does not do — and the things it would
+   be calling are `gold` and `tp`.
+2. **A command there is dispatched by the game.** The chat box's default case
+   is what makes the chat surface free; the console has the opposite
+   behaviour, and an unknown console command is the only outcome a read-only
+   host could produce there anyway.
+3. **It owns the `/` key.** The host reads `h2d.Console.bg.visible` purely so
+   that while the console is up it takes no click and no wheel anywhere.
+
+### The chat data, as it is actually shaped
+
+- `st.player.ChatClient.history` is **not replicated** — there is no
+  `__net_mark_history` beside it — and `localReceiveMessage`
+  (ChatClient.hx:25-29) stamps `localStamp` with `sys_time()` and does a bare
+  `push`. No trim, no ring buffer. The whole session is there in arrival
+  order, indices are stable, and tailing it is "read the length, decode what
+  is new". A history that got *shorter* is therefore not corruption: it is a
+  different `ChatClient`, which is what a relog or a character swap builds.
+- Each element is a Haxe **anonymous structure**, not a class instance:
+  `{ args:DYN, channel:st.Channel, localStamp:Null<F64>, localTextId:String,
+  notify:String, sender:ent.Unit, text:String }`. Field order in a structure
+  is not guaranteed, so they are matched by name via `read_virtual_fields`
+  rather than by offset — there is no generated offset for any of them.
+- `st.Channel` is a Haxe enum with six constructors, in this order:
+  `Local | All | AllSystem | Player(st.Player) | Group(st.Group) |
+  System(st.Player)`. A HashLink enum value stores its constructor index at
+  `+0x08`, which is all the host needs for the channel itself. The
+  constructors' *parameters* live past that at offsets that come from the
+  enum construct table, which `gen-offsets.mjs` does not emit — so the far end
+  of a whisper is read best-effort and validated by class name, and left empty
+  when it does not validate. `Group` is not attempted at all: `st.Group` has
+  no name among the generated offsets, only its player list.
+- A line the client generated for itself carries a `localTextId` instead of
+  drawn `text`. Resolving one needs the language table, which this host does
+  not read, so the id is shown as-is rather than a sentence being invented
+  for it.
+- **There is no ignore list in this build.**
+  `--grep '(ignore|mute|blocklist|blockPlayer)'` over all 47,342 functions
+  returns 26 matches. They are not all one thing — an earlier draft said they
+  were, and the honest breakdown is ten about collision or bounds
+  (`camIgnoreCollisions`, `canIgnoreCollisions`, `ignoreUnitCollisions`,
+  `h3d.scene.Object.get_ignoreBounds`/`ignoreCollide` and so on), three
+  `script.skills.Warrior_IgnorePain`, one FBX loader
+  (`BaseLibrary.ignoreMissingObject`), and **twelve that are none of those**:
+  `padIgnoreWindowFocus`, `ignoreMainTarget`, `ent.Entity.ignoreAttach`, two
+  `canIgnoreGravity`, two `set_ignoreScale`, two `ignoreParentTransform`,
+  `Skill.canIgnoreCd`, and two that matched `mute` inside
+  `sys.thread.Mutex`. Nothing in the 26 has anything to do with a player,
+  chat, or a social list, and `blocklist` and `blockPlayer` match nothing at
+  all. `ChatClient`'s 29 functions are
+  `sendMessage`, `receiveMessage`, `localReceiveMessage`, `poll` and the
+  hxbit serialisation machinery. Nothing anywhere hides a player's chat. That
+  is why the mod ships one of its own.
 
 ## Can fareverdb.com fill in missing locations?
 

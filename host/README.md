@@ -6,8 +6,9 @@ meter).
 
 **Status: running in-game.** The proxy loads, the D3D12 overlay draws, the
 reader reads, and the Collection Atlas, the navigator and the Recent Loots
-feed all run on it. The roadmap table at the bottom says which stage landed
-when. AuraForge is still a farever-minimap plugin.
+feed all run on it. The chat window is the exception: it is built and compiles
+but has never been run in game. The roadmap table at the bottom says which
+stage landed when. AuraForge is still a farever-minimap plugin.
 
 ## Why `dxgi.dll`
 
@@ -218,6 +219,7 @@ Two lessons worth keeping:
 | 4a | Navigator routes (`navigator.cpp`) + the Routes page (`routes.cpp`, `tools/gen-routes.mjs`) | **working in-game** — 69 routes, 1001 waypoints; the log has a route reached and cleared |
 | 4b | Recent Loots (`loot.cpp`) | **built** — draws, but nothing in the log proves a diff landed |
 | 4c | Waypoints from the game's map (`mapwatch.cpp`) | **working in-game** — a map click became a waypoint |
+| 4d | Chat window and the `!!` command surface (`chat.cpp`, `tools/dis-hlcode.mjs`) | **built, never run in game** — compiles clean against generated offsets; nothing of it has been seen live |
 | 5 | Packaging: `install.cmd`, `tools/package.mjs`, CI release | **built** — a release builds on a clean runner |
 
 Stage 3c replaced the original plan of porting the Lua plugins wholesale: the
@@ -233,6 +235,9 @@ colour with a rarity border (white/green/blue/purple/gold), missing ones
 dimmed. Hovering shows name, rarity, level (for levelled gear), the item's
 description and how to acquire it (crafts, loot tables, world bosses,
 vaults, merchants — inverted from the game's own CastleDB).
+
+Two of the tabs are lists rather than grids, because what they show is not a
+collection: **Mastery** (weapon mastery, below) and **Routes**.
 
 - **F8** toggles the window, **Escape** closes it
 - drag the title bar to move it; position, and the active tab, persist in
@@ -472,6 +477,155 @@ entirely, so logging back in never arrives as a wall of text.
 Names, icons and rarity colours come from the atlas's own database through
 `atlas_ui_lookup` - one copy of 1639 entries, not two.
 
+### Weapon mastery
+
+Farever levels every weapon separately, and levelling one is killing things
+with it. The game's own screen shows you the weapon in your hands, one level
+at a time. The **Mastery** page shows the whole track for every weapon the
+logged-in character can equip, as one bar with a notch per level — so how far
+along each weapon is, and how much of the whole thing is left, is one glance
+rather than a tour of the inventory.
+
+The save stores one number per weapon, and it is a kill count:
+
+```
+st.player.Progress
+  +0x0b0  weaponProgress -> hxbit.MapData
+            +0x028 map   -> haxe.ds.StringMap    key: the weapon's item id
+                              value: hxbit.ObjProxy_Oexp_Int  +0x14 exp
+```
+
+Everything else is derived, and the arithmetic is the game's own
+(`src/st/player/Progress.hx`, `src/const/HItem.hx`):
+
+```
+levels     = min(floor(kills / killsPerPoint), maxLevels)
+killsPerPoint = 20, or 26 for a weapon that fits the off-hand slot
+maxLevels  = upgradeable skills on the weapon x (WeaponSkill_MaxRank - 1)
+```
+
+An upgradeable skill is one of type `AttackCombo`, `WeaponSkill` or
+`WeaponPassive`; the rest of a weapon's skills — its basic attacks, its block
+— take no points. In this build that puts most weapons on an eight-level
+track, the starter weapons on four or six, and the shields on two or four at
+26 kills each. The butterfly net has no upgradeable skills at all, and the
+page says *no mastery track* rather than drawing an empty bar.
+
+Those are properties of the weapon rather than of the character, so they come
+out of the CastleDB at generation time — `tools/gen-atlas.mjs` writes them
+into the weapon's row as a `mastery:<levels>/<kills>` tag, reading the three
+constants by name so a patch that retunes them is a re-run. The reader is
+left with one map walk and no formula.
+
+**Which weapons a character can equip** is the same rule the game applies
+(`st.Item.checkAptitudes`): a weapon lists the aptitudes allowed to wield it,
+and each of the four player classes carries exactly one — Warrior=Fighter,
+Rogue=Assassin, Mage=Wizard, Priest=Cleric.
+
+The class itself is **`ent.Unit.kind` at `+0x258`, read straight off the
+Hero** — not `st.player.HeroData.kind`, which was the first attempt and came
+back empty in game. `ent.Unit.kind` is provably the unit's id in the unit
+sheet: `Unit.set_kind` uses that very string as the key into
+`Data.unit.byId` to resolve the unit's own row (`src/ent/Unit.hx:686`), and
+for a hero that row is the class. HeroData remains the fallback.
+
+It is checked against those four names and ignored otherwise: an
+unrecognised value means the read is wrong, not that there is a fifth class,
+and the page then lists every weapon and says why rather than filtering by a
+word it does not understand. Either way the log names what it got —
+`items: character class is Priest`, or the same line saying it is not one of
+the four — because a filter that silently does nothing is the one bug this
+page cannot afford.
+
+Per character, and never merged across them: the kills your Warrior made with
+a sword are not your Priest's. Only the logged-in character is in the process,
+so unlike ownership there is no offline half to this page.
+
+#### The bar on screen
+
+The weapon in your main hand gets its own bar over the world, where it stays
+with the atlas closed — the point being to watch a track fill while you
+fight, not to open a window to check it. There is nothing to choose:
+equipping a weapon is already the act of choosing it, and asking a second
+time would only be a way to get it wrong. Swap weapon and the bar follows;
+swap character and it follows that too, because it is reading the hand rather
+than a setting.
+
+**It disappears when there is nothing left to watch** — an empty hand, a
+weapon with no upgradeable skills, or a track already full. A bar sitting at
+100% forever tells you nothing you did not know the moment it filled.
+
+The weapon is the game's own `activeWeapon`, which is equipment slot 0.
+`ent.Hero.get_activeWeapon` is `get_weapon1`, that is
+`Equipment.getSlot("Slot_Weapon1")` (`src/ent/Hero.hx:64`), and `getSlot`
+indexes the equipment inventory by the slot's position in
+`DataCache.EQUIPMENT_SLOTS` (`src/st/Equipment.hx:159`) — which is the
+itemType sheet's `isSlot` rows in order, with `Slot_Weapon1` first. The live
+array confirms it: it is exactly 30 long, and the CastleDB has exactly 30
+`isSlot` rows.
+
+Deliberately **not** `ent.Hero.weaponInHand`, which is the weapon the *skill
+being cast* belongs to and only falls back to the active one
+(`src/ent/Hero.hx:1420-1422`). That is a truer answer to "what is swinging
+right now" and a worse one to "what am I wielding": it flips to the shield
+for the length of a shield skill, and a progress bar that swaps weapon
+mid-fight is noise.
+
+The bar is sized to sit alongside the game's own XP bar rather than next to
+it looking like a different game, and those numbers are the game's own:
+`UI/Style/style.css` in `res.light.pak` says `exp-bar { bar-width: 619;
+bar-height: 17 }`. Those are units in the UI scene, not pixels — the map
+diagnostics report `scene=2048x1152 frame=2560x1440`, so the scene is a fixed
+design size the game letterboxes onto the frame. The bar therefore scales by
+`min(width/2048, height/1152)` and comes out the same size as the game's on
+any monitor, instead of being right on one and wrong everywhere else.
+
+Dragging works only while the atlas window is open, which is the rule the
+waypoint pill already follows and for the same reason: over the world it must
+never eat a click. The border and panel that appear while it is movable are
+the cue that it can be. Only the position is remembered, under `[mastery]` in
+`farever-modkit.ini` — there is no longer anything else to remember.
+
+On the page itself, the equipped weapon carries the same left-edge accent
+stripe the Routes page gives the route being run, because it answers the same
+question: which of these is on screen right now.
+
+#### Knowing when you are actually in the world
+
+Anything the host draws over the world has to disappear at the main menu and
+behind a loading screen, and "can the hero be read" turned out not to answer
+that. Two separate things were wrong, and both affected the whole overlay —
+the atlas window and the waypoint pill as much as the mastery bar — but the
+bar is what made them visible, being the first thing meant to be on screen
+without opening anything.
+
+**The main menu.** `App.inst` becomes a `MenuApp` there, and
+`find_app_via_statics` returned null for that exactly as it did for a walk
+that failed. Null was read as "no news", so the previous session's `GameApp`
+stayed cached — and a dead HashLink object keeps answering to its class name
+until the collector reuses its block, so it went on yielding a hero. A live
+object that is not a `GameApp` is now reported as the answer it is, and the
+cached app and hero are dropped.
+
+**Loading screens.** These are a different question and are deliberately
+kept separate. The game settles it in one integer: `GameApp.get_isLoading` is
+literally `loadingState != 10` (`src/GameApp.hx:50`), so `GameApp.loadingState`
+at `+0xf8` is what `reader_is_loading` reads.
+
+It gates **drawing only**, in one place — `host_draw` steps the whole overlay
+aside for the frame and clears the input rectangles so nothing goes on
+swallowing clicks over a screen with no window on it. Nothing is unloaded and
+no state is dropped, because a zone load is not the character leaving: the
+collection, the route and the loot feed are all still true on the other side
+of it and are simply not drawn for a moment.
+
+Keeping those two apart matters more than it looks. The first attempt folded
+the loading check into "is a character in the world", which is what drops the
+ownership snapshot — so every zone change threw away the collection and
+rebuilt it for a character that had never gone anywhere. The question a
+loading screen answers is *should this be on screen*, and that is all it is
+allowed to decide.
+
 ### Runes
 
 A rune is a one-use, one-pickup item that permanently teaches one character an
@@ -607,6 +761,317 @@ writes `farever-atlas.tsv` (1639 entries across thirteen categories),
 the game's 256px portrait mips — no image decoding anywhere) and
 `farever-routes.txt`, and copies all three next to `Farever.exe`. Re-run both
 after a patch, along with `tools/update.mjs`.
+
+## Chat
+
+`chat.cpp` draws a chat window over the game's own message area, with the
+session's whole scrollback, timestamps, per-channel filters, an ignore list
+the game does not have, item links, and a command language typed into the
+game's own chat box.
+
+**Run in game once, and worth being exact about which parts that covers.**
+
+- **Seen working on screen:** the session's scrollback out of
+  `ChatClient.history`, the anonymous-structure decode, `st.Channel`
+  classification, whisper target resolution (*To Emsey: test whisper*), the
+  timestamps the game records and never shows, the channel filter chips, and
+  the window drawing over the game's own message area.
+- **Failed in that run, fixed since:** the ChatBox lookup, which searched
+  `ui.BaseUI.elements` — the box is not there, and the game's own route is
+  `gui.gameRoot.hud.chat`; and the message-area rectangle, which was part
+  guesswork because `h2d.Flow`'s `calculatedWidth`/`calculatedHeight` were
+  believed ungeneratable. They are generated and read now.
+- **Not yet confirmed working in game: the `!!` command surface.** It did not
+  fire in that session. The cause was found and fixed — see [The command
+  surface](#the-command-surface) — but no command has been seen to run.
+
+Read the rest of this section as a description of the code, and only the first
+bullet as a live observation.
+
+### Two surfaces, answering different questions
+
+```
+ent.Hero
+  player           -> st.Player
+    chatClient     -> st.player.ChatClient
+      history      -> hl.types.ArrayObj      the durable one
+
+GameApp.gui  (ui.GameUI extends ui.BaseUI)
+  gameRoot       -> ui.GameUiRoot
+    hud          -> ui.Hud
+      chat       -> ui.hud.ChatBox           the display; ephemeral
+        messages -> h2d.Flow                 absX/absY + calculatedW/H
+        messageInput -> ui.comp.InputBox -> input -> h2d.Text.text
+  s2d            -> h2d.Scene -> events -> currentFocus
+  console        -> h2d.Console -> bg -> visible
+```
+
+`ui.BaseUI.elements` is where the box looked like it should be and is not: it
+holds no `ui.hud.ChatBox` at all, so the first version of `find_chat_box`
+found nothing — which showed up only as the command surface silently never
+firing. The route above is the game's own (`ui.GameUI.get_hud`, GameUI.hx:33,
+is `gameRoot?.hud`), every hop is validated by class name, and the pointer is
+cached keyed on the `ui.GameUI` that owned it.
+
+`history` is **not replicated** — there is no `__net_mark_history` beside
+it — and `localReceiveMessage` (ChatClient.hx:25-29) does a bare `push` with
+no trim and no ring buffer. So the whole session is there in arrival order,
+indices are stable, and tailing it is "read the length, decode what is new".
+A history that got *shorter* is not corruption: it is a different
+`ChatClient`, which is what a relog or a character swap builds, and the module
+drops its index and its ring rather than skipping the next session's messages.
+
+`ui.hud.ChatBox` is read for the two things `history` cannot answer: where the
+game's own box is on screen, and what is being typed into it. A third was
+intended — whether the last line it drew was one the game generated
+locally — and does not work; see below.
+
+**History elements are anonymous structures, not class instances.** Each is
+`{ args, channel, localStamp, localTextId, notify, sender, text }`, read with
+`read_virtual_fields` and matched **by name** — a structure's field order is
+not guaranteed and there is no generated offset for any of them. Decoding
+always produces a message even when nothing reads, because a caller tailing
+by index cannot have lines silently dropped: an empty message says "this line
+was there and would not read", which is the truth, and keeps every later index
+right.
+
+**`st.Channel` is an enum, and only its index is safe.** A HashLink enum value
+carries its constructor index at a fixed place, which is all six channels need
+(`Local | All | AllSystem | Player | Group | System`). The *parameters* of
+`Player`/`Group`/`System` live at offsets that come from the enum construct
+table, which `gen-offsets.mjs` does not emit — so the far end of a whisper is
+a best-effort read validated by `obj_is(p, "st.Player")` and left **empty**
+when it does not validate. `Group` is not attempted at all: `st.Group` has no
+name field among the generated offsets, only its player list, so there is
+nothing to put there that would not be invented.
+
+A sender is named only when it is an `ent.Hero`. A null sender is a system
+line; any other `ent.Unit` has no name among the generated offsets, only its
+unit id, which is not what anybody is called — so those draw without a name
+rather than with a guess.
+
+### The command surface
+
+The mechanism is one `return` in the game's own code.
+`ui.hud.ChatBox.processMessage` (ChatBox.hx:132-171) trims what you typed,
+prefixes `"!" + <selected channel> + " "` when it does not start with `!`,
+splits on spaces and switches on the first token. Four match — `!say`, `!map`,
+`!group`, `!to` — and the default case at ChatBox.hx:165 is
+`chatError("Unknown chat command " + cmd); return;`. The single call to
+`ChatClient.sendMessage` is at ChatBox.hx:169, past that return.
+
+So an unrecognised `!command` draws one local line and never reaches the
+network, which is what lets a host that only reads own a command language. The
+disassembly is in
+[RESEARCH.md](../RESEARCH.md#can-a-mod-be-driven-by-in-game-commands); reproduce
+it with `node tools/dis-hlcode.mjs ChatBox.processMessage` rather than taking
+this paragraph's word for it.
+
+The prefix is `!!`. Any unmatched `!x` behaves identically; `!!` is harder to
+typo into a broadcast, because dropping one `!` still leaves an unknown
+command while dropping the only `!` sends what you typed on whatever channel
+the dropdown has selected. That remains the one real footgun here.
+
+**Reading it back was designed around two signals, and now uses one.** The
+echo carries only the first token (`"Unknown chat command " + cmd`), so it
+cannot say what the arguments were; polling the input box alone races with
+Enter clearing it and cannot tell a submit from an Escape. So the first
+version kept the last non-empty *focused* input and waited for the input going
+empty **together with** a new bare `ui.hud.ChatBoxLine` in the `messages`
+flow — `ChatBoxMessage` extends `ChatBoxLine`, so "is a line and is not a
+message" ought to be exactly a locally generated echo.
+
+**That second signal does not exist to read.** In the live run the flow's
+children came back as `ui.UIElement`, neither `ChatBoxLine` nor
+`ChatBoxMessage`, so the test never once passed and no command ever ran. It is
+also not needed, which is the more useful half: all it bought was declining to
+act on a cancelled command, and every `!!` token is unmatched by
+`processMessage` and swallowed locally at ChatBox.hx:165 whatever the host
+does. So `chat.cpp` now buffers the input while it has text and runs the
+command when the input goes empty, gated on nothing but the `!!` prefix. The
+worst an over-eager trigger can do is run a local read-only command somebody
+meant to abandon, which is a far better failure than a surface that does not
+work. `ChatBoxState::line_count` and `last_is_error` are still read and are no
+longer acted on.
+
+The gaps that follow, none of them closable without writing to the game:
+Escape empties the field exactly as Enter does, so an abandoned command runs;
+and what is buffered is the last sample before that, so a command typed and
+submitted inside one 100 ms poll can be caught mid-word. Matching is on the
+first token, so a truncated sample whose first token is a whole command name
+runs with truncated arguments — `!!ignore Emsey` seen as `!!ignore Em` ignores
+*Em*. Under the old echo-matching design a half-typed command matched nothing;
+under this one it runs, which is worse, and saying so is the point.
+
+What *is* available to a reader is whether the text stood still for a whole
+poll interval before the box emptied — *they had stopped typing* versus *no
+idea*. `poll_chatbox` counts that (`g_cmd_samples`) and passes it to
+`run_command`, which prints the string it is about to act on whenever there is
+no such evidence. Waiting two polls before arming would not help: a person
+types the rest and presses Enter well inside 200 ms, so it would refuse
+ordinary commands without proving the sample complete. Every command is local
+and read-only, and that plus the announcement is what makes this tolerable.
+
+The game's own echo, meanwhile, is drawn either way and the host cannot remove
+it. Aligned and at the default opacity it lands under the window and is
+covered; turn the opacity down and it shows through like everything else, and
+in free placement the window is wherever the player put it, so the echo may
+not be covered at all.
+
+Focus is read but **not** used to gate any of this: text only appears in that
+box because the player put it there, and the focus read is the most fragile on
+this path — it reports false when it cannot resolve, which would take the
+whole surface with it. What is buffered is only ever acted on if it starts
+with `!!`. The read itself is `scene.events.currentFocus == interactive`,
+which is what
+`h2d.Interactive.hasFocus()` computes (Interactive.hx:311). `h2d.Object` has
+no generated `scene` field, so the scene comes down from `GameApp.gui.s2d`
+instead and the comparison is the same one the game makes. `currentFocus` is
+declared as an interface, so it holds a vvirtual whose value is the object;
+both that and a directly stored object are accepted, and if neither shape
+resolves it reports **not focused** rather than guessing. That conservative
+answer is exactly why nothing depends on it.
+
+### Ten times a second, not twice
+
+The loot feed's half-second is too slow here, because this poll is also how a
+typed command is noticed, and a command that takes half a second to do
+anything reads as one that was swallowed — so the player types it again. The
+cost stays small because only the tail of the history that has not been
+decoded is ever read: the length is one integer, and "already up to date" is
+one cheap read rather than a re-decode. The first poll after a long load takes
+the backlog in slices of 400 so no single hold on the lock is long.
+
+The render thread keeps its own copy of the ring and tops it up incrementally,
+the way `routes.cpp` keeps `g_view`. A session's chat is thousands of strings
+and copying all of them under the lock every frame would be the most expensive
+thing the draw callback does. A wholesale drop of the ring bumps an epoch, so
+the incremental copy can tell "nothing new" from "everything you have belongs
+to a session that ended".
+
+### Placement
+
+Aligned is the default, and all four edges are the game's own.
+`ui.BaseElement` extends `h2d.Flow`, and a Flow records the box its layout
+settled on in `calculatedWidth`/`calculatedHeight`, so the `messages` flow
+gives its position from `h2d.Object.absX`/`absY` and its size from those two.
+That is what keeps the window on the message area and off the footer and the
+text field below it.
+
+An earlier version believed a Flow's size could not be generated. It derived
+the height from the gap between the messages' top and the footer's, left the
+width at 0, and the caller guessed it from the saved value or 560 — which was
+visibly the wrong size on screen. Adding the two fields to the WANT list was
+one read and the game's own number. The saved width survives only as the
+fallback for a `calculatedWidth` that reads as 0 or absurd, which means the
+read landed mid-layout or before the flow was ever laid out; no rectangle is
+better than a wrong one drawn over the game's own chat.
+
+Those bounds are in the UI scene's own units and the overlay draws in
+swap-chain pixels, so they are scaled by the frame size against
+`h2d.Scene.width/height` — the same conversion `reader_map_pick` does in the
+other direction. A miss keeps the last good rectangle rather than teleporting
+the window to the free placement and back on the next frame; a rectangle that
+never reads at all falls back to free placement and **says so** on the window,
+because a toggle that silently does nothing is worse than one that explains
+itself. That notice draws with the chip row, so it is only on screen while the
+atlas window is open — during play the fallback is silent.
+
+**It cannot hide the game's own chat box.** That would be a write, so the game
+goes on drawing its copy of every line underneath. The window is therefore
+**opaque by default** — `[chat] opacity`, `!!opacity <20-100>` — and that is a
+correctness matter rather than a preference: at anything below 100 each
+message is legible twice, in two sizes, which reads as the mod being broken.
+
+`ui.hud.ChatBox` carries a `minimizeButton` (icon *Cross*), whose handler is a
+closure rather than one of the class's eight named methods (`init`, `focus`,
+`unfocus`, `hasFocus`, `receiveMessage`, `reloadMessages`, `processMessage`,
+`chatError`). It is not a way round this — tried in game, the box does not
+stay hidden.
+
+Two things that would replace the game's box outright, both deliberately not
+built. Writing `0` to the box's own `visible` (`h2d.Object`, `+0x50`) would do
+it in one byte — recorded as weighed and rejected, because one write to a UI
+flag is still a write, and the read-only rule is what the safety argument and
+the front page's opening claim both rest on. Covering the whole box and
+mirroring the input from `messageInput.input.text` plus
+`h2d.TextInput.cursorIndex` would do it with no write at all — not built
+because it trades a cosmetic win for typing latency, a covered channel
+dropdown and no IME composition, and seeing the game's own input is fine.
+Enter still opens the game's input, typing
+still goes to the game, and sending is still the game sending.
+
+Free placement is dragged and resized only while the atlas window is open,
+which is the rule the navigator's pill and the loot feed already follow: over
+the world the host must never eat a click. The aligned rectangle is not
+draggable at all — it is where the game's box is. Clicks inside the window are
+claimed through **aux input rectangle 3** (0 is the navigator's pill, 1 the
+loot feed, 2 the atlas HUD panel; sharing one is silent, the module that draws
+last simply wins), and only while the atlas is open.
+
+The wheel is the one exception, and it has its own mechanism —
+`input_set_wheel_rect` in `input.*`, a single rectangle that claims the wheel
+and nothing else while the host's window is **shut**. Scrollback that only
+worked with a second window open would not be scrollback: reading what
+somebody said a minute ago is a thing you do mid-play. Clicks over the frame
+still reach the game's own chat box underneath; only the wheel is taken, and
+only while the atlas is not drawn over the frame.
+
+While the developer console is up the module takes no click and no wheel
+anywhere. The console is a password-gated admin surface that owns its own
+keys — `reader_console_open()` reads `h2d.Console.bg.visible`, which is what
+`h2d.Console.isActive` reads (Console.hx:297) — and the host has no business
+putting anything into it.
+
+### Files, all next to the game
+
+```
+farever-modkit.ini          [chat] - placement, size, filters, options
+farever-chat-ignore.txt     one name per line; '#' comments
+farever-chat-log.txt        the session log, when [chat] log = 1
+```
+
+The ignore list hides a sender in the window **and** keeps them out of the
+log — the point of ignoring someone is that they leave no trace. The channel
+filters deliberately do not apply to the log: they are a chip you click to
+quieten the window for a minute, and a log that silently stopped recording a
+channel would be worth less than no log, because the record is the thing you
+cannot get back. Hiding is applied when the window draws rather than when a
+line arrives, so `!!unignore` brings the backlog back with it.
+
+`!!clear` empties the *view*, not the history. The game's own history is the
+only copy of the session, and throwing it away to tidy a window would lose the
+thing worth keeping — `!!find` still searches all of it.
+
+Item links resolve through the atlas's own database (`atlas_ui_lookup`), which
+indexes by **item id**, matches exactly, and has no name search. `link_lookup`
+tries three exact lookups and stops at the first hit: the text as typed, the
+text with every non-alphanumeric character removed (`Copper Ore` →
+`CopperOre`), and that squashed form re-cased as CamelCase.
+
+That reaches a typed display name for **182 of the 1639** generated atlas
+entries — about one in nine. It holds for gathered materials, recipes and
+consumables, and for essentially nothing else: not one of the 428
+appearances, 64 mounts, 73 pets, 68 gliders or 37 weapons has an id a name
+derives, and only 7 of 252 creatures do. *Abyssal Shoulderplates* is
+`Shoulders_RManfish_FigAss`. An earlier version of this file said the ids
+*were* the display names with the spaces taken out; run the derivation over
+`farever-atlas.tsv` and it is false for about 89% of it. For the rest the id
+itself is what you type, and the atlas entry's detail panel prints it.
+
+One consequence: `cmd_link` copies `"[" + info.name + "]"`, so a link made
+from an id renders through the same three lookups and, outside that one in
+nine, will not resolve — it pastes as plain text with no icon even for another
+person running this mod.
+
+When no derivation resolves, `!!link` says that plainly — including that a
+DLL-only install has no `farever-atlas.tsv` and so will never match
+anything — rather than sending someone hunting for a typo that is not there.
+Chat is deliberately independent of the atlas otherwise: it is worth having on
+an install with no generated database, and the only thing a missing atlas
+costs is the icons on links.
+
+Every command and every ini key: **[docs/chat.md](../docs/chat.md)**.
 
 ## Build
 

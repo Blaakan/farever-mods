@@ -78,6 +78,17 @@ constexpr uint32_t vfield_name    = 0x00;
 constexpr uint32_t vfield_type    = 0x08;
 constexpr uint32_t vvirtual_value = 0x08;
 constexpr uint32_t vvirtual_data  = 24;
+
+// A venum is { hl_type *t; int index; ...params }: `index` says which
+// constructor this value is. It belongs here rather than in the generated
+// header because it is HashLink's own layout, not a Haxe class's - which
+// also means update.mjs's libhl.dll check is what guards it.
+//
+// The parameters after it deliberately have no constant. They are placed by
+// the type's own enum construct table, which the bytecode scanner does not
+// emit, so reading one means probing a candidate slot and validating what it
+// points at - never assuming a stride.
+constexpr uint32_t venum_index    = 0x08;
 }  // namespace hlrt
 
 // hl_bytes_map / hl_obj_map / hl_int_map - one native layout, sizeof 0x40.

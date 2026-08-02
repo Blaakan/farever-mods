@@ -43,6 +43,8 @@
 #include <share.h>   // _SH_DENYNO
 
 #include "atlas_ui.h"
+#include "chat.h"
+#include "players.h"
 #include "hl_reader.h"
 #include "hl_runtime.h"
 #include "dxgi_wrap.h"
@@ -187,12 +189,34 @@ volatile LONG g_stop = 0;
 // 30-second cycle and re-reads as soon as a character is in play.
 volatile LONG g_world_changed = 0;
 
+// True while a loading screen is up. Stamped by the pose thread, read by the
+// render thread - a flag rather than a read, because the draw callback never
+// walks game memory.
+volatile LONG g_loading = 0;
+
 // The host composes its modules' draw callbacks; each module stays unaware
 // of the others. The navigator draws first so the atlas window stacks above
 // its pill.
 void host_draw(float w, float h) {
+    // Behind a loading screen the whole overlay steps aside - and only that.
+    // Nothing is unloaded and no state is dropped: the character has not
+    // gone anywhere, so the collection, the route and the loot feed are all
+    // still true and are simply not drawn for a moment. Clearing the input
+    // rectangles is part of stepping aside; leaving them set would go on
+    // swallowing clicks over a screen that has no window on it.
+    if (InterlockedCompareExchange(&g_loading, 0, 0)) {
+        fmk::input_set_ui_rect(0, 0, 0, 0);
+        for (int i = 0; i < fmk::kAuxRects; i++)
+            fmk::input_set_aux_rect(i, 0, 0, 0, 0);
+        // The chat window's wheel claim goes with them: it is the one
+        // rectangle that survives the atlas being shut, so it is also the one
+        // that would go on eating the wheel over a loading screen.
+        fmk::input_set_wheel_rect(0, 0, 0, 0);
+        return;
+    }
     fmk::nav_draw(w, h);
     fmk::loot_draw(w, h);
+    fmk::chat_draw(w, h);
     fmk::atlas_ui_draw(w, h);
 }
 
@@ -205,6 +229,13 @@ void worker_sleep(int seconds) {
         fmk::nav_tick();
         fmk::routes_tick();
         fmk::loot_tick();
+        fmk::chat_tick();
+        // The player roster, on the same once-a-second beat. It is the only
+        // one of these that is a read rather than a persist, and it belongs
+        // here rather than on the render thread for the reason host_draw
+        // gives: the draw callback never walks game memory. Its own timer
+        // decides whether a second has been long enough.
+        fmk::players_poll();
         // Entering or leaving the world cuts the wait short, so stepping
         // into the world refreshes the atlas at once instead of showing
         // nothing until the cycle happens to come round.
@@ -232,6 +263,11 @@ DWORD WINAPI pose_worker(LPVOID) {
         // app for the rest of the session. Never with a scan: this runs at
         // 20Hz, and the cheap path is the only one that belongs here.
         fmk::reader_locate_app(false);
+
+        // Purely a drawing question, kept apart from the one below: a zone
+        // load is not the character leaving, so it must not invalidate
+        // anything the atlas has read.
+        InterlockedExchange(&g_loading, fmk::reader_is_loading() ? 1 : 0);
 
         double x = 0, y = 0, z = 0, rz = 0;
         const bool in_world = fmk::reader_read_hero_pose(&x, &y, &z, &rz);
@@ -281,6 +317,20 @@ DWORD WINAPI loot_worker(LPVOID) {
     while (!g_stop) {
         fmk::loot_poll(InterlockedCompareExchange(&g_in_world, 0, 0) != 0);
         Sleep(500);
+    }
+    return 0;
+}
+
+// Chat cannot ride the loot thread's half-second, because this poll is also
+// how a command typed into the game's own box is noticed - and a command that
+// takes half a second to do anything reads as one that was swallowed, so the
+// player types it again. Ten times a second is the difference between "it
+// ran" and "did that work?". The cost stays small because only the tail of
+// the history the module has not already decoded is ever read.
+DWORD WINAPI chat_worker(LPVOID) {
+    while (!g_stop) {
+        fmk::chat_poll(InterlockedCompareExchange(&g_in_world, 0, 0) != 0);
+        Sleep(100);
     }
     return 0;
 }
@@ -377,6 +427,8 @@ DWORD WINAPI worker(LPVOID) {
     fmk::routes_init();
     fmk::loot_init();
     fmk::mapwatch_init();
+    fmk::chat_init();
+    fmk::players_init();
     HANDLE pose = CreateThread(nullptr, 0, pose_worker, nullptr, 0, nullptr);
     if (pose) CloseHandle(pose);   // fire-and-forget; g_stop ends it
     // The loot feed needs its own cadence: twice a second is fast enough that
@@ -385,6 +437,12 @@ DWORD WINAPI worker(LPVOID) {
     // is that it does a handful of qword reads and never touches an array.
     HANDLE loot = CreateThread(nullptr, 0, loot_worker, nullptr, 0, nullptr);
     if (loot) CloseHandle(loot);
+    // Separate again rather than folded into the loot thread: the two want
+    // different cadences, and sharing one would mean either the loot diff
+    // running five times as often as it needs to or a command answering five
+    // times slower than it should.
+    HANDLE chat = CreateThread(nullptr, 0, chat_worker, nullptr, 0, nullptr);
+    if (chat) CloseHandle(chat);
 
     bool reported = false;
     bool overlay_tried = false;
@@ -521,6 +579,11 @@ DWORD WINAPI worker(LPVOID) {
                 fmk::CompletionState done;
                 fmk::reader_read_completion(&done);
 
+                // Weapon mastery: the kills this character has made with
+                // each weapon, which is what the game levels weapons by.
+                std::vector<fmk::WeaponMastery> mastery;
+                fmk::reader_read_weapon_mastery(&mastery);
+
                 // The one shape still unsettled: an NPC's per-quest goals.
                 // Off unless asked for. It dumps every NPC, activity and
                 // counter this character has - seventy-odd lines, a third of
@@ -532,7 +595,7 @@ DWORD WINAPI worker(LPVOID) {
 
                 // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
-                fmk::atlas_ui_update(c, inv, units, jobs, runes, done);
+                fmk::atlas_ui_update(c, inv, units, jobs, runes, done, mastery);
             } else {
                 log_line("collection: hero found but collection walk failed");
             }
