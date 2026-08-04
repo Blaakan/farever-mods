@@ -61,7 +61,7 @@ const WANT = [
   // resolves to: a message's `sender` is an ent.Unit, and for player chat
   // that unit is the speaker's Hero.
   ['ent.Hero', ['player', 'lockedTarget', 'autoTarget', 'weaponInHand',
-                'loadout', 'specialization', 'name']],
+                'loadout', 'specialization', 'name', '_level']],
   // Crafting. Jobs are per-character, and each carries the crafts that
   // character knows. The proxy class name is a hash of the anonymous
   // structure's shape, so a patch that changes a field of that struct

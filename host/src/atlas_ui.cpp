@@ -25,7 +25,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "paths.h"
 #include "atlas_ui.h"
+#include "dashboard.h"
 #include "input.h"
 #include "navigator.h"
 #include "overlay.h"
@@ -35,6 +37,32 @@
 namespace fmk {
 
 void host_log(const char* fmt, ...);
+
+bool game_is_french() {
+    static const bool french = [] {
+        HANDLE h = CreateFileW((game_dir() + L"options.ini").c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        char buf[65536] = {};
+        DWORD n = 0;
+        bool ok = ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+        CloseHandle(h);
+        if (!ok) return false;
+        std::string text(buf, n);
+        for (char& c : text) c = (char)tolower((unsigned char)c);
+        size_t pos = 0;
+        while ((pos = text.find("language", pos)) != std::string::npos) {
+            size_t end = text.find('\n', pos);
+            std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            if (line.find("fr") != std::string::npos) return true;
+            pos += 8;
+        }
+        return false;
+    }();
+    return french;
+}
+
 
 namespace {
 
@@ -256,6 +284,8 @@ void save_layout_dirty() { InterlockedExchange(&g_layout_dirty, 1); }
 // Written by the render thread, persisted by the worker in atlas_ui_tick.
 volatile LONG g_win_x = 140, g_win_y = 110;
 volatile LONG g_tab = 0;
+volatile LONG g_save_state = 0;  // 0 idle, 1 requested, 2 completed
+volatile LONG g_save_tick = 0;
 
 // Where the mastery bar sits. `kUnplaced` means "never moved", so the default
 // position can change with the screen instead of being frozen at whatever the
@@ -374,15 +404,7 @@ constexpr float kWinH = 660;
 
 // --- helpers ----------------------------------------------------------------
 
-std::wstring exe_dir() {
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return L"";
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return L"";
-    slash[1] = 0;
-    return path;
-}
+std::wstring exe_dir() { return data_dir(); }
 
 bool read_file(const std::wstring& path, std::string* out) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -1415,6 +1437,15 @@ void mastery_draw(const InputState& in, float x, float y, float w, float h,
 
 // --- worker-thread API ------------------------------------------------------
 
+bool atlas_ui_take_save_request() {
+    return InterlockedCompareExchange(&g_save_state, 0, 1) == 1;
+}
+
+void atlas_ui_mark_saved() {
+    InterlockedExchange(&g_save_tick, (LONG)GetTickCount());
+    InterlockedExchange(&g_save_state, 2);
+}
+
 bool atlas_ui_init() {
     if (!g_own_cs_init) {
         InitializeCriticalSection(&g_own_cs);
@@ -1452,7 +1483,8 @@ bool atlas_ui_init() {
 // the way inventories are - that is how the atlas can say "known by Emsei"
 // while you are playing someone else.
 void write_jobs_json(const std::vector<JobState>& jobs,
-                     const RuneState& runes, const std::string& character) {
+                     const RuneState& runes, const std::vector<WeaponMastery>& mastery,
+                     const std::string& character) {
     if ((jobs.empty() && runes.learned.empty()) || character.empty()) return;
     std::wstring path = exe_dir();
     if (path.empty()) return;
@@ -1480,6 +1512,14 @@ void write_jobs_json(const std::vector<JobState>& jobs,
     for (size_t i = 0; i < runes.learned.size(); i++) {
         if (i) out += ",";
         out += "\"" + runes.learned[i] + "\"";
+    }
+    out += "],\n  \"weaponMastery\":[";
+    for (size_t i = 0; i < mastery.size(); i++) {
+        char row[256];
+        _snprintf_s(row, sizeof(row), _TRUNCATE,
+                    "%s{\"weapon\":\"%s\",\"kills\":%d}",
+                    i ? "," : "", mastery[i].weapon.c_str(), mastery[i].kills);
+        out += row;
     }
     out += "]\n}\n";
 
@@ -1541,7 +1581,7 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<JobState>& jobs,
                      const RuneState& runes,
                      const CompletionState& done,
-                     const std::vector<WeaponMastery>& mastery) {
+                     const std::vector<WeaponMastery>& mastery, bool save_to_disk) {
     if (!InterlockedCompareExchange(&g_loaded, 0, 0)) return;
 
     auto snap = std::make_shared<OwnSnap>();
@@ -1593,7 +1633,8 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
     // opened is still waiting for your Mage, so pooling them would hide
     // places that are genuinely still there.
     for (const auto& id : done.done) snap->done_sources.insert(id);
-    write_jobs_json(jobs, runes, snap->character);
+    if (save_to_disk)
+        write_jobs_json(jobs, runes, mastery, snap->character);
     {
         const std::string skip = sanitize_name(snap->character);
         std::wstring dir = exe_dir();
@@ -1781,11 +1822,14 @@ void atlas_ui_draw(float screen_w, float screen_h) {
 
     float wx = (float)(LONG)InterlockedCompareExchange(&g_win_x, 0, 0);
     float wy = (float)(LONG)InterlockedCompareExchange(&g_win_y, 0, 0);
+    const float save_x = wx + 170, save_y = wy + 4, save_w = 154, save_h = 24;
 
     // Dragging: a press on the title bar picks the window up; releasing the
     // button anywhere drops it.
     if (clicked && in.click_x >= wx && in.click_x < wx + win_w - 36 &&
-        in.click_y >= wy && in.click_y < wy + kTitleH) {
+        in.click_y >= wy && in.click_y < wy + kTitleH &&
+        !(in.click_x >= save_x && in.click_x < save_x + save_w &&
+          in.click_y >= save_y && in.click_y < save_y + save_h)) {
         g_dragging = true;
         g_drag_dx = in.click_x - wx;
         g_drag_dy = in.click_y - wy;
@@ -1815,6 +1859,46 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     draw_rect(wx, wy, win_w, kTitleH, kBgTitle);
     draw_rect_outline(wx, wy, win_w, win_h, 1.5f, kEdge);
     draw_text(wx + kPad, wy + 8, 16, kText, "Collection Atlas");
+
+    LONG save_state = InterlockedCompareExchange(&g_save_state, 0, 0);
+    if (save_state == 2 && GetTickCount() -
+            (DWORD)InterlockedCompareExchange(&g_save_tick, 0, 0) > 2500) {
+        InterlockedCompareExchange(&g_save_state, 0, 2);
+        save_state = 0;
+    }
+    const bool save_hot = in.mouse_x >= save_x && in.mouse_x < save_x + save_w &&
+                          in.mouse_y >= save_y && in.mouse_y < save_y + save_h;
+    const bool data_dirty = dashboard_has_changes();
+    const Color save_fill = save_state == 2
+        ? Color{0.16f, 0.42f, 0.24f, 1.0f}
+        : data_dirty
+            ? (save_hot ? Color{0.68f, 0.38f, 0.10f, 1.0f} : Color{0.52f, 0.30f, 0.10f, 1.0f})
+            : (save_hot ? Color{0.28f, 0.38f, 0.52f, 1.0f} : Color{0.17f, 0.25f, 0.38f, 1.0f});
+    draw_rect(save_x, save_y, save_w, save_h, save_fill);
+    draw_rect_outline(save_x, save_y, save_w, save_h, 1,
+                      save_state == 2 ? Color{0.40f, 0.78f, 0.48f, 1.0f}
+                                      : data_dirty ? Color{0.95f, 0.62f, 0.20f, 1.0f}
+                                      : kEdge);
+    const bool french = game_is_french();
+    std::string save_label;
+    if (save_state == 1) {
+        save_label = french ? "En cours..." : "Saving...";
+    } else if (save_state == 2) {
+        save_label = french ? "A jour !" : "Saved";
+    } else {
+        save_label = french ? "Sauvegarder" : "Save all";
+        if (own && !own->character.empty()) {
+            save_label += " ";
+            save_label += own->character;
+        }
+    }
+    const std::string save_shown = fit_text(save_label, 12, save_w - 12);
+    const float save_text_w = measure_text(12, save_shown.c_str());
+    draw_text(save_x + (save_w - save_text_w) * 0.5f, save_y + 5, 12,
+              save_state == 2 ? Color{0.85f, 1.0f, 0.88f, 1.0f} : kText,
+              save_shown.c_str());
+    if (clicked && save_hot && save_state != 1)
+        InterlockedExchange(&g_save_state, 1);
 
     if (own && !own->character.empty()) {
         // The name comes out of game memory - truncate, never abort.

@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "paths.h"
 #include "input.h"
 #include "navigator.h"
 #include "overlay.h"
@@ -335,14 +336,8 @@ void nav_init() {
         InitializeCriticalSection(&g_cs);
         g_cs_init = true;
     }
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    g_ini_path = std::wstring(path) + L"farever-modkit.ini";
-    g_state_path = std::wstring(path) + L"farever-nav-state.txt";
+    g_ini_path = data_dir() + L"farever-modkit.ini";
+    g_state_path = data_dir() + L"farever-nav-state.txt";
 
     g_nav_x = GetPrivateProfileIntW(L"navigator", L"x", kUnplaced,
                                     g_ini_path.c_str());

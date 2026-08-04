@@ -1,0 +1,27 @@
+/* Farever Modkit - original dark theme, kept as an alternative. */
+:root {
+  color-scheme: dark;
+  --bg: #0b1014;
+  --card: #151d23;
+  --line: #2c3a42;
+  --gold: #e5bb68;
+  --hero: #e5bb68;
+  --blue: #6ca8e8;
+  --green: #70ca83;
+  --ink: #edf1ed;
+  --muted: #9eaca9;
+}
+body {
+  background: radial-gradient(circle at 80% -10%, #334029 0, transparent 31%), var(--bg);
+  color: var(--ink);
+}
+.card, details { background: linear-gradient(145deg, #182127, #11181d); border-color: var(--line); box-shadow: none; }
+select, input, .load, button, .button, nav a { background: #10171c; border-color: var(--line); color: var(--ink); }
+button.active, .button.primary { background: var(--hero); border-color: var(--hero); color: #0c1012; }
+.item h3, h3 { color: var(--ink); }
+.item p, .sub, .lead, .muted { color: var(--muted); }
+.badge, .tag { background: #27343c; color: #cbd6d1; }
+code { background: #202b31; color: #d5e0db; }
+pre { background: #0c1317; color: #d5e0db; border-color: var(--line); }
+.callout { background: #191c19; }
+.item-icon { border-color: var(--line); box-shadow: none; }

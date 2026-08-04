@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "paths.h"
 #include "overlay.h"
 #include "routes.h"
 
@@ -328,13 +329,7 @@ void routes_init() {
         InitializeCriticalSection(&g_cs);
         g_cs_init = true;
     }
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    g_dir = path;
+    g_dir = data_dir();
 
     std::vector<Route> loaded;
     std::string text;

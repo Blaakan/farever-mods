@@ -54,6 +54,7 @@ struct Inventories {
     std::vector<Item> equipped;
     std::vector<Item> bags;
     std::string character;
+    std::string steam_account_id;
     // The character's class, as the game's own unit id: Warrior, Rogue, Mage
     // or Priest. Empty when it does not read back as one of those, because
     // the only thing it is used for - deciding which weapons this character
@@ -62,6 +63,8 @@ struct Inventories {
     // The item id of the weapon in the main hand, or empty for an empty hand.
     // This is the game's own `activeWeapon`: equipment slot 0.
     std::string active_weapon;
+    int32_t character_level = 0;
+    int32_t experience = 0;
     int32_t bank_slots = 0;
 };
 
@@ -408,6 +411,7 @@ struct RosterPlayer {
     // gain from replacing a real read with a blank, and everything to lose
     // from rounding it to the nearest class we do know.
     std::string hero_kind;
+    int32_t level = 0;
 };
 
 struct RosterState {

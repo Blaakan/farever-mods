@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "paths.h"
 #include "hl_reader.h"
 #include "navigator.h"
 #include "overlay.h"
@@ -47,6 +48,14 @@ CRITICAL_SECTION g_cs;
 volatile LONG g_state = 0;
 
 bool ready() { return InterlockedCompareExchange(&g_state, 0, 0) == 2; }
+
+Color class_dot_color(const std::string& cls) {
+    if (cls == "Warrior") return {0.86f, 0.35f, 0.30f, 1.0f};
+    if (cls == "Rogue") return {0.34f, 0.39f, 0.51f, 1.0f};
+    if (cls == "Mage") return {0.26f, 0.68f, 0.76f, 1.0f};
+    if (cls == "Priest") return {0.82f, 0.68f, 0.62f, 1.0f};
+    return {0.55f, 0.58f, 0.65f, 1.0f};
+}
 
 struct Lock {
     Lock() { EnterCriticalSection(&g_cs); }
@@ -72,6 +81,7 @@ struct Row {
     // replicated has no class to read, and the column stays blank rather than
     // inventing a default.
     std::string cls;
+    int level = 0;
 };
 
 struct View {
@@ -217,13 +227,7 @@ void apply_sort(std::vector<Row>& rows, LONG key, bool rev) {
 // - the same file and the same mechanism chat.cpp uses, because a second
 // settings file for one integer would be a second thing to explain.
 void load_settings() {
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    g_ini_path = std::wstring(path) + L"farever-modkit.ini";
+    g_ini_path = data_dir() + L"farever-modkit.ini";
 
     const wchar_t* ini = g_ini_path.c_str();
     // Range-checked because this file is meant to be hand-editable: a key
@@ -532,6 +536,7 @@ void players_poll() {
             // an empty string means "no hero to read it off", and this page
             // draws that as an empty cell.
             r.cls = p.hero_kind;
+            r.level = p.level;
             r.x = p.x;
             r.y = p.y;
             r.z = p.z;
@@ -801,7 +806,9 @@ void players_draw(const InputState& in, bool clicked, float x, float y,
     // clip, so the class column is dropped outright below the width at which
     // it would land on top of the names rather than drawn across them.
     const float cx_dist_end = x + w - 130;   // distances are right-aligned here
+    const float cx_level = x + w - 390;
     const float cx_class = x + w - 300;
+    const bool show_level = cx_level > x + 150;
     const bool show_class = cx_class > x + 150;
 
     {
@@ -828,6 +835,8 @@ void players_draw(const InputState& in, bool clicked, float x, float y,
         if (header(in, clicked, x + 10, cy, 90, hdr_h, "Name",
                    key == kSortName, rev != 0, false))
             pick(kSortName);
+        if (show_level)
+            draw_text(cx_level, cy + 3, 11, kFaint, "Level");
         if (show_class && header(in, clicked, cx_class, cy, 80, hdr_h, "Class",
                                  key == kSortClass, rev != 0, false))
             pick(kSortClass);
@@ -857,7 +866,7 @@ void players_draw(const InputState& in, bool clicked, float x, float y,
     // Whole rows only, for the reason routes.cpp gives: the overlay cannot
     // clip, so a half-row at either end would paint over the notes above or
     // past the window's bottom edge.
-    const float row_h = 30;
+    const float row_h = 42;
     const int per_page = (int)(list_h / row_h);
     const int max_top = (int)v.rows.size() - per_page;
     const float max_scroll = max_top > 0 ? max_top * row_h : 0;
@@ -892,14 +901,23 @@ void players_draw(const InputState& in, bool clicked, float x, float y,
         if (followed)
             draw_rect_outline(x, ry, w, row_h - 2, 2.0f, kFollow);
 
-        draw_text(x + 10, ry + 2, 13, kName,
+        const float name_x = x + 16;
+        if (!r.cls.empty())
+            draw_rect(x + 7, ry + 7, 6, 6, class_dot_color(r.cls));
+        draw_text(name_x, ry + 2, 13, kName,
                   r.name.empty() ? "(name not readable)" : r.name.c_str());
 
         char sub[160];
         const char* tag = r.me ? "you" : (r.party ? "in your party" : "");
         _snprintf_s(sub, sizeof(sub), _TRUNCATE, "%s%suid %lld", tag,
                     tag[0] ? "  -  " : "", (long long)r.uid);
-        draw_text(x + 10, ry + 16, 11, r.me ? kDim : kFaint, sub);
+        draw_text(name_x, ry + 23, 11, r.me ? kDim : kFaint, sub);
+
+        if (show_level) {
+            char level[24];
+            _snprintf_s(level, sizeof(level), _TRUNCATE, "%d", r.level);
+            draw_text(cx_level, ry + 13, 12, kDim, r.level > 0 ? level : "-");
+        }
 
         // The class, and nothing at all when there is none. A player whose
         // hero has not been replicated here has no class to read, so the cell

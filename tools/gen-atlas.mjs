@@ -38,6 +38,7 @@ const OUT = join(HERE, 'out', 'atlas');
 
 const game = requireGame();
 const install = !process.argv.includes('--no-install');
+const modDir = join(game, 'mods', 'farever-mods');
 const argOf = (flag) => {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
@@ -1627,7 +1628,7 @@ function parseJsonFile(path) {
 }
 
 function verifyLive() {
-  const colPath = join(game, 'farever-collection.json');
+  const colPath = join(modDir, 'farever-collection.json');
   if (!existsSync(colPath)) return;
   const col = parseJsonFile(colPath);
   if (!col) return;
@@ -1639,9 +1640,9 @@ function verifyLive() {
       console.warn(`VERIFY: ${miss.length} live ${key} not in ${category}:`,
                    miss.slice(0, 5).join(', '));
   }
-  for (const f of readdirSync(game)) {
+  for (const f of readdirSync(modDir)) {
     if (!/^farever-inventory-.*\.json$/.test(f)) continue;
-    const inv = parseJsonFile(join(game, f));
+    const inv = parseJsonFile(join(modDir, f));
     if (!inv) continue;
     const all = [...inv.bank || [], ...inv.bankEquipment || [],
                  ...inv.equipped || [], ...inv.bags || []];
@@ -1657,12 +1658,13 @@ verifyLive();
 
 if (install) {
   try {
-    copyFileSync(join(OUT, 'farever-atlas.tsv'), join(game, 'farever-atlas.tsv'));
+    mkdirSync(modDir, { recursive: true });
+    copyFileSync(join(OUT, 'farever-atlas.tsv'), join(modDir, 'farever-atlas.tsv'));
     copyFileSync(join(OUT, 'farever-atlas-icons.dds'),
-                 join(game, 'farever-atlas-icons.dds'));
-    console.log(`installed both files next to ${join(game, 'Farever.exe')}`);
+                 join(modDir, 'farever-atlas-icons.dds'));
+    console.log(`installed both files in ${modDir}`);
   } catch (e) {
     console.error(`install failed (${e.message}) - copy the two files from ` +
-                  `${OUT} into ${game} yourself`);
+                  `${OUT} into ${modDir} yourself`);
   }
 }

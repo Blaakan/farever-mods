@@ -95,7 +95,7 @@ cl /nologo /LD /O2 /MT /W3 /EHa /std:c++17 ^
    src\dllmain.cpp src\hl_runtime.cpp src\hl_scan.cpp src\hl_reader.cpp ^
    src\dxgi_wrap.cpp src\overlay_d3d12.cpp src\input.cpp src\atlas_ui.cpp ^
    src\navigator.cpp src\routes.cpp src\loot.cpp src\mapwatch.cpp ^
-   src\chat.cpp src\players.cpp ^
+   src\chat.cpp src\players.cpp src\report.cpp src\paths.cpp src\dashboard.cpp ^
    /link /DEF:dxgi.def /OUT:build\dxgi.dll kernel32.lib advapi32.lib ^
    user32.lib gdi32.lib dxgi.lib d3d12.lib d3dcompiler.lib
 

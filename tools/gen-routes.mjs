@@ -250,8 +250,10 @@ if (kept.length > 8) console.log(`  ... and ${kept.length - 8} more`);
 
 if (install) {
   try {
-    copyFileSync(outPath, join(game, 'farever-routes.txt'));
-    console.log(`installed next to ${join(game, 'Farever.exe')}`);
+    const modDir = join(game, 'mods', 'farever-mods');
+    mkdirSync(modDir, { recursive: true });
+    copyFileSync(outPath, join(modDir, 'farever-routes.txt'));
+    console.log(`installed in ${modDir}`);
   } catch (e) {
     console.error(`install failed (${e.message}) - copy ${outPath} into ` +
                   `${game} yourself`);

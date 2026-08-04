@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "paths.h"
 #include "atlas_ui.h"
 #include "hl_reader.h"
 #include "input.h"
@@ -146,13 +147,7 @@ void loot_init() {
         InitializeCriticalSection(&g_cs);
         g_cs_init = true;
     }
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    g_ini_path = std::wstring(path) + L"farever-modkit.ini";
+    g_ini_path = data_dir() + L"farever-modkit.ini";
     g_x = GetPrivateProfileIntW(L"loot", L"x", kUnplaced, g_ini_path.c_str());
     g_y = GetPrivateProfileIntW(L"loot", L"y", kUnplaced, g_ini_path.c_str());
     g_enabled = GetPrivateProfileIntW(L"loot", L"enabled", 1, g_ini_path.c_str())
