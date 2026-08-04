@@ -43,7 +43,9 @@ namespace {
 
 // --- font atlas geometry ----------------------------------------------------
 constexpr int kFirstChar = 32;
-constexpr int kLastChar  = 126;
+// Latin-1 covers English and the accented glyphs used by French. Strings are
+// UTF-8 everywhere else; draw_text decodes them to code points below.
+constexpr int kLastChar  = 255;
 constexpr int kNumChars  = kLastChar - kFirstChar + 1;
 constexpr int kGlyphCols = 16;
 constexpr int kGlyphRows = (kNumChars + kGlyphCols - 1) / kGlyphCols;
@@ -58,6 +60,24 @@ struct Glyph {
 };
 Glyph g_glyphs[kNumChars]{};
 
+
+uint32_t next_utf8(const char** cursor) {
+    const unsigned char* p = (const unsigned char*)*cursor;
+    if (!*p) return 0;
+    uint32_t cp = *p++;
+    if (cp < 0x80) { *cursor = (const char*)p; return cp; }
+    int extra = 0;
+    if ((cp & 0xE0) == 0xC0) { cp &= 0x1F; extra = 1; }
+    else if ((cp & 0xF0) == 0xE0) { cp &= 0x0F; extra = 2; }
+    else if ((cp & 0xF8) == 0xF0) { cp &= 0x07; extra = 3; }
+    else { *cursor = (const char*)p; return '?'; }
+    for (int i = 0; i < extra; i++) {
+        if ((p[i] & 0xC0) != 0x80) { *cursor = (const char*)p; return '?'; }
+        cp = (cp << 6) | (p[i] & 0x3F);
+    }
+    *cursor = (const char*)(p + extra);
+    return cp;
+}
 struct Vertex {
     float x, y;
     float u, v;      // u < 0 marks an untextured quad
@@ -625,8 +645,9 @@ void draw_text(float x, float y, float size, Color c, const char* text) {
     if (!text) return;
     const float scale = size / kFontPx;
     float pen = x;
-    for (const char* p = text; *p; ++p) {
-        unsigned char ch = (unsigned char)*p;
+    for (const char* p = text; *p;) {
+        uint32_t ch = next_utf8(&p);
+        if (ch > kLastChar) ch = '?';
         if (ch < kFirstChar || ch > kLastChar) { pen += size * 0.4f; continue; }
         const Glyph& gl = g_glyphs[ch - kFirstChar];
         push_quad(0, pen, y, kCell * scale, kCell * scale, gl.u0, gl.v0, gl.u1,
@@ -639,8 +660,9 @@ float measure_text(float size, const char* text) {
     if (!text) return 0;
     const float scale = size / kFontPx;
     float w = 0;
-    for (const char* p = text; *p; ++p) {
-        unsigned char ch = (unsigned char)*p;
+    for (const char* p = text; *p;) {
+        uint32_t ch = next_utf8(&p);
+        if (ch > kLastChar) ch = '?';
         if (ch < kFirstChar || ch > kLastChar) { w += size * 0.4f; continue; }
         w += g_glyphs[ch - kFirstChar].w * scale;
     }

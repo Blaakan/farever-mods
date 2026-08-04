@@ -401,6 +401,7 @@ bool verify_build() {
 
 DWORD WINAPI worker(LPVOID) {
     log_line("worker: started");
+    const DWORD worker_started = GetTickCount();
 
     // Let the game get through the earliest part of its own startup. This
     // used to be 20s, from when finding anything meant a memory sweep that
@@ -451,13 +452,14 @@ DWORD WINAPI worker(LPVOID) {
     bool app_found = false;
     int  app_tries = 0;
     while (!g_stop) {
-        // Install the render hook once the game has actually made a swap
-        // chain. Doing it from here keeps DllMain and the render thread clean.
-        // Install unconditionally: the hook is now placed on the shared
-        // vtables via throwaway objects, so it does not depend on having
-        // observed the game's swap chain first.
-        if (!overlay_tried) {
+        // The reader can start early, but the shared Present vtable must not
+        // be patched while a slower localised build is still in DX12Driver
+        // setup. Give graphics its own conservative delay; the probe objects
+        // still make the hook independent of observing the game's swap chain.
+        // Doing this here also keeps DllMain and the render thread clean.
+        if (!overlay_tried && GetTickCount() - worker_started >= 20000) {
             overlay_tried = true;
+            log_line("overlay: startup delay elapsed; installing hooks");
             fmk::overlay_set_draw(&host_draw);
             fmk::overlay_install();
         }
