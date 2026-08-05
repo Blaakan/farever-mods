@@ -1,0 +1,100 @@
+@font-face { font-family:'Platypi'; src:url('../fonts/Platypi-Regular.ttf') format('truetype'); font-weight:400; font-style:normal; font-display:swap; }
+@font-face { font-family:'Platypi'; src:url('../fonts/Platypi-SemiBold.ttf') format('truetype'); font-weight:600; font-style:normal; font-display:swap; }
+@font-face { font-family:'Platypi'; src:url('../fonts/Platypi-Bold.ttf') format('truetype'); font-weight:700; font-style:normal; font-display:swap; }/* Farever visual theme
+   Replace this file to change the appearance without modifying the HTML. */
+:root {
+  color-scheme: light;
+  --bg: #87cbe3;
+  --card: #ead8cb;
+  --line: #ae8b7e;
+  --gold: #e8bb51;
+  --hero: #e8bb51;
+  --blue: #4e86c5;
+  --green: #4c9d68;
+  --ink: #443330;
+  --muted: #705f5a;
+}
+
+body {
+  background:
+    radial-gradient(circle at 12% -5%, #d9f5f7bb, transparent 30%),
+    radial-gradient(circle at 88% 8%, #f3d689aa, transparent 28%),
+    linear-gradient(180deg, #7bc6e1 0%, #dce8d5 100%);
+  color: var(--ink);
+}
+
+.card, details {
+  background: linear-gradient(145deg, #f3e4d9, #e4cec2);
+  border-color: var(--line);
+  box-shadow: 0 5px 16px #55768133;
+}
+
+select, input, .load, button, .button, nav a {
+  background: #b3978d;
+  border-color: #96786e;
+  color: #fff;
+  border-radius: 7px;
+  box-shadow: 0 2px 0 #8a6c6355;
+}
+
+button.active, .button.primary {
+  background: #f4d76e;
+  border-color: #d6ad46;
+  color: #49311f;
+}
+
+.item h3, h3 { color: #4a3028; }
+.item p, .sub, .lead, .muted { color: var(--muted); }
+.badge, .tag { background: #526875; color: #fff; }
+code { background: #d5c1b7; color: #49332c; }
+pre { background: #d9c7bc; color: #49332c; border-color: var(--line); }
+.callout { background: #f0dfd2; }
+.item-icon { border-color: #a88b7e; box-shadow: 0 2px 5px #6b514833; }
+/* Report layout */
+.report-footer {
+  max-width: 1180px;
+  margin: 28px auto 0;
+  padding: 16px 24px 30px;
+  color: #705f5a;
+  text-align: right;
+  border-top: 1px solid #ae8b7e;
+}
+.character-tags { display:flex; gap:8px; flex-wrap:wrap; }
+.character-tag { border-radius:999px; padding:8px 14px; cursor:pointer; }
+.character-tag.active { background:#f4d76e; border-color:#d6ad46; color:#49311f; }
+.tabs button small { display:inline-block; margin-left:4px; opacity:.75; font-size:11px; }
+.person-class { color:var(--class-color,#80542f); font-weight:700; }
+h1,h2 { color:#80542f !important; }
+.stat b { color:var(--class-color,#4e86c5) !important; }.character-tags { align-items:stretch; }
+.character-tag { display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-width:150px; text-align:left; background:#f3e4d9; color:#49332c; border:1px solid #ae8b7e; border-radius:8px; padding:10px 16px; box-shadow:0 3px 0 #8a6c6355; }
+.character-tag b { font:700 17px Georgia,serif; }
+.character-tag span { font-size:12px; color:#705f5a; }
+.character-tag.active { background:#f4d76e; color:#49311f; border-color:#d6ad46; }
+.character-tag.active span { color:#49311f; }
+.character-tag[data-class="Warrior"] { border-left:4px solid #dc5d55; }
+.character-tag[data-class="Rogue"] { border-left:4px solid #71c66b; }
+.character-tag[data-class="Mage"] { border-left:4px solid #658fe8; }
+.character-tag[data-class="Priest"] { border-left:4px solid #e4c15c; }
+.character-tag small { font-size:11px; color:#806c67; }
+header { padding-bottom:6px; }
+.toolbar { margin:8px 0; }
+main { padding-top:4px; }
+.tabs { margin-top:8px; }
+/* Rareté : ces règles viennent après le style générique des cartes. */
+.card.rarity-card-1 { border: 2px solid #4cae62; box-shadow: 0 0 14px #4cae6240; }
+.card.rarity-card-2 { border: 2px solid #428bd4; box-shadow: 0 0 14px #428bd440; }
+.card.rarity-card-3 { border: 2px solid #9857cf; box-shadow: 0 0 16px #9857cf45; }
+.card.rarity-card-4 { border: 2px solid #d99b32; box-shadow: 0 0 18px #d99b3248; }
+.card.rarity-card-1 h3 { color:#398d4d; }
+.card.rarity-card-2 h3 { color:#3478b9; }
+.card.rarity-card-3 h3 { color:#8246b5; }
+.card.rarity-card-4 h3 { color:#a8731f; }
+.report-page { background:linear-gradient(#ffffffd9,#ffffffd9), url('../assets/farever-hero.jpg') center center / cover fixed no-repeat; }
+#tabs { position:sticky; top:62px; z-index:900; padding:9px 0; margin:0 0 14px; background:#ffffffd9; backdrop-filter:blur(8px); border-bottom:1px solid #ae8b7e; }
+#tabs { background:transparent; backdrop-filter:none; border-bottom:0; }
+.card.rarity-card-1 .item-icon { background-color:#4cae6240; border-color:#4cae62; }
+.card.rarity-card-2 .item-icon { background-color:#428bd440; border-color:#428bd4; }
+.card.rarity-card-3 .item-icon { background-color:#9857cf40; border-color:#9857cf; }
+.card.rarity-card-4 .item-icon { background-color:#d99b3248; border-color:#d99b32; }
+body,.fmk-nav { font-family:'Platypi', system-ui, sans-serif; }
+h1,h2,h3,.fmk-nav__brand { font-family:'Platypi', Georgia, serif; }

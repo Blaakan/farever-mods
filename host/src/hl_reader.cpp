@@ -15,6 +15,7 @@
 // after a zone change degrades to "not found" instead of a wild read.
 // ---------------------------------------------------------------------------
 
+#include "paths.h"
 #include "hl_reader.h"
 #include "hl_runtime.h"
 #include "offsets.gen.h"
@@ -882,6 +883,14 @@ bool reader_read_inventories(Inventories* out) {
 
     // Character-scoped: only the logged-in character exists in this process.
     out->character = read_hx_string(read_ptr(player, off::st_Player::name));
+    out->steam_account_id = read_hx_string(read_ptr(player, off::st_Player::uid));
+    out->character_uuid = out->steam_account_id + "-" + out->character;
+    void* hero_data = read_ptr(player, off::st_Player::heroData);
+    out->character_level = read_i32(hero, off::ent_Hero::_level);
+    if (hero_data) {
+        if (out->character_level <= 0) out->character_level = read_i32(hero_data, off::st_player_HeroData::level);
+        out->experience = read_i32(hero_data, off::st_player_HeroData::exp);
+    }
 
     // The class, for the pages that ask what this character can equip.
     //
@@ -1040,8 +1049,9 @@ bool reader_read_loot_state(LootState* out) {
     if (!obj_is(player, "st.Player")) return false;
 
     void* hd = read_ptr(player, off::st_Player::heroData);
+    out->level = read_i32(hero, off::ent_Hero::_level);
     if (hd) {
-        out->level = read_i32(hd, off::st_player_HeroData::level);
+        if (out->level <= 0) out->level = read_i32(hd, off::st_player_HeroData::level);
         out->exp = read_i32(hd, off::st_player_HeroData::exp);
         // Uninitialised or mid-write values would read as a huge gain; a
         // level past a few hundred is not a level, it is a bad pointer.
@@ -1072,15 +1082,9 @@ bool reader_read_loot_state(LootState* out) {
 }
 
 void write_collection_json(const Collection& c) {
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    wcsncat_s(path, MAX_PATH, L"farever-collection.json", _TRUNCATE);
+    const std::wstring path = data_dir() + L"farever-collection.json";
 
-    FILE* f = _wfsopen(path, L"w", _SH_DENYNO);
+    FILE* f = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
     if (!f) return;
 
     auto list = [&](const char* name, const std::vector<std::string>& v, bool last) {
@@ -1104,13 +1108,9 @@ void write_collection_json(const Collection& c) {
     host_log("collection: wrote farever-collection.json");
 }
 
-void write_inventory_json(const Inventories& inv, const std::string& character) {
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
+void write_inventory_json(const Inventories& inv, const std::string& character,
+                          const std::string& character_uuid) {
+    std::wstring path = character_data_dir(inv.steam_account_id, character_uuid, character);
 
     // Character names come from the game; keep the filename to safe chars.
     std::string safe;
@@ -1119,11 +1119,14 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
     }
     if (safe.empty()) safe = "unknown";
     std::wstring wname(safe.begin(), safe.end());
-    wcsncat_s(path, MAX_PATH, L"farever-inventory-", _TRUNCATE);
-    wcsncat_s(path, MAX_PATH, wname.c_str(), _TRUNCATE);
-    wcsncat_s(path, MAX_PATH, L".json", _TRUNCATE);
+    std::string safe_uuid;
+    for (char c : character_uuid)
+        if (isalnum((unsigned char)c) || c == '_' || c == '-') safe_uuid.push_back(c);
+    if (safe_uuid.empty()) safe_uuid = "unknown";
+    path += L"farever-inventory-" + wname + L"-" +
+            std::wstring(safe_uuid.begin(), safe_uuid.end()) + L".json";
 
-    FILE* f = _wfsopen(path, L"w", _SH_DENYNO);
+    FILE* f = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
     if (!f) return;
 
     auto emit = [&](const char* name, const std::vector<Item>& v, bool last) {
@@ -1141,6 +1144,12 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
 
     fprintf(f, "{\n");
     fprintf(f, "  \"character\": \"%s\",\n", safe.c_str());
+    fprintf(f, "  \"characterUuid\": \"%s\",\n", safe_uuid.c_str());
+    fprintf(f, "  \"steamAccountId\": \"%s\",\n", inv.steam_account_id.c_str());
+    fprintf(f, "  \"heroClass\": \"%s\",\n", inv.hero_class.c_str());
+    fprintf(f, "  \"level\": %d,\n", inv.character_level);
+    fprintf(f, "  \"experience\": %d,\n", inv.experience);
+    fprintf(f, "  \"activeWeapon\": \"%s\",\n", inv.active_weapon.c_str());
     fprintf(f, "  \"bankSlots\": %d,\n", inv.bank_slots);
     emit("bank", inv.bank, false);
     emit("bankEquipment", inv.bank_equipment, false);
@@ -2313,6 +2322,11 @@ bool reader_read_roster(RosterState* out) {
             // and pretending otherwise would blank a column for a reason that
             // has nothing to do with it.
             r.hero_kind = read_hx_string_u8(read_ptr(h, off::ent_Unit::kind));
+            r.level = read_i32(h, off::ent_Hero::_level);
+            void* hero_data = read_ptr(p, off::st_Player::heroData);
+            if (hero_data && r.level <= 0)
+                r.level = read_i32(hero_data, off::st_player_HeroData::level);
+            if (r.level < 0 || r.level > 999) r.level = 0;
 
             if (read(h, off::ent_GameObject::posx, &r.x) &&
                 read(h, off::ent_GameObject::posy, &r.y) &&

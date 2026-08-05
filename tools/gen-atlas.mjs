@@ -38,6 +38,11 @@ const OUT = join(HERE, 'out', 'atlas');
 
 const game = requireGame();
 const install = !process.argv.includes('--no-install');
+const modDir = join(game, 'mods', 'farever-mods');
+const argOf = (flag) => {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
+};
 
 // Which archives are actually there, said once and up front. Three of the
 // four are optional in the sense that the run completes without them - and
@@ -77,6 +82,80 @@ const light = openPak(join(game, 'res.light.pak'));
 const cdb = JSON.parse(light.read('data.cdb').toString('utf8'));
 light.close();
 const sheet = (n) => cdb.sheets.find((s) => s.name === n);
+
+// English is embedded in data.cdb. Every other language is an XML overlay in
+// res.pak, keyed by the same sheet and row ids. Follow the game's own setting
+// unless --lang explicitly asks for one; keeping this here, before any maps
+// are built from the CDB, means every consumer below sees the same language.
+function configuredLanguage() {
+  const forced = argOf('--lang');
+  if (forced) return forced.trim();
+  try {
+    const ini = readFileSync(join(game, 'options.ini'), 'utf8');
+    const m = ini.match(/^\s*Language\s*=\s*["']?([^\s"']+)/mi);
+    if (m) return m[1];
+  } catch { /* a fresh install may not have written options.ini yet */ }
+  return 'en';
+}
+
+function xmlText(s) {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#([0-9]+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
+function setPath(row, path, value) {
+  const parts = path.split('.');
+  let dst = row;
+  for (let i = 0; i + 1 < parts.length; i++) {
+    if (!dst[parts[i]] || typeof dst[parts[i]] !== 'object') dst[parts[i]] = {};
+    dst = dst[parts[i]];
+  }
+  dst[parts.at(-1)] = value;
+}
+
+function applyTranslations(xml) {
+  const sheets = new Map(cdb.sheets.map((s) => [s.name, s]));
+  let translated = 0;
+  const sheetRe = /<sheet\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/sheet>/g;
+  for (const sm of xml.matchAll(sheetRe)) {
+    const target = sheets.get(xmlText(sm[1]));
+    if (!target || !Array.isArray(target.lines)) continue;
+    const rows = new Map(target.lines.map((r) => [String(r.id), r]));
+    const rowRe = /<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g;
+    for (const rm of sm[2].matchAll(rowRe)) {
+      const row = rows.get(xmlText(rm[1]));
+      if (!row) continue;
+      const fieldRe = /<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g;
+      for (const fm of rm[2].matchAll(fieldRe)) {
+        if (/<[A-Za-z_]/.test(fm[2])) continue;
+        setPath(row, fm[1], xmlText(fm[2]));
+        translated++;
+      }
+    }
+  }
+  return translated;
+}
+
+const language = configuredLanguage();
+if (language !== 'en') {
+  const respakForLang = openPak(join(game, 'res.pak'));
+  const langPath = `lang/export_${language}.xml`;
+  const langEntry = respakForLang.find(langPath);
+  if (!langEntry) {
+    respakForLang.close();
+    console.warn(`language: ${langPath} not found; using English`);
+  } else {
+    const count = applyTranslations(respakForLang.read(langEntry).toString('utf8'));
+    respakForLang.close();
+    console.log(`language: ${language} (${count.toLocaleString()} translated fields)`);
+  }
+} else {
+  console.log('language: en (CastleDB source text)');
+}
 
 const items = sheet('item').lines;
 const itemById = new Map(items.map((l) => [l.id, l]));
@@ -976,10 +1055,11 @@ function targetsFor(itemId, sold) {
 
 // --- text cleanup -----------------------------------------------------------
 
-// Descriptions carry markup: [GameTerm] links and ::var:: value refs. The
-// host's font atlas covers ASCII 32-126 only, so fold typographic characters
+// Descriptions carry markup: [GameTerm] links and ::var:: value refs.
+// Fold punctuation and ligatures that are outside the Latin-1 font atlas
 // down rather than render them as gaps.
 const ASCII_FOLD = {
+  '\u0153': 'oe', '\u0152': 'OE',
   '’': "'", '‘': "'", '“': '"', '”': '"',
   '–': '-', '—': '-', '…': '...', ' ': ' ',
 };
@@ -988,7 +1068,7 @@ function cleanText(s) {
   return s
     .replace(/::([^:]*)::/g, (_, v) => v.replace(/^ref_/, ''))
     .replace(/\[([^\]]*)\]/g, '$1')
-    .replace(/[^\x00-\x7f]/g, (c) => ASCII_FOLD[c] ?? '?')
+    .replace(/[^\x00-\xff]/g, (c) => ASCII_FOLD[c] ?? '?')
     .replace(/[\t\r\n]+/g, ' ')
     .trim();
 }
@@ -1548,7 +1628,7 @@ function parseJsonFile(path) {
 }
 
 function verifyLive() {
-  const colPath = join(game, 'farever-collection.json');
+  const colPath = join(modDir, 'farever-collection.json');
   if (!existsSync(colPath)) return;
   const col = parseJsonFile(colPath);
   if (!col) return;
@@ -1560,9 +1640,9 @@ function verifyLive() {
       console.warn(`VERIFY: ${miss.length} live ${key} not in ${category}:`,
                    miss.slice(0, 5).join(', '));
   }
-  for (const f of readdirSync(game)) {
+  for (const f of readdirSync(modDir)) {
     if (!/^farever-inventory-.*\.json$/.test(f)) continue;
-    const inv = parseJsonFile(join(game, f));
+    const inv = parseJsonFile(join(modDir, f));
     if (!inv) continue;
     const all = [...inv.bank || [], ...inv.bankEquipment || [],
                  ...inv.equipped || [], ...inv.bags || []];
@@ -1578,12 +1658,13 @@ verifyLive();
 
 if (install) {
   try {
-    copyFileSync(join(OUT, 'farever-atlas.tsv'), join(game, 'farever-atlas.tsv'));
+    mkdirSync(modDir, { recursive: true });
+    copyFileSync(join(OUT, 'farever-atlas.tsv'), join(modDir, 'farever-atlas.tsv'));
     copyFileSync(join(OUT, 'farever-atlas-icons.dds'),
-                 join(game, 'farever-atlas-icons.dds'));
-    console.log(`installed both files next to ${join(game, 'Farever.exe')}`);
+                 join(modDir, 'farever-atlas-icons.dds'));
+    console.log(`installed both files in ${modDir}`);
   } catch (e) {
     console.error(`install failed (${e.message}) - copy the two files from ` +
-                  `${OUT} into ${game} yourself`);
+                  `${OUT} into ${modDir} yourself`);
   }
 }

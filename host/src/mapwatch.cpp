@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "paths.h"
 #include "hl_reader.h"
 #include "input.h"
 #include "mapwatch.h"
@@ -74,13 +75,7 @@ bool same_place(const MapPin& a, const MapPin& b) {
 }  // namespace
 
 void mapwatch_init() {
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    const std::wstring ini = std::wstring(path) + L"farever-modkit.ini";
+    const std::wstring ini = data_dir() + L"farever-modkit.ini";
     const int v = GetPrivateProfileIntW(L"map", L"click", kClickAny, ini.c_str());
     g_click_mode = (v == kClickOff || v == kClickShift) ? v : kClickAny;
     g_mirror_pins = GetPrivateProfileIntW(L"map", L"pins", 1, ini.c_str()) != 0;

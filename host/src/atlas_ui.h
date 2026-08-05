@@ -40,7 +40,12 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
                      const std::vector<JobState>& jobs,
                      const RuneState& runes,
                      const CompletionState& done,
-                     const std::vector<WeaponMastery>& mastery);
+                     const std::vector<WeaponMastery>& mastery,
+                     bool save_to_disk);
+
+// Render thread requests a snapshot; the worker performs all disk writes.
+bool atlas_ui_take_save_request();
+void atlas_ui_mark_saved();
 
 // Pose thread: whether a character is actually in the world. Going false
 // (main menu, logout, character select) drops the ownership snapshot and

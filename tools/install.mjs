@@ -22,8 +22,8 @@
 // installed, and "installed and silent" is the worst outcome available.
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync, unlinkSync, openSync,
-         closeSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, openSync, closeSync,
+         mkdirSync, renameSync, copyFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -124,6 +124,7 @@ function dllIsWritable(target) {
 // --- uninstall --------------------------------------------------------------
 
 function uninstall(game) {
+  const modDir = join(game, 'mods', 'farever-mods');
   const target = join(game, 'dxgi.dll');
   if (!existsSync(target)) {
     say('dxgi.dll  not installed');
@@ -149,8 +150,8 @@ function uninstall(game) {
 
   const removed = [];
   const kept = [];
-  for (const f of [...GENERATED, ...RUNTIME, ...YOURS]) {
-    const p = join(game, f);
+  for (const f of [...GENERATED, ...RUNTIME, 'farever-report-data.js', ...YOURS]) {
+    const p = join(modDir, f);
     if (!existsSync(p)) continue;
     const mine = YOURS.includes(f);
     if (!PURGE) {
@@ -187,6 +188,8 @@ function uninstall(game) {
 // --- install ----------------------------------------------------------------
 
 function install(game) {
+  const modDir = join(game, 'mods', 'farever-mods');
+  mkdirSync(join(modDir, 'html', 'js'), { recursive: true });
   const dll = findDll();
   if (!dll) {
     say('FAIL  no dxgi.dll to install.');
@@ -265,6 +268,59 @@ function install(game) {
     return 1;
   }
 
+  // Move files created by older versions away from the game root. Exact
+  // farever-modkit names only: farever-mod.log belongs to another mod.
+  const legacy = [...GENERATED, ...RUNTIME, ...YOURS, 'farever-report-data.js', 'farever-report-data.js.tmp'];
+  for (const f of readdirSync(game))
+    if (/^farever-(inventory|jobs)-.*\.json$/.test(f)) legacy.push(f);
+  for (const f of [...new Set(legacy)]) {
+    const from = join(game, f), to = join(modDir, f);
+    if (!existsSync(from)) continue;
+    if (existsSync(to)) {
+      say(`keep    ${f} at root too (a destination file already exists)`);
+      continue;
+    }
+    renameSync(from, to);
+    say(`moved   ${f} -> mods\\farever-mods`);
+  }
+  const htmlSource = join(ROOT, 'html');
+  for (const page of ['index.html', 'farever-report.html']) {
+    const source = join(htmlSource, page);
+    if (existsSync(source)) copyFileSync(source, join(modDir, 'html', page));
+  }
+  const htmlHero = join(htmlSource, 'assets', 'farever-hero.jpg');
+  if (existsSync(htmlHero)) {
+    mkdirSync(join(modDir, 'html', 'assets'), { recursive: true });
+    copyFileSync(htmlHero, join(modDir, 'html', 'assets', 'farever-hero.jpg'));
+  }
+  const htmlCharacter = join(htmlSource, 'assets', 'guerrier_farever_esquive_alpha_v2.webp');
+  if (existsSync(htmlCharacter)) {
+    mkdirSync(join(modDir, 'html', 'assets'), { recursive: true });
+    copyFileSync(htmlCharacter, join(modDir, 'html', 'assets', 'guerrier_farever_esquive_alpha_v2.webp'));
+  }
+  const htmlAsset = join(htmlSource, 'assets', 'farever-atlas-icons.png');
+  if (existsSync(htmlAsset)) {
+    mkdirSync(join(modDir, 'html', 'assets'), { recursive: true });
+    copyFileSync(htmlAsset, join(modDir, 'html', 'assets', 'farever-atlas-icons.png'));
+  }
+  const navigationSource = join(htmlSource, 'js', 'navigation.js');
+  if (existsSync(navigationSource))
+    copyFileSync(navigationSource, join(modDir, 'html', 'js', 'navigation.js'));
+  for (const theme of ['theme-farever.css', 'theme-night.css']) {
+    const themeSource = join(htmlSource, 'css', theme);
+    if (existsSync(themeSource)) {
+      mkdirSync(join(modDir, 'html', 'css'), { recursive: true });
+      copyFileSync(themeSource, join(modDir, 'html', 'css', theme));
+    }
+  }
+  const fontDir = join(htmlSource, 'fonts');
+  if (existsSync(fontDir)) {
+    mkdirSync(join(modDir, 'html', 'fonts'), { recursive: true });
+    for (const font of readdirSync(fontDir)) {
+      const source = join(fontDir, font);
+      if (existsSync(source)) copyFileSync(source, join(modDir, 'html', 'fonts', font));
+    }
+  }
   // --- data files ---
   if (!NO_DATA) {
     for (const [script, what] of [['gen-atlas.mjs', 'the item database and icon atlas'],
@@ -320,8 +376,9 @@ function install(game) {
   say('');
   say('  * the atlas takes about twenty seconds after launch to find its');
   say('    way around, and fills in once a character is in the world');
-  say('  * farever-modkit.log, next to the game, narrates what it found -');
+  say('  * mods/farever-mods/farever-modkit.log narrates what it found -');
   say('    if something looks wrong, that file usually names the reason');
+  say('  * open mods/farever-mods/html/farever-report.html for the report');
   say('  * to remove it: node tools/install.mjs --uninstall, or just');
   say('    delete that one dxgi.dll');
   say('');

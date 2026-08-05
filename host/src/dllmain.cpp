@@ -42,8 +42,10 @@
 #include <stdio.h>
 #include <share.h>   // _SH_DENYNO
 
+#include "paths.h"
 #include "atlas_ui.h"
 #include "chat.h"
+#include "dashboard.h"
 #include "players.h"
 #include "hl_reader.h"
 #include "hl_runtime.h"
@@ -103,17 +105,8 @@ void log_line(const char* fmt, ...) {
 // Open the log next to the game executable, matching where the game and other
 // mods put theirs.
 void open_log() {
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    slash[1] = 0;
-    wcsncat_s(path, MAX_PATH, L"farever-modkit.log", _TRUNCATE);
-    // Shared read: the log is the only way to see what the reader is doing, so
-    // it must stay readable (tail, editors, tools/update.mjs) while the game
-    // runs. Plain _wfopen takes an exclusive lock and makes it unreadable.
-    g_log = _wfsopen(path, L"w", _SH_DENYNO);
+    const std::wstring path = fmk::data_dir() + L"farever-modkit.log";
+    g_log = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
 }
 
 // `[debug] probe = 1` in farever-modkit.ini. Read once: the reader's probes
@@ -123,14 +116,8 @@ bool probe_enabled() {
     static int cached = -1;
     if (cached >= 0) return cached != 0;
     cached = 0;
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return false;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return false;
-    slash[1] = 0;
-    wcsncat_s(path, MAX_PATH, L"farever-modkit.ini", _TRUNCATE);
-    cached = GetPrivateProfileIntW(L"debug", L"probe", 0, path) ? 1 : 0;
+    const std::wstring path = fmk::data_dir() + L"farever-modkit.ini";
+    cached = GetPrivateProfileIntW(L"debug", L"probe", 0, path.c_str()) ? 1 : 0;
     if (cached) log_line("debug: [debug] probe = 1 - dumping raw progress state");
     return cached != 0;
 }
@@ -401,6 +388,7 @@ bool verify_build() {
 
 DWORD WINAPI worker(LPVOID) {
     log_line("worker: started");
+    const DWORD worker_started = GetTickCount();
 
     // Let the game get through the earliest part of its own startup. This
     // used to be 20s, from when finding anything meant a memory sweep that
@@ -451,13 +439,14 @@ DWORD WINAPI worker(LPVOID) {
     bool app_found = false;
     int  app_tries = 0;
     while (!g_stop) {
-        // Install the render hook once the game has actually made a swap
-        // chain. Doing it from here keeps DllMain and the render thread clean.
-        // Install unconditionally: the hook is now placed on the shared
-        // vtables via throwaway objects, so it does not depend on having
-        // observed the game's swap chain first.
-        if (!overlay_tried) {
+        // The reader can start early, but the shared Present vtable must not
+        // be patched while a slower localised build is still in DX12Driver
+        // setup. Give graphics its own conservative delay; the probe objects
+        // still make the hook independent of observing the game's swap chain.
+        // Doing this here also keeps DllMain and the render thread clean.
+        if (!overlay_tried && GetTickCount() - worker_started >= 20000) {
             overlay_tried = true;
+            log_line("overlay: startup delay elapsed; installing hooks");
             fmk::overlay_set_draw(&host_draw);
             fmk::overlay_install();
         }
@@ -527,38 +516,13 @@ DWORD WINAPI worker(LPVOID) {
             fmk::Collection c;
             fmk::Inventories inv;
             if (fmk::reader_read_collection(&c) && c.valid) {
-                // Only speak when something actually changed. The collection
-                // is near-static, so re-dumping it every cycle is noise that
-                // buries the lines that matter.
-                static size_t prev_sig = 0;
-                size_t sig = c.mounts.size() * 1000003 + c.gliders.size() * 10007 +
-                             c.pets.size() * 101 + c.gears.size() * 7 +
-                             c.toys.size() + c.emotes.size() * 31;
-                if (sig != prev_sig) {
-                    prev_sig = sig;
-                    log_line("collection: mounts=%zu gliders=%zu pets=%zu "
-                             "gears=%zu toys=%zu emotes=%zu bankSlots=%d",
-                             c.mounts.size(), c.gliders.size(), c.pets.size(),
-                             c.gears.size(), c.toys.size(), c.emotes.size(),
-                             c.bank_slots);
-                    fmk::write_collection_json(c);
-                }
+                // Collection and inventory stay live in memory. Disk snapshots
+                // are created only by the explicit Save all button.
 
                 // Bank, bags and equipped gear: what "owned" means for
                 // weapons and trinkets. Written per character, since only the
                 // logged-in one is in this process.
-                if (fmk::reader_read_inventories(&inv) && inv.valid) {
-                    static std::string prev_who;
-                    static size_t prev_isig = 0;
-                    size_t isig = inv.bank.size() * 1000003 +
-                                  inv.bank_equipment.size() * 10007 +
-                                  inv.equipped.size() * 101 + inv.bags.size();
-                    if (isig != prev_isig || inv.character != prev_who) {
-                        prev_isig = isig;
-                        prev_who = inv.character;
-                        fmk::write_inventory_json(inv, inv.character);
-                    }
-                }
+                fmk::reader_read_inventories(&inv);
 
                 // The bestiary, read from the codex map. Failing here is not
                 // fatal to the rest: the creatures page simply shows nothing
@@ -595,7 +559,17 @@ DWORD WINAPI worker(LPVOID) {
 
                 // Hand the reads to the UI; it swaps in a fresh ownership
                 // snapshot for the render thread.
-                fmk::atlas_ui_update(c, inv, units, jobs, runes, done, mastery);
+                const bool save = fmk::dashboard_take_save_request();
+                fmk::atlas_ui_update(c, inv, units, jobs, runes, done, mastery,
+                                     save);
+                fmk::dashboard_observe(c, inv, jobs, runes, done, mastery);
+                if (save) {
+                    fmk::dashboard_save(c, inv, jobs, runes, done, mastery);
+                }
+                if (save) {
+                    fmk::dashboard_mark_saved();
+                    log_line("save: collection, inventory, jobs and report updated");
+                }
             } else {
                 log_line("collection: hero found but collection walk failed");
             }

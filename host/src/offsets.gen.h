@@ -24,6 +24,7 @@ namespace ent_Hero {
     constexpr uint32_t loadout = 0x4d0;  // OBJ : st.Loadout
     constexpr uint32_t specialization = 0x4c8;  // OBJ : st.player.HeroSpecialization
     constexpr uint32_t name = 0x500;  // OBJ : String
+    constexpr uint32_t _level = 0x3e0;  // I32 : inherited ent.Unit level
 }  // namespace ent_Hero
 
 // st.player.HeroSpecialization  (sizeof=192, extends st.DBBaseState)
@@ -198,6 +199,7 @@ namespace st_Player {
 
 // st.player.HeroData  (sizeof=360, extends st.DBState)
 namespace st_player_HeroData {
+    constexpr uint32_t __uid = 0x20;  // I64
     constexpr uint32_t SIZEOF = 360;
     constexpr uint32_t level = 0xb0;  // I32
     constexpr uint32_t exp = 0xb4;  // I32
