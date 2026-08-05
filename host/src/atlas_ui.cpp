@@ -14,6 +14,8 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
+#pragma comment(lib, "shell32.lib")
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -405,6 +407,10 @@ constexpr float kWinH = 660;
 // --- helpers ----------------------------------------------------------------
 
 std::wstring exe_dir() { return data_dir(); }
+void open_report_html() {
+    const std::wstring path = data_dir() + L"html\\farever-report.html";
+    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
 
 bool read_file(const std::wstring& path, std::string* out) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -1823,12 +1829,15 @@ void atlas_ui_draw(float screen_w, float screen_h) {
     float wx = (float)(LONG)InterlockedCompareExchange(&g_win_x, 0, 0);
     float wy = (float)(LONG)InterlockedCompareExchange(&g_win_y, 0, 0);
     const float save_x = wx + 170, save_y = wy + 4, save_w = 154, save_h = 24;
+    const float report_x = save_x + save_w + 6, report_w = 136;
 
     // Dragging: a press on the title bar picks the window up; releasing the
     // button anywhere drops it.
     if (clicked && in.click_x >= wx && in.click_x < wx + win_w - 36 &&
         in.click_y >= wy && in.click_y < wy + kTitleH &&
         !(in.click_x >= save_x && in.click_x < save_x + save_w &&
+          in.click_y >= save_y && in.click_y < save_y + save_h) &&
+        !(in.click_x >= report_x && in.click_x < report_x + report_w &&
           in.click_y >= save_y && in.click_y < save_y + save_h)) {
         g_dragging = true;
         g_drag_dx = in.click_x - wx;
@@ -1899,6 +1908,14 @@ void atlas_ui_draw(float screen_w, float screen_h) {
               save_shown.c_str());
     if (clicked && save_hot && save_state != 1)
         InterlockedExchange(&g_save_state, 1);
+    const bool report_hot = in.mouse_x >= report_x && in.mouse_x < report_x + report_w &&
+                              in.mouse_y >= save_y && in.mouse_y < save_y + save_h;
+    draw_rect(report_x, save_y, report_w, save_h, report_hot ? Color{0.28f, 0.38f, 0.52f, 1.0f} : Color{0.17f, 0.25f, 0.38f, 1.0f});
+    draw_rect_outline(report_x, save_y, report_w, save_h, 1, kEdge);
+    const char* report_label = french ? "Ouvrir le rapport" : "Open report";
+    const float report_text_w = measure_text(12, report_label);
+    draw_text(report_x + (report_w - report_text_w) * 0.5f, save_y + 5, 12, kText, report_label);
+    if (clicked && report_hot) open_report_html();
 
     if (own && !own->character.empty()) {
         // The name comes out of game memory - truncate, never abort.
