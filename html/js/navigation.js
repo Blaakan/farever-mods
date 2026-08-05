@@ -1,21 +1,34 @@
 (function () {
   'use strict';
 
-  function knownCharacters() {
+  function characterGroups() {
     const data = window.FAREVER_REPORT_DATA || {};
-    const names = [...(data.inventories || []), ...(data.jobs || [])]
-      .map((entry) => entry && entry.character).filter(Boolean);
-    return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'fr'));
+    const inventories = (data.inventories || []).filter(Boolean);
+    const all = [...inventories, ...(data.jobs || []).filter(Boolean)];
+    const byCharacter = new Map(inventories.map((entry) => [
+      entry.characterUuid || entry.character,
+      entry
+    ]));
+    const groups = new Map();
+    for (const entry of all) {
+      const character = entry.character || 'Personnage inconnu';
+      const key = entry.characterUuid || entry.steamAccountId || character;
+      const owner = byCharacter.get(key) || entry;
+      const account = owner.steamAccountId || owner.accountUuid || 'Compte inconnu';
+      if (!groups.has(account)) groups.set(account, new Map());
+      groups.get(account).set(key, character);
+    }
+    return [...groups].sort((a, b) => a[0].localeCompare(b[0], 'fr'));
   }
-
   function menus() {
-    const characters = knownCharacters();
+    const groups = characterGroups();
     return [
       { label: 'Accueil', href: 'index.html' },
-      { label: 'Hors-jeu', children: [
-        ['Tous les personnages', 'farever-report.html'],
-        ...characters.map((name) => [name, `farever-report.html?hero=${encodeURIComponent(name)}`])
-      ]}
+      { label: 'Personnages', children: groups.map(([account, characters]) => ({
+        label: account,
+        children: [...characters].sort((a, b) => a[1].localeCompare(b[1], 'fr'))
+          .map(([key, name]) => [name, `farever-report.html?hero=${encodeURIComponent(key)}`])
+      })) }
     ];
   }
 
@@ -32,7 +45,7 @@
     .fmk-nav a,.fmk-nav button{font:inherit}.fmk-nav__link,.fmk-nav__toggle{display:flex;align-items:center;gap:6px;border:0;background:transparent;color:#cbd6d1;text-decoration:none;padding:10px 11px;border-radius:8px;cursor:pointer}
     .fmk-nav__link:hover,.fmk-nav__toggle:hover,.fmk-nav__toggle[aria-expanded=true]{background:#1b272e;color:#fff}.fmk-nav__chevron{font-size:10px;color:#e7bd68}
     .fmk-nav__submenu{position:absolute;right:0;top:calc(100% + 7px);min-width:220px;margin:0;padding:7px;list-style:none;background:#111a20;border:1px solid #31434e;border-radius:11px;box-shadow:0 16px 38px #0008;display:none}
-    .fmk-nav__item.open>.fmk-nav__submenu{display:block}.fmk-nav__submenu a{display:block;color:#cbd6d1;text-decoration:none;padding:9px 10px;border-radius:7px}.fmk-nav__submenu a:hover,.fmk-nav__submenu a:focus{background:#24333c;color:#fff;outline:none}
+    .fmk-nav__item.open>.fmk-nav__submenu{display:block}.fmk-nav__account{padding:6px 4px;color:#e7bd68;font-weight:700;border-bottom:1px solid #31434e}.fmk-nav__characters{list-style:none;margin:3px 0 0;padding:0}.fmk-nav__characters a{font-weight:400;padding:6px 8px}.fmk-nav__submenu a{display:block;color:#cbd6d1;text-decoration:none;padding:9px 10px;border-radius:7px}.fmk-nav__submenu a:hover,.fmk-nav__submenu a:focus{background:#24333c;color:#fff;outline:none}
     .fmk-nav__burger{display:none;margin-left:auto;width:42px;height:40px;border:1px solid #31434e;border-radius:9px;background:#121c22;cursor:pointer;padding:9px}.fmk-nav__burger span{display:block;height:2px;background:#e7bd68;margin:4px 0;transition:.2s}
     @media(max-width:760px){.fmk-nav__inner{padding:0 16px}.fmk-nav__burger{display:block}.fmk-nav__menu{display:none;position:absolute;left:12px;right:12px;top:calc(100% + 7px);margin:0;padding:8px;align-items:stretch;flex-direction:column;background:#0f181e;border:1px solid #31434e;border-radius:12px;box-shadow:0 18px 42px #0009}.fmk-nav.menu-open .fmk-nav__menu{display:flex}.fmk-nav__link,.fmk-nav__toggle{width:100%;justify-content:space-between;padding:12px}.fmk-nav__submenu{position:static;min-width:0;margin:3px 0 5px;box-shadow:none;background:#0b1318}.fmk-nav__item.open>.fmk-nav__submenu{display:block}}
   `;
@@ -58,7 +71,15 @@
     const items = menus().map((entry, index) => {
       if (!entry.children) return `<div class="fmk-nav__item"><a class="fmk-nav__link" href="${entry.href}">${escapeHtml(entry.label)}</a></div>`;
       const id = `fmk-submenu-${index}`;
-      return `<div class="fmk-nav__item"><button class="fmk-nav__toggle" type="button" aria-expanded="false" aria-controls="${id}">${entry.label}<span class="fmk-nav__chevron">▼</span></button><ul class="fmk-nav__submenu" id="${id}">${entry.children.map(([label, href]) => `<li><a href="${href}">${escapeHtml(label)}</a></li>`).join('')}</ul></div>`;
+      const children = entry.children.map((child, childIndex) => {
+        if (Array.isArray(child)) {
+          const [label, href] = child;
+          return `<li><a href="${href}">${escapeHtml(label)}</a></li>`;
+        }
+        const childId = `${id}-group-${childIndex}`;
+        return `<li class="fmk-nav__account"><span>${escapeHtml(child.label)}</span><ul class="fmk-nav__characters">${child.children.map(([label, href]) => `<li><a href="${href}">${escapeHtml(label)}</a></li>`).join("")}</ul></li>`;
+      }).join("");
+      return `<div class="fmk-nav__item"><button class="fmk-nav__toggle" type="button" aria-expanded="false" aria-controls="${id}">${entry.label}<span class="fmk-nav__chevron">▼</span></button><ul class="fmk-nav__submenu" id="${id}">${children}</ul></div>`;
     }).join('');
     nav.innerHTML = `<div class="fmk-nav__inner"><a class="fmk-nav__brand" href="index.html"><span class="fmk-nav__logo" aria-hidden="true">FM</span><span>${options.title || 'Farever Modkit'}</span></a><button class="fmk-nav__burger" type="button" aria-label="Ouvrir le menu" aria-expanded="false"><span></span><span></span><span></span></button><div class="fmk-nav__menu">${items}</div></div>`;
     mount.replaceWith(nav);

@@ -54,6 +54,7 @@ struct Inventories {
     std::vector<Item> equipped;
     std::vector<Item> bags;
     std::string character;
+    std::string character_uuid;
     std::string steam_account_id;
     // The character's class, as the game's own unit id: Warrior, Rogue, Mage
     // or Priest. Empty when it does not read back as one of those, because
@@ -441,6 +442,7 @@ void write_collection_json(const Collection& c);
 // character: the account bank repeats in each, but bags and equipped gear are
 // character-scoped and offline characters are not in this process, so the
 // union across files is how "owned on any character" gets answered.
-void write_inventory_json(const Inventories& inv, const std::string& character);
+void write_inventory_json(const Inventories& inv, const std::string& character,
+                          const std::string& character_uuid);
 
 }  // namespace fmk

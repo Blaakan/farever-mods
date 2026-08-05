@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <functional>
 #include "paths.h"
 #include "report.h"
 namespace fmk {
@@ -12,7 +13,18 @@ namespace {
 struct File { std::wstring name; unsigned long long size, time; };
 std::wstring dir(){ return data_dir(); }
 bool info(const std::wstring&d,const std::wstring&n,File&f){WIN32_FILE_ATTRIBUTE_DATA a{};if(!GetFileAttributesExW((d+n).c_str(),GetFileExInfoStandard,&a))return false;f={n,((unsigned long long)a.nFileSizeHigh<<32)|a.nFileSizeLow,((unsigned long long)a.ftLastWriteTime.dwHighDateTime<<32)|a.ftLastWriteTime.dwLowDateTime};return true;}
-std::vector<File> find(const std::wstring&d,const wchar_t*g){std::vector<File>v;WIN32_FIND_DATAW x{};HANDLE h=FindFirstFileW((d+g).c_str(),&x);if(h!=INVALID_HANDLE_VALUE){do{File f;if(!(x.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&info(d,x.cFileName,f))v.push_back(f);}while(FindNextFileW(h,&x));FindClose(h);}std::sort(v.begin(),v.end(),[](const File&a,const File&b){return a.name<b.name;});return v;}
+std::vector<File> find(const std::wstring&d,const wchar_t*g){
+ std::vector<File> v;
+ std::function<void(const std::wstring&,const std::wstring&)> walk;
+ walk=[&](const std::wstring&base,const std::wstring&rel){
+  WIN32_FIND_DATAW x{}; HANDLE h=FindFirstFileW((base+g).c_str(),&x);
+  if(h!=INVALID_HANDLE_VALUE){do{if(!(x.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){File f;if(info(base,x.cFileName,f)){f.name=rel+x.cFileName;v.push_back(f);}}}while(FindNextFileW(h,&x));FindClose(h);}
+  h=FindFirstFileW((base+L"*").c_str(),&x);
+  if(h!=INVALID_HANDLE_VALUE){do{if((x.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&x.cFileName[0]!=L'.')walk(base+std::wstring(x.cFileName)+L"\\",rel+std::wstring(x.cFileName)+L"\\");}while(FindNextFileW(h,&x));FindClose(h);}
+ };
+ walk(d,L"");
+ std::sort(v.begin(),v.end(),[](const File&a,const File&b){return a.name<b.name;}); return v;
+}
 bool read(const std::wstring&p,std::string&s){HANDLE h=CreateFileW(p.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(h==INVALID_HANDLE_VALUE)return false;LARGE_INTEGER z{};bool ok=GetFileSizeEx(h,&z)&&z.QuadPart<=67108864;if(ok){s.resize((size_t)z.QuadPart);DWORD n=0;ok=s.empty()||(ReadFile(h,s.data(),(DWORD)s.size(),&n,nullptr)&&n==s.size());}CloseHandle(h);return ok;}
 void quote(std::string&o,const std::string&s){o+='"';for(unsigned char c:s){if(c=='\\')o+="\\\\";else if(c=='"')o+="\\\"";else if(c=='\r')o+="\\r";else if(c=='\n')o+="\\n";else if(c=='\t')o+="\\t";else o+=(char)c;}o+='"';}
 bool write(const std::wstring&p,const std::string&s){auto t=p+L".tmp";HANDLE h=CreateFileW(t.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,0,nullptr);if(h==INVALID_HANDLE_VALUE)return false;DWORD n=0;bool ok=WriteFile(h,s.data(),(DWORD)s.size(),&n,nullptr)&&n==s.size()&&FlushFileBuffers(h);CloseHandle(h);if(ok)ok=MoveFileExW(t.c_str(),p.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);if(!ok)DeleteFileW(t.c_str());return ok;}

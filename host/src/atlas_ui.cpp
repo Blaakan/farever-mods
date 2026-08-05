@@ -1484,15 +1484,15 @@ bool atlas_ui_init() {
 // while you are playing someone else.
 void write_jobs_json(const std::vector<JobState>& jobs,
                      const RuneState& runes, const std::vector<WeaponMastery>& mastery,
-                     const std::string& character) {
+                     const std::string& character, const std::string& character_uuid, const std::string& account_uuid) {
     if ((jobs.empty() && runes.learned.empty()) || character.empty()) return;
-    std::wstring path = exe_dir();
+    std::wstring path = character_data_dir(account_uuid, character_uuid, character);
     if (path.empty()) return;
     std::string safe = sanitize_name(character);
     if (safe.empty()) return;
     path += L"farever-jobs-" + std::wstring(safe.begin(), safe.end()) + L".json";
 
-    std::string out = "{\n  \"character\": \"" + safe + "\",\n  \"jobs\": [";
+    std::string out = "{\n  \"character\": \"" + safe + "\", \"characterUuid\": \"" + character_uuid + "\", \"jobs\": [";
     for (size_t i = 0; i < jobs.size(); i++) {
         char head[128];
         _snprintf_s(head, sizeof(head), _TRUNCATE,
@@ -1634,7 +1634,7 @@ void atlas_ui_update(const Collection& c, const Inventories& inv,
     // places that are genuinely still there.
     for (const auto& id : done.done) snap->done_sources.insert(id);
     if (save_to_disk)
-        write_jobs_json(jobs, runes, mastery, snap->character);
+        write_jobs_json(jobs, runes, mastery, snap->character, inv.character_uuid, inv.steam_account_id);
     {
         const std::string skip = sanitize_name(snap->character);
         std::wstring dir = exe_dir();

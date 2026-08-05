@@ -884,6 +884,7 @@ bool reader_read_inventories(Inventories* out) {
     // Character-scoped: only the logged-in character exists in this process.
     out->character = read_hx_string(read_ptr(player, off::st_Player::name));
     out->steam_account_id = read_hx_string(read_ptr(player, off::st_Player::uid));
+    out->character_uuid = out->steam_account_id + "-" + out->character;
     void* hero_data = read_ptr(player, off::st_Player::heroData);
     out->character_level = read_i32(hero, off::ent_Hero::_level);
     if (hero_data) {
@@ -1107,8 +1108,9 @@ void write_collection_json(const Collection& c) {
     host_log("collection: wrote farever-collection.json");
 }
 
-void write_inventory_json(const Inventories& inv, const std::string& character) {
-    std::wstring path = data_dir();
+void write_inventory_json(const Inventories& inv, const std::string& character,
+                          const std::string& character_uuid) {
+    std::wstring path = character_data_dir(inv.steam_account_id, character_uuid, character);
 
     // Character names come from the game; keep the filename to safe chars.
     std::string safe;
@@ -1117,7 +1119,12 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
     }
     if (safe.empty()) safe = "unknown";
     std::wstring wname(safe.begin(), safe.end());
-    path += L"farever-inventory-" + wname + L".json";
+    std::string safe_uuid;
+    for (char c : character_uuid)
+        if (isalnum((unsigned char)c) || c == '_' || c == '-') safe_uuid.push_back(c);
+    if (safe_uuid.empty()) safe_uuid = "unknown";
+    path += L"farever-inventory-" + wname + L"-" +
+            std::wstring(safe_uuid.begin(), safe_uuid.end()) + L".json";
 
     FILE* f = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
     if (!f) return;
@@ -1137,6 +1144,7 @@ void write_inventory_json(const Inventories& inv, const std::string& character) 
 
     fprintf(f, "{\n");
     fprintf(f, "  \"character\": \"%s\",\n", safe.c_str());
+    fprintf(f, "  \"characterUuid\": \"%s\",\n", safe_uuid.c_str());
     fprintf(f, "  \"steamAccountId\": \"%s\",\n", inv.steam_account_id.c_str());
     fprintf(f, "  \"heroClass\": \"%s\",\n", inv.hero_class.c_str());
     fprintf(f, "  \"level\": %d,\n", inv.character_level);

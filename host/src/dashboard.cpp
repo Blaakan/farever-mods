@@ -88,7 +88,7 @@ void dashboard_save(const Collection& collection, const Inventories& inventories
                     const CompletionState& completion,
                     const std::vector<WeaponMastery>& mastery) {
     write_collection_json(collection);
-    if (inventories.valid) write_inventory_json(inventories, inventories.character);
+    if (inventories.valid) write_inventory_json(inventories, inventories.character, inventories.character_uuid);
     report_refresh();
     const ULONGLONG current = signature(collection, inventories, jobs, runes, completion, mastery);
     InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&g_saved_signature), (LONG64)current);

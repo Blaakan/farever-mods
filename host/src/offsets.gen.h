@@ -199,6 +199,7 @@ namespace st_Player {
 
 // st.player.HeroData  (sizeof=360, extends st.DBState)
 namespace st_player_HeroData {
+    constexpr uint32_t __uid = 0x20;  // I64
     constexpr uint32_t SIZEOF = 360;
     constexpr uint32_t level = 0xb0;  // I32
     constexpr uint32_t exp = 0xb4;  // I32
